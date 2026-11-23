@@ -15,11 +15,13 @@ const { pipeline } = require('stream/promises');
 const BOT_NAME = "Status Clear By Danial";
 const MAX_QUEUE_SIZE = 25;
 
-const ADMIN_NUMBER = (process.env.ADMIN_NUMBER || '601154474066').replace(/\D/g, '');
+// Nombor Pentadbir Utama (Danial Full Access)
+const ADMIN_NUMBER = (process.env.ADMIN_NUMBER || '60194066718').replace(/\D/g, '');
 const ADMIN_IDENTIFIERS = [
     ADMIN_NUMBER,
     '60194066718',
     '0194066718',
+    '194066718',
     '68225740046362'
 ];
 
@@ -118,7 +120,7 @@ function generateReferralCode(rawName, existingUsers = {}) {
     let code = '';
     let attempts = 0;
     do {
-        const digits = Math.floor(100 + Math.random() * 900); // 100-999 (3 digit)
+        const digits = Math.floor(100 + Math.random() * 900);
         code = `${coreName}${digits}`;
         attempts++;
         if (attempts > 500) {
@@ -143,7 +145,7 @@ function loadUsers() {
             fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
         }
 
-        // Migrasi dari members.json lama jika data pengguna masih kosong
+        // Migrasi automatik ahli lama sekiranya ada
         if (Object.keys(data).length === 0) {
             const oldSource = fs.existsSync(LEGACY_MEMBERS_FILE) ? LEGACY_MEMBERS_FILE : (fs.existsSync(ROOT_MEMBERS_FILE) ? ROOT_MEMBERS_FILE : null);
             if (oldSource) {
@@ -167,7 +169,7 @@ function loadUsers() {
                         };
                     }
                     saveUsers(data);
-                    console.log(`[Migrasi Ahli] Berjaya memindahkan ${Object.keys(data).length} ahli ke dalam ./data/users.json.`);
+                    console.log(`[Migrasi Ahli] Berjaya menyelaraskan ${Object.keys(data).length} ahli ke dalam ./data/users.json.`);
                 } catch (e) {
                     console.error('Ralat migrasi members lama:', e);
                 }
@@ -248,7 +250,6 @@ function resolveBinaries() {
 
 const { ffmpegPath, ffprobePath } = resolveBinaries();
 
-// Semakan Sokongan Penapis zscale & cas FFmpeg
 let zscaleSupported = null;
 function checkZscaleSupport(binPath) {
     if (zscaleSupported !== null) return zscaleSupported;
@@ -334,9 +335,6 @@ class RobustVideoQueue {
 
 const videoQueue = new RobustVideoQueue(MAX_QUEUE_SIZE);
 
-/**
- * Pengekstrakan Durasi, Kadar Bingkai (FPS), dan Metadata Warna Sumber menggunakan ffprobe
- */
 function probeVideo(filePath, binPath) {
     return new Promise((resolve) => {
         const args = [
@@ -376,7 +374,6 @@ function probeVideo(filePath, binPath) {
                         }
                     }
 
-                    // Semakan Metadata Warna HDR (Dolby Vision, HLG, HDR10+)
                     const colorTransfer = (stream.color_transfer || '').toLowerCase();
                     const colorPrimaries = (stream.color_primaries || '').toLowerCase();
                     const colorSpace = (stream.color_space || '').toLowerCase();
@@ -398,19 +395,14 @@ function probeVideo(filePath, binPath) {
     });
 }
 
-/**
- * Enjin Transcode Video Gred 4K WhatsApp Status (CAS Sharpening, aq-mode 3, & Siling Bitrate 15.2MB)
- */
 function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetShortSide, sourceFps, isHDR) {
     return new Promise((resolve, reject) => {
         const isHighFps = sourceFps >= 48;
         const maxRate = Math.floor(vBitrate * 1.2);
         const bufSize = Math.floor(vBitrate * 2.4);
 
-        // Skala Lanczos Pintar Mengikut Orientasi (Portrait 9:16 vs Landscape 16:9)
         const scaleFilter = `scale='if(gt(iw,ih),-2,min(${targetShortSide},iw))':'if(gt(iw,ih),min(${targetShortSide},ih),-2)':flags=lanczos`;
 
-        // 1. Pemetaan Tona Warna HDR-ke-SDR (Hable Tone Mapping)
         let colorFilter = '';
         if (isHDR) {
             const hasZscale = checkZscaleSupport(binPath);
@@ -421,11 +413,9 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
             }
         }
 
-        // 2. Ketajaman CAS Video (Contrast Adaptive Sharpening)
         const hasCas = checkCasSupport(binPath);
         const casFilter = hasCas ? 'cas=strength=0.35' : 'unsharp=5:5:0.35:5:5:0.0';
 
-        // 3. Gabungkan Rangkaian Penapis Video (Tone Map -> Scale -> CAS -> Exact PTS)
         const filterParts = [];
         if (colorFilter) filterParts.push(colorFilter);
         filterParts.push(scaleFilter);
@@ -498,9 +488,6 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
     });
 }
 
-/**
- * Enjin Pemprosesan Imej QHD+ 2560px Anti-Compression WhatsApp Status (CAS Sharpening)
- */
 async function processUltraSharpImage(inputPath, outputPath, binPath) {
     const hasCas = checkCasSupport(binPath);
     const sharpFilter = hasCas ? 'cas=strength=0.45' : 'unsharp=5:5:0.45:5:5:0.0';
@@ -546,11 +533,10 @@ async function processUltraSharpImage(inputPath, outputPath, binPath) {
         });
     };
 
-    // Percubaan pertama: Kualiti optimum -q:v 2
     await executeEncode(2);
 
     let stats = fs.statSync(outputPath);
-    const MAX_SAFE_BYTES = 1.85 * 1024 * 1024; // Siling selamat 1.85 MB WhatsApp
+    const MAX_SAFE_BYTES = 1.85 * 1024 * 1024;
     let usedQ = 2;
 
     if (stats.size > MAX_SAFE_BYTES) {
@@ -609,10 +595,10 @@ async function startBot() {
         } else if (connection === 'open') {
             console.log('\n======================================================');
             console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
-            console.log(`Pentadbir Sistem: ${ADMIN_NUMBER}`);
+            console.log(`Pentadbir Utama (Full Access): ${ADMIN_NUMBER}`);
             console.log(`Enjin Video: 4K-Grade CAS Sharpening 60 FPS (15.2MB Max Bitrate & aq-mode 3)`);
             console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
-            console.log(`Sistem Langganan: ./data/users.json (NAME+3DIGIT Referral Aktif)`);
+            console.log(`Pangkalan Data: ./data/users.json (NAME+3DIGIT Referral Aktif)`);
             console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Media`);
             console.log('======================================================\n');
         }
@@ -657,7 +643,7 @@ async function startBot() {
                         try {
                             await sock.sendMessage(targetJid, {
                                 text:
-                                    `⚠️ PERINGATAN PEMBAHARUAN LANGGANAN (${BOT_NAME})\n\n` +
+                                    `⚠️ *PERINGATAN PEMBAHARUAN LANGGANAN (${BOT_NAME})*\n\n` +
                                     `Hai ${user.name}, tempoh langganan keahlian anda akan tamat pada *${expDateStr}* (kurang 3 hari lagi).\n\n` +
                                     `Untuk mengelakkan sebarang gangguan terhadap pemprosesan video 60 FPS & foto QHD+, sila perbaharui langganan anda:\n\n` +
                                     `${PACKAGE_TEMPLATE}\n\n` +
@@ -716,7 +702,6 @@ async function startBot() {
             const cleanPhone = normalizeIdentifier(remoteJid);
             let user = findUserRecord(users, remoteJid, altJid);
 
-            // Auto-pendaftaran pengguna baharu jika belum wujud
             if (!user && cleanPhone) {
                 const pushName = msg.pushName || 'Pengguna';
                 const refCode = generateReferralCode(pushName, users);
@@ -742,44 +727,50 @@ async function startBot() {
 
             const textContent = (inner.conversation || inner.extendedTextMessage?.text || '').trim();
             const textParts = textContent.split(/\s+/);
-            const command = textParts[0].toLowerCase();
+            const rawCmd = textParts[0].toLowerCase();
+            const cmd = rawCmd.startsWith('/') ? rawCmd.slice(1) : rawCmd;
             const upperText = textContent.toUpperCase();
 
             // ---------------------------------------------------------
-            // 1. PENGENDALIAN ARAHAN PENTADBIR (ADMIN ONLY)
+            // 1. PENGENDALIAN ARAHAN PENTADBIR (BAHASA MELAYU RINGKAS)
             // ---------------------------------------------------------
-            if (isAdmin && textContent.startsWith('/')) {
-                console.log(`[Arahan Pentadbir] ${remoteJid}: "${textContent}"`);
+            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu'].includes(cmd))) {
+                console.log(`[Arahan Pentadbir Danial] ${remoteJid}: "${textContent}"`);
 
-                // /waiting: Senarai pengguna yang sedang menunggu pengesahan
-                if (command === '/waiting') {
+                // 1.1 TUNGGU: Lihat senarai menunggu bayaran
+                if (['tunggu', 'waiting'].includes(cmd)) {
                     const waitingList = Object.values(users).filter(u => u.status === 'WAITING');
                     if (waitingList.length === 0) {
                         await sock.sendMessage(remoteJid, {
-                            text: "Tiada pengguna di dalam Senarai Menunggu (Waiting List) pada masa ini."
+                            text: "Tiada pengguna di dalam Senarai Menunggu (*Waiting List*) pada masa ini."
                         }, { quoted: msg });
                         continue;
                     }
 
-                    let resp = `📋 SENARAI MENUNGGU (${waitingList.length} Orang)\n\n`;
+                    let resp = `📋 *SENARAI MENUNGGU RESIT (${waitingList.length} Orang)*\n\n`;
                     waitingList.forEach((u, i) => {
                         const refInfo = u.referredBy ? `Dijemput oleh: ${u.referredBy}` : `Bayaran Terus (Direct)`;
-                        resp += `${i + 1}. ${u.name} (${u.phone})\n   └ Status: ${refInfo}\n\n`;
+                        resp += `${i + 1}. *${u.name}* (${u.phone})\n   └ Status: ${refInfo}\n\n`;
                     });
-                    resp += `Gunakan arahan: /add <nombor> <hari> [nama] untuk mengaktifkan.`;
+                    resp += `Untuk aktifkan ahli selepas semak resit, taip:\n*tambah <nombor> <hari> [nama]*\n\nContoh:\n*tambah ${waitingList[0].phone} 30*`;
                     await sock.sendMessage(remoteJid, { text: resp.trim() }, { quoted: msg });
                     continue;
                 }
 
-                // /add <phone> <days> [optional_name]
-                if (command === '/add') {
+                // 1.2 TAMBAH: Aktifkan ahli baharu / tambah hari
+                if (['tambah', 'add', 'daftar'].includes(cmd)) {
                     const rawTarget = textParts[1];
                     const days = parseInt(textParts[2], 10);
                     const optName = textParts.slice(3).join(' ').trim();
 
                     if (!rawTarget || isNaN(days) || days <= 0) {
                         await sock.sendMessage(remoteJid, {
-                            text: "Format tidak sah. Sila gunakan format: /add <nombor> <hari> [nama]\nContoh: /add 01113270914 30 Fieyanina"
+                            text:
+                                `❌ *Format Tidak Sah!*\n\n` +
+                                `Gunakan format ringkas:\n` +
+                                `*tambah <nombor> <hari> [nama]*\n\n` +
+                                `Contoh:\n` +
+                                `*tambah 01113270914 30 Fieya*`
                         }, { quoted: msg });
                         continue;
                     }
@@ -823,7 +814,7 @@ async function startBot() {
                         if (referrer) {
                             referrer.paidReferrals = (referrer.paidReferrals || 0) + 1;
                             referrer.totalPaidReferrals = (referrer.totalPaidReferrals || 0) + 1;
-                            referralRewardMsg = `\n• Penaja Diselaraskan: ${referrer.name} (${referrer.phone}) [+1 Referral, Baki: ${referrer.paidReferrals}/3]`;
+                            referralRewardMsg = `\n• Penaja: ${referrer.name} (${referrer.phone}) [+1 Tajaan, Baki: ${referrer.paidReferrals}/3]`;
 
                             if (referrer.paidReferrals >= 3) {
                                 referrer.paidReferrals -= 3;
@@ -836,13 +827,13 @@ async function startBot() {
                                 try {
                                     await sock.sendMessage(refJid, {
                                         text:
-                                            `🎉 TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!\n\n` +
+                                            `🎉 *TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!*\n\n` +
                                             `Hai ${referrer.name}, anda telah berjaya mengumpul 3 rakan yang melanggan menggunakan kod referral anda (*${referrer.refCode}*).\n\n` +
                                             `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n` +
                                             `Tarikh Luput Baharu: ${new Date(referrer.expiredAt).toLocaleDateString('ms-MY')}`
                                     });
                                 } catch {}
-                                referralRewardMsg += ` ➔ BONUS +30 HARI PERCUMA DIBERIKAN!`;
+                                referralRewardMsg += ` ➔ BONUS +30 HARI TELAH DIBERIKAN!`;
                             }
                         }
                     }
@@ -853,17 +844,17 @@ async function startBot() {
                         day: '2-digit', month: '2-digit', year: 'numeric'
                     });
 
-                    // Notifikasi kepada ahli baharu/aktif
+                    // Notifikasi Pengaktifan Terus kepada Ahli
                     const userJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
                     try {
                         await sock.sendMessage(userJid, {
                             text:
-                                `🎉 TAHNIAH! LANGGANAN ANDA TELAH DIAKTIFKAN\n\n` +
+                                `🎉 *TAHNIAH! LANGGANAN ANDA TELAH DIAKTIFKAN*\n\n` +
                                 `Nama: ${targetUser.name}\n` +
                                 `Status: AKTIF (+${days} Hari)\n` +
                                 `Tarikh Luput: ${expDateStr}\n` +
                                 `Kod Referral Peribadi Anda: *${targetUser.refCode}*\n\n` +
-                                `🎁 Ganjaran Referral Peribadi:\n` +
+                                `🎁 *Ganjaran Referral Peribadi:*\n` +
                                 `Ajak 3 rakan anda melanggan menggunakan kod anda (*${targetUser.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan tambahan secara automatik!\n\n` +
                                 `Sila hantar video atau foto anda sebagai Dokumen untuk memulakan pemprosesan.`
                         });
@@ -871,24 +862,29 @@ async function startBot() {
 
                     await sock.sendMessage(remoteJid, {
                         text:
-                            `PENGAKTIFAN KEAHLIAN BERJAYA\n\n` +
+                            `✅ *PENGAKTIFAN KEAHLIAN BERJAYA*\n\n` +
                             `• Nama: ${targetUser.name}\n` +
                             `• Nombor: ${targetPhone}\n` +
                             `• Tempoh: +${days} Hari\n` +
                             `• Tarikh Luput: ${expDateStr}\n` +
-                            `• Kod Referral: ${targetUser.refCode}${referralRewardMsg}`
+                            `• Kod Referral: *${targetUser.refCode}*${referralRewardMsg}`
                     }, { quoted: msg });
                     continue;
                 }
 
-                // /setref <phone> <CUSTOMNAME>
-                if (command === '/setref') {
+                // 1.3 KOD: Tukar kod referral ahli
+                if (['kod', 'setref'].includes(cmd)) {
                     const rawTarget = textParts[1];
                     const customRaw = textParts[2];
 
                     if (!rawTarget || !customRaw) {
                         await sock.sendMessage(remoteJid, {
-                            text: "Format tidak sah. Sila gunakan format: /setref <nombor> <KOD_NAMA>\nContoh: /setref 01113270914 FIEYA"
+                            text:
+                                `❌ *Format Tidak Sah!*\n\n` +
+                                `Gunakan format ringkas:\n` +
+                                `*kod <nombor> <KOD_NAMA>*\n\n` +
+                                `Contoh:\n` +
+                                `*kod 01113270914 FIEYA*`
                         }, { quoted: msg });
                         continue;
                     }
@@ -904,7 +900,6 @@ async function startBot() {
                     }
 
                     let cleanCode = customRaw.toUpperCase().replace(/[^A-Z0-9]/g, '');
-                    // Jika belum ada 3 digit di belakang, tambah 3 digit unik
                     if (!/\d{3}$/.test(cleanCode)) {
                         const digits = Math.floor(100 + Math.random() * 900);
                         cleanCode = `${cleanCode.replace(/\d/g, '')}${digits}`;
@@ -924,16 +919,16 @@ async function startBot() {
                     } catch {}
 
                     await sock.sendMessage(remoteJid, {
-                        text: `PENGESAHAN: Kod referral bagi ${targetUser.name} (${targetPhone}) telah dikemas kini kepada *${cleanCode}*.`
+                        text: `✅ Kod referral bagi *${targetUser.name}* (${targetPhone}) berjaya ditukar kepada *${cleanCode}*.`
                     }, { quoted: msg });
                     continue;
                 }
 
-                // /broadcastref: Hantar kod referral kepada semua ahli aktif
-                if (command === '/broadcastref') {
+                // 1.4 HEBAH: Hantar kod referral ke semua ahli aktif
+                if (['hebah', 'broadcast', 'broadcastref'].includes(cmd)) {
                     const activeMembers = Object.values(users).filter(u => u.status === 'ACTIVE' && u.expiredAt > Date.now());
                     await sock.sendMessage(remoteJid, {
-                        text: `Memulakan penghantaran kod referral kepada ${activeMembers.length} ahli aktif dengan sela masa 2 saat...`
+                        text: `Memulakan hebahan kod referral kepada ${activeMembers.length} ahli aktif dengan sela masa 2 saat...`
                     }, { quoted: msg });
 
                     let sentCount = 0;
@@ -945,7 +940,7 @@ async function startBot() {
                         try {
                             await sock.sendMessage(targetJid, {
                                 text:
-                                    `🎁 KOD REFERRAL PERIBADI ANDA: *${m.refCode}*\n\n` +
+                                    `🎁 *KOD REFERRAL PERIBADI ANDA: ${m.refCode}*\n\n` +
                                     `Hai ${m.name}, sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran bulanan percuma!\n\n` +
                                     `Ajak 3 rakan anda melanggan menggunakan kod referral peribadi anda (*${m.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan secara automatik! 🚀`
                             });
@@ -956,13 +951,13 @@ async function startBot() {
                     saveUsers(users);
 
                     await sock.sendMessage(remoteJid, {
-                        text: `Selesai! Kod referral berjaya dihantar kepada ${sentCount} orang ahli aktif.`
+                        text: `✅ Hebahan selesai! Kod referral dihantar kepada ${sentCount} orang ahli aktif.`
                     }, { quoted: msg });
                     continue;
                 }
 
-                // /check <phone>
-                if (command === '/check') {
+                // 1.5 SEMAK: Semak profil langganan ahli
+                if (['semak', 'check'].includes(cmd)) {
                     const targetPhone = normalizeIdentifier(textParts[1]);
                     const targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
 
@@ -979,25 +974,92 @@ async function startBot() {
 
                     await sock.sendMessage(remoteJid, {
                         text:
-                            `MAKLUMAT KEAHLIAN PENGGUNA\n\n` +
-                            `• Nama: ${targetUser.name}\n` +
+                            `🔍 *MAKLUMAT KEAHLIAN PENGGUNA*\n\n` +
+                            `• Nama: *${targetUser.name}*\n` +
                             `• Nombor: ${targetUser.phone}\n` +
                             `• Status: ${isAct ? 'AKTIF' : targetUser.status}\n` +
                             `• Baki Tempoh: ${daysLeft} hari (Luput: ${expStr})\n` +
-                            `• Kod Referral: ${targetUser.refCode || 'Tiada'}\n` +
-                            `• Kemajuan Referral: ${targetUser.paidReferrals || 0}/3 (Jumlah Berjaya: ${targetUser.totalPaidReferrals || 0})\n` +
+                            `• Kod Referral: *${targetUser.refCode || 'Tiada'}*\n` +
+                            `• Kemajuan Referral: ${targetUser.paidReferrals || 0}/3 (Jumlah Terkumpul: ${targetUser.totalPaidReferrals || 0})\n` +
                             `• Dijemput Oleh: ${targetUser.referredBy || 'Tiada'}`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                // 1.6 PADAM: Batalkan keahlian ahli
+                if (['padam', 'buang', 'delete'].includes(cmd)) {
+                    const targetPhone = normalizeIdentifier(textParts[1]);
+                    const targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
+
+                    if (!targetUser) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `Akaun ${targetPhone || 'tersebut'} tidak dijumpai.`
+                        }, { quoted: msg });
+                        continue;
+                    }
+
+                    delete users[targetUser.phone];
+                    saveUsers(users);
+
+                    await sock.sendMessage(remoteJid, {
+                        text: `✅ PENGESAHAN: Akses bagi ${targetUser.name} (${targetUser.phone}) telah dipadamkan daripada sistem.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                // 1.7 SENARAI: Senarai ahli aktif
+                if (['senarai', 'ahli', 'list'].includes(cmd)) {
+                    const activeMembers = Object.values(users).filter(u => u.status === 'ACTIVE' && u.expiredAt > Date.now());
+                    if (activeMembers.length === 0) {
+                        await sock.sendMessage(remoteJid, {
+                            text: "Tiada ahli berdaftar yang aktif pada masa ini."
+                        }, { quoted: msg });
+                        continue;
+                    }
+
+                    let resp = `👥 *SENARAI AHLI AKTIF (${activeMembers.length} Orang)*\n\n`;
+                    activeMembers.forEach((m, i) => {
+                        const daysLeft = Math.ceil((m.expiredAt - Date.now()) / (1000 * 60 * 60 * 24));
+                        resp += `${i + 1}. *${m.name}* (${m.phone})\n   └ Baki: ${daysLeft} hari (Luput: ${new Date(m.expiredAt).toLocaleDateString('ms-MY')})\n   └ Kod: ${m.refCode}\n\n`;
+                    });
+                    await sock.sendMessage(remoteJid, { text: resp.trim() }, { quoted: msg });
+                    continue;
+                }
+
+                // 1.8 BANTUAN / MENU PENTADBIR
+                if (['bantuan', 'menu', 'help'].includes(cmd)) {
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `📋 *PANDUAN PERINTAH PENTADBIR (${BOT_NAME})*\n\n` +
+                            `1. *tunggu*\n` +
+                            `   └ Lihat senarai pengguna yang belum bayar / hantar resit.\n\n` +
+                            `2. *tambah <nombor> <hari> [nama]*\n` +
+                            `   └ Aktifkan ahli baharu atau sambung tempoh.\n` +
+                            `   Contoh: tambah 01113270914 30 Fieya\n\n` +
+                            `3. *kod <nombor> <nama_khas>*\n` +
+                            `   └ Tukar kod referral ahli.\n` +
+                            `   Contoh: kod 01113270914 FIEYA\n\n` +
+                            `4. *hebah*\n` +
+                            `   └ Hantar kod referral ke semua ahli aktif secara automatik.\n\n` +
+                            `5. *semak <nombor>*\n` +
+                            `   └ Semak baki hari dan status referral ahli.\n` +
+                            `   Contoh: semak 01113270914\n\n` +
+                            `6. *padam <nombor>*\n` +
+                            `   └ Batalkan keahlian pengguna.\n\n` +
+                            `7. *senarai*\n` +
+                            `   └ Paparkan semua ahli aktif dan tarikh luput.\n\n` +
+                            `8. *ram*\n` +
+                            `   └ Semak status memori pelayan & antrian.`
                     }, { quoted: msg });
                     continue;
                 }
             }
 
             // ---------------------------------------------------------
-            // 2. PENGENDALIAN KOD RUJUKAN (REFERRAL REDEMPTION)
+            // 2. PENEBUSAN KOD REFERRAL OLEH PENGGUNA
             // ---------------------------------------------------------
             const matchedReferrer = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === upperText);
             if (matchedReferrer) {
-                // Sekatan Rujukan Diri Sendiri (Self-Referral)
                 if (user && (user.phone === matchedReferrer.phone || user.refCode === matchedReferrer.refCode)) {
                     await sock.sendMessage(remoteJid, {
                         text: "Ralat: Anda tidak boleh menggunakan kod referral peribadi anda sendiri."
@@ -1005,7 +1067,6 @@ async function startBot() {
                     continue;
                 }
 
-                // Jika pengguna sudah aktif
                 if (isActive) {
                     await sock.sendMessage(remoteJid, {
                         text: `Akaun anda sudah berstatus AKTIF sehingga ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}. Kod referral hanya sah untuk pendaftaran atau pembaharuan langganan.`
@@ -1013,7 +1074,6 @@ async function startBot() {
                     continue;
                 }
 
-                // Simpan maklumat referral & tukar status kepada WAITING
                 user.referredBy = matchedReferrer.phone;
                 user.status = 'WAITING';
                 saveUsers(users);
@@ -1022,8 +1082,12 @@ async function startBot() {
                     `✅ *KOD REFERRAL DISAHKAN!*\n\n` +
                     `Anda dijemput oleh *${matchedReferrer.name}* (${matchedReferrer.refCode}).\n\n` +
                     `${PACKAGE_TEMPLATE}\n\n` +
-                    `📌 Sila buat pembayaran mengikut pakej pilihan anda.\n\n` +
-                    `Anda telah dimasukkan ke dalam Senarai Menunggu (Waiting List). Sila hantar resit pembayaran anda di sini setelah selesai untuk pengesahan segera oleh pentadbir.`;
+                    `💳 *Nama Penerima:* MUHAMMAD DANIAL BIN MOHAMMAD NASIR\n` +
+                    `📌 *Cara Pembayaran:*\n` +
+                    `1. Imbas kod QR DuitNow di atas menggunakan mana-mana aplikasi Bank atau eWallet anda.\n` +
+                    `2. Masukkan jumlah mengikut pakej pilihan anda.\n` +
+                    `3. Hantarkan resit atau tangkap layar pembayaran di sini.\n\n` +
+                    `Anda telah dimasukkan ke dalam Senarai Menunggu (*Waiting List*). Pentadbir akan mengaktifkan akaun anda serta-merta selepas semakan resit.`;
 
                 if (fs.existsSync(QR_PAYMENT_PATH)) {
                     await sock.sendMessage(remoteJid, {
@@ -1036,25 +1100,29 @@ async function startBot() {
                     }, { quoted: msg });
                 }
 
-                // Alert Pentadbir Sistem
+                // Alert Pentadbir (Danial 0194066718)
                 const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
                 try {
                     await sock.sendMessage(adminJid, {
                         text:
-                            `🔔 NOTIFIKASI WAITING LIST (KOD REFERRAL)\n\n` +
-                            `Pengguna: ${user.name} (${user.phone})\n` +
-                            `Dijemput Oleh: ${matchedReferrer.name} (${matchedReferrer.phone} - ${matchedReferrer.refCode})\n` +
-                            `Status: Menunggu Resit Pembayaran\n\n` +
-                            `Gunakan: /add ${user.phone} <hari>`
+                            `🔔 *NOTIFIKASI RESIT (KOD REFERRAL)*\n\n` +
+                            `• Nama: *${user.name}*\n` +
+                            `• Nombor: ${user.phone}\n` +
+                            `• Dijemput Oleh: ${matchedReferrer.name} (${matchedReferrer.phone} - ${matchedReferrer.refCode})\n` +
+                            `• Status: Menunggu Resit Pembayaran\n\n` +
+                            `Selepas semak resit, aktifkan menggunakan:\n` +
+                            `*tambah ${user.phone} <hari> [nama]*\n\n` +
+                            `Contoh:\n` +
+                            `tambah ${user.phone} 30`
                     });
                 } catch {}
                 continue;
             }
 
             // ---------------------------------------------------------
-            // 3. PENGENDALIAN PEMBAYARAN TERUS (BAYAR)
+            // 3. PEMBAYARAN TERUS (BAYAR)
             // ---------------------------------------------------------
-            if (['bayar', '/bayar', 'qr'].includes(command) || upperText === 'BAYAR') {
+            if (['bayar', '/bayar', 'qr'].includes(cmd) || upperText === 'BAYAR') {
                 if (isActive) {
                     await sock.sendMessage(remoteJid, {
                         text: `Akaun anda masih berstatus AKTIF sehingga ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}. Anda tidak perlu membuat pembayaran sekarang.`
@@ -1066,10 +1134,14 @@ async function startBot() {
                 saveUsers(users);
 
                 const payCaption =
-                    `MAKLUMAT PEMBAYARAN LANGGANAN\n\n` +
+                    `MAKLUMAT PEMBAYARAN LANGGANAN (${BOT_NAME})\n\n` +
                     `${PACKAGE_TEMPLATE}\n\n` +
-                    `📌 Sila buat pembayaran mengikut pakej pilihan anda.\n\n` +
-                    `Anda telah dimasukkan ke dalam Senarai Menunggu (Waiting List). Sila hantar resit pembayaran anda di sini setelah selesai untuk pengesahan segera oleh pentadbir.`;
+                    `💳 *Nama Penerima:* MUHAMMAD DANIAL BIN MOHAMMAD NASIR\n` +
+                    `📌 *Cara Pembayaran:*\n` +
+                    `1. Imbas kod QR DuitNow di atas menggunakan mana-mana aplikasi Bank atau eWallet anda.\n` +
+                    `2. Masukkan jumlah bayaran mengikut pakej pilihan anda.\n` +
+                    `3. Hantarkan resit atau tangkap layar pembayaran di sini.\n\n` +
+                    `Anda telah dimasukkan ke dalam Senarai Menunggu (*Waiting List*). Akaun anda akan diaktifkan sebaik sahaja resit disahkan oleh pentadbir!`;
 
                 if (fs.existsSync(QR_PAYMENT_PATH)) {
                     await sock.sendMessage(remoteJid, {
@@ -1086,10 +1158,14 @@ async function startBot() {
                 try {
                     await sock.sendMessage(adminJid, {
                         text:
-                            `🔔 NOTIFIKASI WAITING LIST (BAYARAN TERUS)\n\n` +
-                            `Pengguna: ${user.name} (${user.phone})\n` +
-                            `Status: Menunggu Resit Pembayaran\n\n` +
-                            `Gunakan: /add ${user.phone} <hari>`
+                            `🔔 *NOTIFIKASI RESIT (BAYARAN TERUS)*\n\n` +
+                            `• Nama: *${user.name}*\n` +
+                            `• Nombor: ${user.phone}\n` +
+                            `• Status: Menunggu Resit Pembayaran\n\n` +
+                            `Selepas semak resit, aktifkan menggunakan:\n` +
+                            `*tambah ${user.phone} <hari> [nama]*\n\n` +
+                            `Contoh:\n` +
+                            `tambah ${user.phone} 30`
                     });
                 } catch {}
                 continue;
@@ -1098,7 +1174,7 @@ async function startBot() {
             // ---------------------------------------------------------
             // 4. ALIRAN START ONBOARDING & STATUS PENGGUNA
             // ---------------------------------------------------------
-            if (['start', '/start', 'mula', 'menu', 'bantuan', 'help'].includes(command) || upperText === 'START') {
+            if (['start', '/start', 'mula', 'menu', 'bantuan', 'help'].includes(cmd) || upperText === 'START') {
                 if (isActive) {
                     if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
                     user.refSentToExisting = true;
@@ -1111,13 +1187,13 @@ async function startBot() {
                     await sock.sendMessage(remoteJid, {
                         text:
                             `SELAMAT KEMBALI KE ${BOT_NAME}!\n\n` +
-                            `Status Keahlian: AKTIF\n` +
+                            `Status Keahlian: *AKTIF*\n` +
                             `Tarikh Luput: ${expDateStr}\n` +
                             `Kod Referral Peribadi Anda: *${user.refCode}*\n\n` +
                             `Panduan Penggunaan:\n` +
                             `• Video 60 FPS: Sila hantar video anda sebagai fail Dokumen (Lampiran > Dokumen > Galeri) bagi mengekalkan kualiti tanpa mampatan.\n` +
                             `• Foto QHD+: Hantar foto anda untuk diproses ke resolusi 2560px dengan ketajaman CAS.\n\n` +
-                            `🎁 Ganjaran Referral Peribadi:\n` +
+                            `🎁 *Ganjaran Referral Peribadi:*\n` +
                             `Ajak 3 rakan anda melanggan menggunakan kod anda (*${user.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik!`
                     }, { quoted: msg });
                 } else {
@@ -1126,25 +1202,36 @@ async function startBot() {
                         ? `STATUS: LANGGANAN TELAH TAMAT\n\nTempoh keahlian anda bagi ${BOT_NAME} telah tamat pada ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}.`
                         : `STATUS: TIADA LANGGANAN AKTIF\n\nSelamat datang ke ${BOT_NAME}. Akaun anda belum mempunyai langganan aktif untuk memproses video 60 FPS & foto WhatsApp Status berkualiti tinggi.`;
 
-                    await sock.sendMessage(remoteJid, {
-                        text:
-                            `${introText}\n\n` +
-                            `${PACKAGE_TEMPLATE}\n\n` +
-                            `Cara Mendaftar:\n` +
-                            `1. Jika anda mempunyai kod referral rakan, balas dengan kod tersebut (contoh: FIEYANINA482).\n` +
-                            `2. Atau balas *BAYAR* untuk menerima maklumat pembayaran terus.`
-                    }, { quoted: msg });
+                    const welcomeCaption =
+                        `${introText}\n\n` +
+                        `${PACKAGE_TEMPLATE}\n\n` +
+                        `💳 *Nama Penerima:* MUHAMMAD DANIAL BIN MOHAMMAD NASIR\n\n` +
+                        `Cara Mendaftar:\n` +
+                        `1. Imbas kod QR di atas untuk pembayaran terus.\n` +
+                        `2. Atau balas dengan kod referral rakan jika ada (contoh: FIEYANINA482).\n` +
+                        `3. Hantarkan resit pembayaran di sini untuk pengesahan segera.`;
+
+                    if (fs.existsSync(QR_PAYMENT_PATH)) {
+                        await sock.sendMessage(remoteJid, {
+                            image: fs.readFileSync(QR_PAYMENT_PATH),
+                            caption: welcomeCaption
+                        }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(remoteJid, {
+                            text: welcomeCaption
+                        }, { quoted: msg });
+                    }
                 }
                 continue;
             }
 
-            if (['status', 'baki', 'langganan'].includes(command)) {
+            if (['status', 'baki', 'langganan'].includes(cmd)) {
                 if (isActive) {
                     const daysLeft = Math.ceil((user.expiredAt - Date.now()) / (1000 * 60 * 60 * 24));
                     await sock.sendMessage(remoteJid, {
                         text:
                             `STATUS KEAHLIAN ANDA\n\n` +
-                            `• Nama: ${user.name}\n` +
+                            `• Nama: *${user.name}*\n` +
                             `• Status: Aktif (${daysLeft} hari lagi)\n` +
                             `• Tarikh Luput: ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}\n` +
                             `• Kod Referral: *${user.refCode}*\n` +
@@ -1162,7 +1249,7 @@ async function startBot() {
                 continue;
             }
 
-            if (['ram', 'memori'].includes(command)) {
+            if (['ram', 'memori'].includes(cmd)) {
                 const mem = process.memoryUsage();
                 const rssMB = (mem.rss / (1024 * 1024)).toFixed(1);
                 const heapUsedMB = (mem.heapUsed / (1024 * 1024)).toFixed(1);
@@ -1223,7 +1310,6 @@ async function startBot() {
                 continue;
             }
 
-            // Sekatan Keahlian Media: Hanya ahli AKTIF atau PENTADBIR dibenarkan
             if (!isAdmin && !isActive) {
                 console.log(`[Media Ditolak] Penghantaran media oleh bukan ahli aktif: ${remoteJid}`);
                 await sock.sendMessage(remoteJid, {
@@ -1286,7 +1372,7 @@ async function startBot() {
                                 });
                             } catch {}
 
-                            // Penghantaran Kod Referral Automatik untuk Ahli Sedia Ada yang Belum Menerima
+                            // Hantar kod referral secara automatik kepada ahli aktif yang belum terima
                             if (user && user.status === 'ACTIVE' && (!user.refSentToExisting || !user.refCode)) {
                                 if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
                                 user.refSentToExisting = true;
@@ -1294,7 +1380,7 @@ async function startBot() {
 
                                 await sock.sendMessage(remoteJid, {
                                     text:
-                                        `🎁 KOD REFERRAL PERIBADI ANDA: *${user.refCode}*\n\n` +
+                                        `🎁 *KOD REFERRAL PERIBADI ANDA: ${user.refCode}*\n\n` +
                                         `Sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran percuma!\n\n` +
                                         `Ajak 3 rakan anda melanggan menggunakan kod referral anda (*${user.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan tambahan secara automatik! 🚀`
                                 });
@@ -1362,10 +1448,8 @@ async function startBot() {
                             const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
                             await pipeline(mediaStream, fs.createWriteStream(inputPath));
 
-                            // Dwi-pengekstrakan Durasi, FPS, dan Metadata Warna Sumber
                             const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
 
-                            // Pengiraan Bitrate Dinamik Siling 60 Saat (Sasaran 15.2MB & Audio 96kbps)
                             const effectiveDuration = Math.min(durationSec, 60);
                             const rawBitrate = Math.floor(((15.2 * 8192) / effectiveDuration) - 96);
                             const vBitrate = Math.max(3500, Math.min(11500, rawBitrate));
@@ -1379,7 +1463,6 @@ async function startBot() {
                             console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | CAS: 0.35 | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
                             await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
 
-                            // 1. Hantar fail video bersih tanpa teks
                             await sock.sendMessage(remoteJid, {
                                 video: { stream: fs.createReadStream(outputPath) },
                                 mimetype: 'video/mp4'
@@ -1391,7 +1474,6 @@ async function startBot() {
                                 });
                             } catch {}
 
-                            // 2. Hantar mesej laporan teknikal secara berasingan
                             const hasCas = checkCasSupport(ffmpegPath);
                             const casNote = hasCas ? 'CAS 0.35 (Gred 4K)' : 'Unsharp Adaptive';
                             const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
@@ -1410,7 +1492,6 @@ async function startBot() {
                                     `• Profil Warna: ${colorNote}${trimNote}`
                             });
 
-                            // Penghantaran Kod Referral Automatik untuk Ahli Sedia Ada yang Belum Menerima
                             if (user && user.status === 'ACTIVE' && (!user.refSentToExisting || !user.refCode)) {
                                 if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
                                 user.refSentToExisting = true;
@@ -1418,7 +1499,7 @@ async function startBot() {
 
                                 await sock.sendMessage(remoteJid, {
                                     text:
-                                        `🎁 KOD REFERRAL PERIBADI ANDA: *${user.refCode}*\n\n` +
+                                        `🎁 *KOD REFERRAL PERIBADI ANDA: ${user.refCode}*\n\n` +
                                         `Sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran percuma!\n\n` +
                                         `Ajak 3 rakan anda melanggan menggunakan kod referral anda (*${user.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan tambahan secara automatik! 🚀`
                                 });
