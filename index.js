@@ -24,7 +24,9 @@ const ADMIN_IDENTIFIERS = [
 
 const TEMP_DIR = path.join(__dirname, 'temp');
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_info');
-const MEMBERS_FILE = path.join(__dirname, 'members.json');
+// Simpan fail ahli terus di dalam Volume Simpanan Kekal (AUTH_DIR)
+const MEMBERS_FILE = path.join(AUTH_DIR, 'members.json');
+const LEGACY_MEMBERS_FILE = path.join(__dirname, 'members.json');
 
 // Pembersihan Direktori Sementara Semasa Pelancaran Bot
 if (fs.existsSync(TEMP_DIR)) {
@@ -45,11 +47,28 @@ if (fs.existsSync(TEMP_DIR)) {
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
+// Migrasi Automatik: Pastikan data ahli dipindahkan ke Volume Kekal jika belum wujud
+function ensureMembersPersistence() {
+    try {
+        if (!fs.existsSync(MEMBERS_FILE)) {
+            if (fs.existsSync(LEGACY_MEMBERS_FILE)) {
+                const legacyData = fs.readFileSync(LEGACY_MEMBERS_FILE, 'utf8');
+                fs.writeFileSync(MEMBERS_FILE, legacyData);
+                console.log('[Kekal Ahli] Senarai ahli sedia ada berjaya dipindahkan ke Volume Kekal.');
+            } else {
+                fs.writeFileSync(MEMBERS_FILE, JSON.stringify({}, null, 2));
+            }
+        }
+    } catch (err) {
+        console.error('Ralat inisialisasi fail ahli di volume:', err);
+    }
+}
+ensureMembersPersistence();
+
 function loadMembers() {
     try {
         if (!fs.existsSync(MEMBERS_FILE)) {
-            fs.writeFileSync(MEMBERS_FILE, JSON.stringify({}, null, 2));
-            return {};
+            ensureMembersPersistence();
         }
         return JSON.parse(fs.readFileSync(MEMBERS_FILE, 'utf8'));
     } catch {
@@ -59,9 +78,10 @@ function loadMembers() {
 
 function saveMembers(data) {
     try {
+        if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
         fs.writeFileSync(MEMBERS_FILE, JSON.stringify(data, null, 2));
     } catch (err) {
-        console.error('Ralat simpan ahli:', err);
+        console.error('Ralat simpan ahli ke volume:', err);
     }
 }
 
@@ -434,6 +454,7 @@ async function startBot() {
             console.log(`Pentadbir Sistem: 0194066718`);
             console.log(`Enjin: Fluid Zero-B-Frame 60 FPS Anti-Glitch (Pengekalan Warna HDR/SDR Aktif)`);
             console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Video`);
+            console.log(`Pangkalan Data Ahli: Kekal di dalam Volume (${MEMBERS_FILE})`);
             console.log('======================================================\n');
         }
     });
@@ -589,7 +610,7 @@ async function startBot() {
                             `Nombor Telefon: ${target}\n` +
                             `Tempoh Diluluskan: 30 Hari (Baki: ${days} hari)\n` +
                             `Tarikh Tamat: ${expiryDateStr}\n` +
-                            `Status: Aktif & Diselaraskan`
+                            `Status: Aktif & Disimpan Kekal`
                     }, { quoted: msg });
                     continue;
                 }
