@@ -294,12 +294,13 @@ function probeVideo(filePath, binPath) {
 }
 
 /**
- * Enjin Transcode 60 FPS Anti-Glitch dengan Pemetaan Tona HDR-ke-SDR & Pengekalan Warna Tepat
+ * Enjin Transcode Video Anti-Glitch (Zero B-Frame & Exact PTS Timing) dengan Pemetaan Tona HDR-ke-SDR
  */
 function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetShortSide, sourceFps, isHDR) {
     return new Promise((resolve, reject) => {
-        const maxRate = Math.round(vBitrate * 1.2);
-        const bufSize = Math.round(vBitrate * 2.0);
+        const isHighFps = sourceFps >= 48;
+        const maxRate = Math.floor(vBitrate * 1.25);
+        const bufSize = Math.floor(vBitrate * 2.5);
 
         // Skala Lanczos Pintar Mengikut Orientasi (Portrait 9:16 vs Landscape 16:9)
         const scaleFilter = `scale='if(gt(iw,ih),-2,min(${targetShortSide},iw))':'if(gt(iw,ih),min(${targetShortSide},ih),-2)':flags=lanczos`;
@@ -315,12 +316,12 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
             }
         }
 
-        // 2. Gabungkan Rangkaian Penapis Video (Tone Map -> Scale -> 60fps Interpolate)
+        // 2. Gabungkan Rangkaian Penapis Video (Tone Map -> Scale -> Exact PTS)
         const filterParts = [];
         if (colorFilter) filterParts.push(colorFilter);
         filterParts.push(scaleFilter);
-        if (sourceFps < 48) {
-            filterParts.push('minterpolate=fps=60:mi_mode=blend');
+        if (isHighFps) {
+            filterParts.push('setpts=N/(60*TB)');
         }
         const vfFilter = filterParts.join(',');
 
@@ -328,23 +329,30 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
             '-y',
             '-i', inputPath,
             '-t', '60',
-            '-fps_mode', 'cfr',
+            '-fps_mode', 'cfr'
+        ];
+
+        if (isHighFps) {
+            args.push('-r', '60');
+        }
+
+        args.push(
             '-c:v', 'libx264',
             '-preset', 'fast',
             '-profile:v', 'high',
             '-level', '4.2',
             '-pix_fmt', 'yuv420p',
-            '-bf', '2',
+            '-bf', '0',
             '-refs', '3',
-            '-rc-lookahead', '20',
+            '-rc-lookahead', '25',
             '-vf', vfFilter,
-            '-r', '60',
             '-b:v', `${vBitrate}k`,
             '-maxrate', `${maxRate}k`,
             '-bufsize', `${bufSize}k`,
-            '-g', '120',
-            '-keyint_min', '120',
+            '-g', '60',
+            '-keyint_min', '60',
             '-sc_threshold', '0',
+            '-x264-params', 'deblock=-1:-1:aq-mode=2:aq-strength=1.0',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
@@ -355,7 +363,7 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
             '-threads', '2',
             '-movflags', '+faststart',
             outputPath
-        ];
+        );
 
         const proc = spawn(binPath, args);
         let stderr = '';
@@ -424,7 +432,7 @@ async function startBot() {
             console.log('\n======================================================');
             console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
             console.log(`Pentadbir Sistem: 0194066718`);
-            console.log(`Enjin: True 60 FPS Anti-Glitch (Pengekalan Warna HDR/SDR Aktif)`);
+            console.log(`Enjin: Fluid Zero-B-Frame 60 FPS Anti-Glitch (Pengekalan Warna HDR/SDR Aktif)`);
             console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Video`);
             console.log('======================================================\n');
         }
@@ -734,7 +742,7 @@ async function startBot() {
                 continue;
             }
 
-            // 3. PEMPROSESAN DOKUMEN VIDEO (Lazy Stream Download & HDR/SDR 60fps Pipeline)
+            // 3. PEMPROSESAN DOKUMEN VIDEO (Lazy Stream Download & True CFR Pipeline)
             const docMsg = inner.documentMessage || inner.documentWithCaptionMessage?.message?.documentMessage;
             if (!docMsg) continue;
 
@@ -785,13 +793,15 @@ async function startBot() {
                         // Pengiraan Bitrate Dinamik Siling 60 Saat (Sasaran 14.5MB)
                         const effectiveDuration = Math.min(durationSec, 60);
                         const rawBitrate = Math.floor(((14.5 * 8192) / effectiveDuration) - 128);
-                        const vBitrate = Math.max(3000, Math.min(9000, rawBitrate));
+                        const vBitrate = Math.max(3200, Math.min(9000, rawBitrate));
                         const targetShortSide = vBitrate >= 4800 ? 1080 : 720;
                         const isTrimmed = durationSec > 60;
+                        const isHighFps = sourceFps >= 48;
 
-                        const resLabel = targetShortSide === 1080 ? '1080p (60 FPS)' : '720p (60 FPS)';
+                        const resLabel = targetShortSide === 1080 ? (isHighFps ? '1080p (60 FPS)' : '1080p (HD)') : (isHighFps ? '720p (60 FPS)' : '720p (HD)');
+                        const fpsStatus = isHighFps ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
 
-                        console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Durasi: ${durationSec.toFixed(1)}s`);
+                        console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
                         await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
 
                         // 1. Hantar fail video bersih tanpa teks
@@ -808,21 +818,21 @@ async function startBot() {
 
                         // 2. Hantar mesej laporan teknikal secara berasingan
                         const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
-                        const interpNote = sourceFps < 48 ? ' (Motion Blended 60fps)' : ' (Native 60fps)';
+                        const motionNote = isHighFps ? ' (True 60fps Native)' : ' (True Native CFR)';
                         const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
 
                         await sock.sendMessage(remoteJid, {
                             text:
                                 `PENGOPTIMUMAN VIDEO SELESAI\n\n` +
-                                `Sila majukan (forward) video di atas terus ke Status WhatsApp anda tanpa melakukan sebarang suntingan atau pemotongan (trim) bagi mengekalkan resolusi 60 FPS.\n\n` +
+                                `Sila majukan (forward) video di atas terus ke Status WhatsApp anda tanpa melakukan sebarang suntingan atau pemotongan (trim) bagi mengekalkan kestabilan dan kualiti video.\n\n` +
                                 `Spesifikasi Output:\n` +
-                                `• Format: ${resLabel}${interpNote}\n` +
-                                `• Kadar Bingkai: 60.0 FPS Malar (CFR)\n` +
+                                `• Resolusi: ${resLabel}${motionNote}\n` +
+                                `• Kadar Bingkai: ${fpsStatus}\n` +
                                 `• Bitrate: ${vBitrate} kbps (Sasaran ~14.5 MB)\n` +
                                 `• Profil Warna: ${colorNote}${trimNote}`
                         });
 
-                        console.log(`[Selesai] Video 60 FPS berjaya dihantar ke ${remoteJid}.`);
+                        console.log(`[Selesai] Video berjaya dihantar ke ${remoteJid}.`);
 
                     } catch (err) {
                         console.error('[Ralat Pemprosesan Video]', err);
