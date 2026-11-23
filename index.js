@@ -1,4 +1,4 @@
-﻿const {
+const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
@@ -15,7 +15,6 @@ const { pipeline } = require('stream/promises');
 const BOT_NAME = "Status Clear By Danial";
 const MAX_QUEUE_SIZE = 25;
 
-// Pengenalan Pentadbir Rasmi (Danial)
 const ADMIN_IDENTIFIERS = [
     '60194066718',
     '0194066718',
@@ -217,38 +216,92 @@ class RobustVideoQueue {
 
 const videoQueue = new RobustVideoQueue(MAX_QUEUE_SIZE);
 
-function probeDuration(filePath, binPath) {
+/**
+ * Pengekstrakan Durasi dan Kadar Bingkai (FPS) Asal menggunakan ffprobe
+ */
+function probeVideo(filePath, binPath) {
     return new Promise((resolve) => {
-        const args = ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath];
+        const args = [
+            '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=r_frame_rate,duration:format=duration',
+            '-of', 'json',
+            filePath
+        ];
+
         const proc = spawn(binPath, args);
         let stdout = '';
+        let timer = setTimeout(() => {
+            try { proc.kill('SIGKILL'); } catch {}
+            resolve({ duration: 30.0, fps: 30.0 });
+        }, 120000);
+
         proc.stdout.on('data', (d) => { stdout += d.toString(); });
         proc.on('close', (code) => {
+            clearTimeout(timer);
             if (code === 0) {
-                const duration = parseFloat(stdout.trim());
-                if (!isNaN(duration) && duration > 0) return resolve(duration);
+                try {
+                    const parsed = JSON.parse(stdout);
+                    const stream = parsed.streams?.[0] || {};
+                    const format = parsed.format || {};
+
+                    let duration = parseFloat(stream.duration || format.duration);
+                    if (isNaN(duration) || duration <= 0) duration = 30.0;
+
+                    let fps = 30.0;
+                    if (stream.r_frame_rate) {
+                        const [num, den] = stream.r_frame_rate.split('/').map(Number);
+                        if (den && num) {
+                            fps = num / den;
+                        } else if (!isNaN(parseFloat(stream.r_frame_rate))) {
+                            fps = parseFloat(stream.r_frame_rate);
+                        }
+                    }
+
+                    return resolve({ duration, fps });
+                } catch {}
             }
-            resolve(30.0);
+            resolve({ duration: 30.0, fps: 30.0 });
         });
-        proc.on('error', () => resolve(30.0));
+        proc.on('error', () => {
+            clearTimeout(timer);
+            resolve({ duration: 30.0, fps: 30.0 });
+        });
     });
 }
 
-function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, scaleWidth) {
+/**
+ * Enjin Transcode 60 FPS Anti-Glitch (VFR-Safe, Orientation-Aware & Zero-Panning Glitches)
+ */
+function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetShortSide, sourceFps) {
     return new Promise((resolve, reject) => {
         const maxRate = Math.round(vBitrate * 1.2);
         const bufSize = Math.round(vBitrate * 2.0);
-        const filterString = `fps=60,scale='min(${scaleWidth},iw)':-2:flags=lanczos`;
+
+        // Skala Lanczos Pintar Mengikut Orientasi (Portrait 9:16 vs Landscape 16:9)
+        const scaleFilter = `scale='if(gt(iw,ih),-2,min(${targetShortSide},iw))':'if(gt(iw,ih),min(${targetShortSide},ih),-2)':flags=lanczos`;
+
+        // Pengurusan Kadar Bingkai: Interpolasi jika <48fps, pengekalan frame jika >=48fps
+        let vfFilter = scaleFilter;
+        if (sourceFps < 48) {
+            vfFilter = `${scaleFilter},minterpolate=fps=60:mi_mode=blend`;
+        }
 
         const args = [
             '-y',
             '-i', inputPath,
+            '-t', '60',
+            '-fps_mode', 'cfr',
             '-c:v', 'libx264',
-            '-profile:v', 'high',
-            '-level:v', '4.2',
             '-preset', 'fast',
-            '-tune', 'film',
-            '-vf', filterString,
+            '-profile:v', 'high',
+            '-level', '4.2',
+            '-pix_fmt', 'yuv420p',
+            '-bf', '2',
+            '-refs', '3',
+            '-rc-lookahead', '20',
+            '-vf', vfFilter,
+            '-r', '60',
             '-b:v', `${vBitrate}k`,
             '-maxrate', `${maxRate}k`,
             '-bufsize', `${bufSize}k`,
@@ -258,7 +311,6 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, scaleWidt
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
-            '-pix_fmt', 'yuv420p',
             '-c:a', 'aac',
             '-b:a', '128k',
             '-ar', '44100',
@@ -269,12 +321,25 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, scaleWidt
 
         const proc = spawn(binPath, args);
         let stderr = '';
+        let timeoutTriggered = false;
+
+        const timer = setTimeout(() => {
+            timeoutTriggered = true;
+            try { proc.kill('SIGKILL'); } catch {}
+            reject(new Error('Masa transcode melebihi had maksimum (120 saat).'));
+        }, 120000);
+
         proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
         proc.on('close', (code) => {
+            clearTimeout(timer);
+            if (timeoutTriggered) return;
             if (code === 0) resolve();
             else reject(new Error(`FFmpeg error: ${stderr.slice(-300)}`));
         });
-        proc.on('error', (err) => reject(new Error(`Ralat pelancaran FFmpeg: ${err.message}`)));
+        proc.on('error', (err) => {
+            clearTimeout(timer);
+            reject(new Error(`Ralat pelancaran FFmpeg: ${err.message}`));
+        });
     });
 }
 
@@ -303,13 +368,11 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Dapatkan nombor pairing (Lalai: 601157270564)
     const pairingNumber = (process.env.PAIRING_NUMBER || '601157270564').replace(/\D/g, '');
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // Kod QR tidak akan dipaparkan sekiranya pairingNumber wujud
         if (qr && !pairingNumber) {
             console.log('\nImbas Kod QR di WhatsApp:\n');
             qrcode.generate(qr, { small: true });
@@ -323,12 +386,12 @@ async function startBot() {
             console.log('\n======================================================');
             console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
             console.log(`Pentadbir Sistem: 0194066718`);
-            console.log(`Status: Sambungan WhatsApp Berjaya & Aktif`);
+            console.log(`Enjin: True 60 FPS Anti-Glitch (VFR-to-CFR Aktif)`);
+            console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Video`);
             console.log('======================================================\n');
         }
     });
 
-    // Mohon Kod Pairing Secara Automatik ke Log
     if (pairingNumber && !sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
@@ -337,8 +400,8 @@ async function startBot() {
                 console.log(`🔑 KOD PAIRING WHATSAPP ANDA: ${code}`);
                 console.log('======================================================');
                 console.log(`1. Buka WhatsApp di telefon anda (${pairingNumber})`);
-                console.log('2. Tekan Settings (titik tiga) > Linked Devices > Link a Device');
-                console.log('3. Tekan "Link with phone number instead" di bawah skrin');
+                console.log('2. Tekan Settings > Linked Devices > Link a Device');
+                console.log('3. Tekan "Link with phone number instead"');
                 console.log(`4. Masukkan kod 8-digit ini: ${code}\n`);
             } catch (err) {
                 console.error('[Ralat Mohon Kod Pairing]:', err);
@@ -633,7 +696,7 @@ async function startBot() {
                 continue;
             }
 
-            // 3. PEMPROSESAN DOKUMEN VIDEO
+            // 3. PEMPROSESAN DOKUMEN VIDEO (Lazy Stream Download & True 60fps Pipeline)
             const docMsg = inner.documentMessage || inner.documentWithCaptionMessage?.message?.documentMessage;
             if (!docMsg) continue;
 
@@ -667,40 +730,62 @@ async function startBot() {
                     const outputPath = path.join(TEMP_DIR, `status_clear_60fps_${fileId}.mp4`);
 
                     try {
+                        // Reaksi Emoji ⏳ Memaklumkan Proses Bermula
+                        try {
+                            await sock.sendMessage(remoteJid, {
+                                react: { text: '⏳', key: msg.key }
+                            });
+                        } catch {}
+
                         console.log(`\n[Pemprosesan Bermula] Memuat turun video (${sizeMB} MB) dari ${remoteJid}...`);
-                        await sock.sendMessage(remoteJid, {
-                            text: `Giliran anda telah tiba. Memuat turun dan memproses video 60 FPS (${sizeMB} MB). Sila tunggu sebentar.`
-                        }, { quoted: msg });
 
                         const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
                         await pipeline(mediaStream, fs.createWriteStream(inputPath));
 
-                        const durationSec = await probeDuration(inputPath, ffprobePath);
+                        // Dwi-pengekstrakan Durasi dan FPS Sebenar
+                        const { duration: durationSec, fps: sourceFps } = await probeVideo(inputPath, ffprobePath);
 
-                        const rawBitrate = Math.floor(((13.5 * 8192) / durationSec) - 128);
-                        const vBitrate = Math.max(2500, Math.min(8500, rawBitrate));
-                        const scaleWidth = vBitrate >= 4500 ? 1080 : 720;
-                        const resLabel = scaleWidth === 1080 ? '1080p (60 FPS)' : '720p (60 FPS)';
+                        // Pengiraan Bitrate Dinamik Siling 60 Saat (Sasaran 14.5MB)
+                        const effectiveDuration = Math.min(durationSec, 60);
+                        const rawBitrate = Math.floor(((14.5 * 8192) / effectiveDuration) - 128);
+                        const vBitrate = Math.max(3000, Math.min(9000, rawBitrate));
+                        const targetShortSide = vBitrate >= 4800 ? 1080 : 720;
+                        const isTrimmed = durationSec > 60;
 
-                        console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | Durasi: ${durationSec.toFixed(1)}s`);
-                        await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, scaleWidth);
+                        const resLabel = targetShortSide === 1080 ? '1080p (60 FPS)' : '720p (60 FPS)';
 
+                        console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | Sumber: ${sourceFps.toFixed(1)} FPS | Durasi Asal: ${durationSec.toFixed(1)}s`);
+                        await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps);
+
+                        // 1. Hantar fail video bersih tanpa kapsyen
                         await sock.sendMessage(remoteJid, {
                             video: { stream: fs.createReadStream(outputPath) },
                             mimetype: 'video/mp4'
                         }, { quoted: msg });
+
+                        // Reaksi Emoji ✅ Selesai
+                        try {
+                            await sock.sendMessage(remoteJid, {
+                                react: { text: '✅', key: msg.key }
+                            });
+                        } catch {}
+
+                        // 2. Hantar mesej laporan teknikal secara berasingan
+                        const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
+                        const interpNote = sourceFps < 48 ? ' (Motion Blended 60fps)' : ' (Native 60fps)';
 
                         await sock.sendMessage(remoteJid, {
                             text:
                                 `PENGOPTIMUMAN VIDEO SELESAI\n\n` +
                                 `Sila majukan (forward) video di atas terus ke Status WhatsApp anda tanpa melakukan sebarang suntingan atau pemotongan (trim) bagi mengekalkan resolusi 60 FPS.\n\n` +
                                 `Spesifikasi Output:\n` +
-                                `• Format: ${resLabel}\n` +
-                                `• Bitrate: ${vBitrate} kbps\n` +
-                                `• Profil Warna: BT.709 Standard`
+                                `• Format: ${resLabel}${interpNote}\n` +
+                                `• Kadar Bingkai: 60.0 FPS Malar (CFR)\n` +
+                                `• Bitrate: ${vBitrate} kbps (Sasaran ~14.5 MB)\n` +
+                                `• Profil Warna: BT.709 Standard${trimNote}`
                         });
 
-                        console.log(`[Selesai] Video 60 FPS & teks berasingan berjaya dihantar ke ${remoteJid}.`);
+                        console.log(`[Selesai] Video 60 FPS berjaya dihantar ke ${remoteJid}.`);
 
                     } catch (err) {
                         console.error('[Ralat Pemprosesan Video]', err);
@@ -727,11 +812,8 @@ async function startBot() {
                     }, { quoted: msg });
                 }
             } else {
-                if (enqueueResult.position === 1) {
-                    await sock.sendMessage(remoteJid, {
-                        text: `Video diterima. Pemprosesan video 60 FPS anda bermula sekarang...`
-                    }, { quoted: msg });
-                } else {
+                // Hanya hantar teks makluman jika pengguna menunggu di belakang antrian
+                if (enqueueResult.position > 1) {
                     await sock.sendMessage(remoteJid, {
                         text: `Video diterima. Anda berada di giliran ke-${enqueueResult.position} dalam antrian pemprosesan. Sistem akan memaklumkan anda sebaik sahaja pemprosesan bermula.`
                     }, { quoted: msg });
