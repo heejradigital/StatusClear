@@ -2,3 +2,5 @@
 auth_info/
 temp/
 .env
+
+data/

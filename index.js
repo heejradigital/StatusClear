@@ -15,18 +15,25 @@ const { pipeline } = require('stream/promises');
 const BOT_NAME = "Status Clear By Danial";
 const MAX_QUEUE_SIZE = 25;
 
+const ADMIN_NUMBER = (process.env.ADMIN_NUMBER || '601154474066').replace(/\D/g, '');
 const ADMIN_IDENTIFIERS = [
+    ADMIN_NUMBER,
     '60194066718',
     '0194066718',
-    '194066718',
     '68225740046362'
 ];
 
 const TEMP_DIR = path.join(__dirname, 'temp');
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_info');
-// Simpan fail ahli terus di dalam Volume Simpanan Kekal (AUTH_DIR)
-const MEMBERS_FILE = path.join(AUTH_DIR, 'members.json');
-const LEGACY_MEMBERS_FILE = path.join(__dirname, 'members.json');
+const DATA_DIR = path.join(__dirname, 'data');
+const ASSETS_DIR = path.join(__dirname, 'assets');
+const QR_PAYMENT_PATH = path.join(ASSETS_DIR, 'qr-payment.jpg');
+const GITKEEP_PATH = path.join(ASSETS_DIR, '.gitkeep');
+
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const PERSISTENT_USERS_FILE = path.join(AUTH_DIR, 'users.json');
+const LEGACY_MEMBERS_FILE = path.join(AUTH_DIR, 'members.json');
+const ROOT_MEMBERS_FILE = path.join(__dirname, 'members.json');
 
 // Pembersihan Direktori Sementara Semasa Pelancaran Bot
 if (fs.existsSync(TEMP_DIR)) {
@@ -46,42 +53,140 @@ if (fs.existsSync(TEMP_DIR)) {
 }
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(ASSETS_DIR)) fs.mkdirSync(ASSETS_DIR, { recursive: true });
+if (!fs.existsSync(QR_PAYMENT_PATH) && !fs.existsSync(GITKEEP_PATH)) {
+    try { fs.writeFileSync(GITKEEP_PATH, ''); } catch {}
+}
 
-// Migrasi Automatik: Pastikan data ahli dipindahkan ke Volume Kekal jika belum wujud
-function ensureMembersPersistence() {
+// -------------------------------------------------------------
+// TEMPLAT PAKEJ LANGGANAN RASMI
+// -------------------------------------------------------------
+const PACKAGE_TEMPLATE = 
+`*SENARAI PAKEJ LANGGANAN:*
+
+1️⃣ *1 Bulan (Asas)* — *RM10*
+   └ Tempoh Aktif: +30 Hari
+
+2️⃣ *3 Bulan (Popular)* — *RM25* _(Jimat RM5)_
+   └ Tempoh Aktif: +90 Hari
+
+3️⃣ *6 Bulan (Pro)* — *RM48* _(Jimat RM12)_
+   └ Tempoh Aktif: +180 Hari
+
+4️⃣ *1 Tahun (VIP)* — *RM90* _(Jimat RM30 • Percuma 3 Bulan)_
+   └ Tempoh Aktif: +365 Hari`;
+
+// -------------------------------------------------------------
+// SISTEM PENJANAAN KOD REFERRAL PINTAR (CORE NAME + 3 DIGITS)
+// -------------------------------------------------------------
+const NAME_PREFIXES = new Set([
+    'kak', 'abang', 'abg', 'adik', 'sis', 'bro',
+    'encik', 'en', 'puan', 'pn', 'cik',
+    'ustaz', 'ustazah', 'dato', 'datin',
+    'dr', 'mr', 'mrs', 'ms', 'hj', 'hjh',
+    'muhammad', 'mohd', 'mohamad', 'nur', 'siti'
+]);
+
+function extractCoreName(rawName) {
+    if (!rawName || typeof rawName !== 'string') return 'AHLI';
+    const words = rawName.trim().split(/[\s._\-–—,]+/);
+    const filtered = words.filter(w => {
+        const cleanW = w.toLowerCase().replace(/[^a-z]/g, '');
+        return cleanW && !NAME_PREFIXES.has(cleanW);
+    });
+
+    let chosen = '';
+    if (filtered.length > 0) {
+        chosen = filtered[0].replace(/[^a-zA-Z]/g, '').toUpperCase();
+    } else if (words.length > 0) {
+        chosen = words[words.length - 1].replace(/[^a-zA-Z]/g, '').toUpperCase();
+    }
+
+    if (!chosen || chosen.length < 2) chosen = 'AHLI';
+    return chosen.substring(0, 12);
+}
+
+function generateReferralCode(rawName, existingUsers = {}) {
+    const coreName = extractCoreName(rawName);
+    const existingCodes = new Set(
+        Object.values(existingUsers)
+            .map(u => (u.refCode || '').toUpperCase())
+            .filter(Boolean)
+    );
+
+    let code = '';
+    let attempts = 0;
+    do {
+        const digits = Math.floor(100 + Math.random() * 900); // 100-999 (3 digit)
+        code = `${coreName}${digits}`;
+        attempts++;
+        if (attempts > 500) {
+            code = `${coreName}${Math.floor(1000 + Math.random() * 9000)}`;
+            break;
+        }
+    } while (existingCodes.has(code));
+
+    return code;
+}
+
+// -------------------------------------------------------------
+// PENGURUSAN DATA PENGGUNA (users.json + Persistent Volume Sync)
+// -------------------------------------------------------------
+function loadUsers() {
     try {
-        if (!fs.existsSync(MEMBERS_FILE)) {
-            if (fs.existsSync(LEGACY_MEMBERS_FILE)) {
-                const legacyData = fs.readFileSync(LEGACY_MEMBERS_FILE, 'utf8');
-                fs.writeFileSync(MEMBERS_FILE, legacyData);
-                console.log('[Kekal Ahli] Senarai ahli sedia ada berjaya dipindahkan ke Volume Kekal.');
-            } else {
-                fs.writeFileSync(MEMBERS_FILE, JSON.stringify({}, null, 2));
+        let data = {};
+        if (fs.existsSync(USERS_FILE)) {
+            data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+        } else if (fs.existsSync(PERSISTENT_USERS_FILE)) {
+            data = JSON.parse(fs.readFileSync(PERSISTENT_USERS_FILE, 'utf8'));
+            fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
+        }
+
+        // Migrasi dari members.json lama jika data pengguna masih kosong
+        if (Object.keys(data).length === 0) {
+            const oldSource = fs.existsSync(LEGACY_MEMBERS_FILE) ? LEGACY_MEMBERS_FILE : (fs.existsSync(ROOT_MEMBERS_FILE) ? ROOT_MEMBERS_FILE : null);
+            if (oldSource) {
+                try {
+                    const legacy = JSON.parse(fs.readFileSync(oldSource, 'utf8'));
+                    for (const [key, val] of Object.entries(legacy)) {
+                        const phone = normalizeIdentifier(val.target || key);
+                        if (!phone || data[phone]) continue;
+                        const refCode = generateReferralCode(val.name || 'Ahli', data);
+                        data[phone] = {
+                            phone: phone,
+                            name: val.name || 'Ahli',
+                            status: (val.expiresTimestamp && val.expiresTimestamp > Date.now()) ? 'ACTIVE' : 'NEW',
+                            expiredAt: val.expiresTimestamp || null,
+                            refCode: refCode,
+                            referredBy: null,
+                            paidReferrals: 0,
+                            totalPaidReferrals: 0,
+                            refSentToExisting: false,
+                            reminded3Days: false
+                        };
+                    }
+                    saveUsers(data);
+                    console.log(`[Migrasi Ahli] Berjaya memindahkan ${Object.keys(data).length} ahli ke dalam ./data/users.json.`);
+                } catch (e) {
+                    console.error('Ralat migrasi members lama:', e);
+                }
             }
         }
-    } catch (err) {
-        console.error('Ralat inisialisasi fail ahli di volume:', err);
-    }
-}
-ensureMembersPersistence();
-
-function loadMembers() {
-    try {
-        if (!fs.existsSync(MEMBERS_FILE)) {
-            ensureMembersPersistence();
-        }
-        return JSON.parse(fs.readFileSync(MEMBERS_FILE, 'utf8'));
+        return data;
     } catch {
         return {};
     }
 }
 
-function saveMembers(data) {
+function saveUsers(data) {
     try {
-        if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
-        fs.writeFileSync(MEMBERS_FILE, JSON.stringify(data, null, 2));
+        fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
+        if (AUTH_DIR && fs.existsSync(AUTH_DIR)) {
+            try { fs.writeFileSync(PERSISTENT_USERS_FILE, JSON.stringify(data, null, 2)); } catch {}
+        }
     } catch (err) {
-        console.error('Ralat simpan ahli ke volume:', err);
+        console.error('Ralat simpan users.json:', err);
     }
 }
 
@@ -94,50 +199,18 @@ function normalizeIdentifier(input) {
     return clean;
 }
 
-async function checkAccess(sock, msg) {
-    const remoteJid = msg.key.remoteJid || '';
-    const fromMe = msg.key.fromMe;
+function findUserRecord(users, remoteJid, altJid) {
+    const cleanJid = normalizeIdentifier(remoteJid);
+    const cleanAlt = normalizeIdentifier(altJid);
 
-    const isOwner = fromMe || ADMIN_IDENTIFIERS.some(id => remoteJid.includes(id));
-    if (isOwner) {
-        return { authorized: true, isAdmin: true, daysLeft: Infinity };
+    if (cleanJid && users[cleanJid]) return users[cleanJid];
+    if (cleanAlt && users[cleanAlt]) return users[cleanAlt];
+
+    for (const u of Object.values(users)) {
+        if (u.phone === cleanJid || u.phone === cleanAlt) return u;
+        if (u.lid === cleanJid || u.lid === cleanAlt) return u;
     }
-
-    const members = loadMembers();
-    const cleanJid = remoteJid.replace(/@.*$/, '');
-    const now = Date.now();
-
-    for (const [key, data] of Object.entries(members)) {
-        if (remoteJid.includes(key) || cleanJid === key) {
-            if (data.expiresTimestamp > now) {
-                const daysLeft = Math.ceil((data.expiresTimestamp - now) / (1000 * 60 * 60 * 24));
-                return { authorized: true, isAdmin: false, daysLeft, data };
-            } else {
-                return { authorized: false, isExpired: true, data };
-            }
-        }
-    }
-
-    const altJid = msg.key.remoteJidAlt || msg.key.participantAlt || '';
-    const cleanAlt = altJid.replace(/@.*$/, '').replace(/:.*$/, '');
-    if (cleanAlt) {
-        for (const [key, data] of Object.entries(members)) {
-            if (cleanAlt === key || altJid.includes(key)) {
-                if (!members[cleanJid]) {
-                    members[cleanJid] = { ...data, linkedTo: key };
-                    saveMembers(members);
-                }
-                if (data.expiresTimestamp > now) {
-                    const daysLeft = Math.ceil((data.expiresTimestamp - now) / (1000 * 60 * 60 * 24));
-                    return { authorized: true, isAdmin: false, daysLeft, data };
-                } else {
-                    return { authorized: false, isExpired: true, data };
-                }
-            }
-        }
-    }
-
-    return { authorized: false, notRegistered: true };
+    return null;
 }
 
 const logger = pino({ level: 'silent' });
@@ -536,11 +609,11 @@ async function startBot() {
         } else if (connection === 'open') {
             console.log('\n======================================================');
             console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
-            console.log(`Pentadbir Sistem: 0194066718`);
+            console.log(`Pentadbir Sistem: ${ADMIN_NUMBER}`);
             console.log(`Enjin Video: 4K-Grade CAS Sharpening 60 FPS (15.2MB Max Bitrate & aq-mode 3)`);
             console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
+            console.log(`Sistem Langganan: ./data/users.json (NAME+3DIGIT Referral Aktif)`);
             console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Media`);
-            console.log(`Pangkalan Data Ahli: Kekal di dalam Volume (${MEMBERS_FILE})`);
             console.log('======================================================\n');
         }
     });
@@ -562,11 +635,50 @@ async function startBot() {
         }, 3500);
     }
 
+    // Peringatan Pembaharuan Automatik Setiap 6 Jam (Bagi Tempoh <= 72 Jam)
+    setInterval(async () => {
+        try {
+            const users = loadUsers();
+            const now = Date.now();
+            const SEVENTY_TWO_HOURS = 72 * 60 * 60 * 1000;
+            let updated = false;
+
+            for (const user of Object.values(users)) {
+                if (user.status === 'ACTIVE' && user.expiredAt && user.expiredAt > now) {
+                    const timeLeft = user.expiredAt - now;
+                    if (timeLeft <= SEVENTY_TWO_HOURS && !user.reminded3Days) {
+                        user.reminded3Days = true;
+                        updated = true;
+                        const targetJid = user.phone.includes('@') ? user.phone : `${user.phone}@s.whatsapp.net`;
+                        const expDateStr = new Date(user.expiredAt).toLocaleDateString('ms-MY', {
+                            day: '2-digit', month: '2-digit', year: 'numeric'
+                        });
+
+                        try {
+                            await sock.sendMessage(targetJid, {
+                                text:
+                                    `⚠️ PERINGATAN PEMBAHARUAN LANGGANAN (${BOT_NAME})\n\n` +
+                                    `Hai ${user.name}, tempoh langganan keahlian anda akan tamat pada *${expDateStr}* (kurang 3 hari lagi).\n\n` +
+                                    `Untuk mengelakkan sebarang gangguan terhadap pemprosesan video 60 FPS & foto QHD+, sila perbaharui langganan anda:\n\n` +
+                                    `${PACKAGE_TEMPLATE}\n\n` +
+                                    `Taip *BAYAR* untuk mendapatkan kod QR pembayaran secara langsung.`
+                            });
+                        } catch {}
+                    }
+                }
+            }
+            if (updated) saveUsers(users);
+        } catch (e) {
+            console.error('[Ralat Peringatan Pembaharuan]:', e);
+        }
+    }, 6 * 60 * 60 * 1000);
+
     sock.ev.on('messages.upsert', async ({ messages }) => {
         for (const msg of messages) {
             if (!msg || !msg.message) continue;
 
             const remoteJid = msg.key.remoteJid || '';
+            const altJid = msg.key.remoteJidAlt || msg.key.participantAlt || '';
 
             if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@broadcast') || remoteJid.endsWith('@newsletter')) {
                 continue;
@@ -586,6 +698,7 @@ async function startBot() {
                     text.includes('AKSES') ||
                     text.includes('PENTADBIR') ||
                     text.includes('PENGOPTIMUMAN') ||
+                    text.includes('SENARAI PAKEJ') ||
                     text.startsWith('STATUS') ||
                     text.startsWith('MAKLUMAN') ||
                     text.startsWith('PERINGATAN')
@@ -599,245 +712,484 @@ async function startBot() {
                 }
             }
 
-            const access = await checkAccess(sock, msg);
+            const users = loadUsers();
+            const cleanPhone = normalizeIdentifier(remoteJid);
+            let user = findUserRecord(users, remoteJid, altJid);
+
+            // Auto-pendaftaran pengguna baharu jika belum wujud
+            if (!user && cleanPhone) {
+                const pushName = msg.pushName || 'Pengguna';
+                const refCode = generateReferralCode(pushName, users);
+                user = {
+                    phone: cleanPhone,
+                    name: pushName,
+                    status: 'NEW',
+                    expiredAt: null,
+                    refCode: refCode,
+                    referredBy: null,
+                    paidReferrals: 0,
+                    totalPaidReferrals: 0,
+                    refSentToExisting: false,
+                    reminded3Days: false
+                };
+                users[cleanPhone] = user;
+                saveUsers(users);
+            }
+
+            const fromMe = msg.key.fromMe;
+            const isAdmin = fromMe || ADMIN_IDENTIFIERS.some(id => remoteJid.includes(id) || cleanPhone === id) || cleanPhone === ADMIN_NUMBER;
+            const isActive = user && user.status === 'ACTIVE' && user.expiredAt && user.expiredAt > Date.now();
+
             const textContent = (inner.conversation || inner.extendedTextMessage?.text || '').trim();
             const textParts = textContent.split(/\s+/);
             const command = textParts[0].toLowerCase();
+            const upperText = textContent.toUpperCase();
 
-            // 1. PENGENDALIAN ARAHAN TEKS
-            if (textContent) {
-                console.log(`[Mesej Masuk] ${remoteJid}: "${textContent}"`);
+            // ---------------------------------------------------------
+            // 1. PENGENDALIAN ARAHAN PENTADBIR (ADMIN ONLY)
+            // ---------------------------------------------------------
+            if (isAdmin && textContent.startsWith('/')) {
+                console.log(`[Arahan Pentadbir] ${remoteJid}: "${textContent}"`);
 
-                if (['bantuan', 'help', 'menu'].includes(command)) {
-                    if (access.isAdmin) {
+                // /waiting: Senarai pengguna yang sedang menunggu pengesahan
+                if (command === '/waiting') {
+                    const waitingList = Object.values(users).filter(u => u.status === 'WAITING');
+                    if (waitingList.length === 0) {
                         await sock.sendMessage(remoteJid, {
-                            text:
-                                `PANDUAN PERINTAH PENTADBIR (${BOT_NAME})\n\n` +
-                                `1. daftar <nombor biasa> [nama]\n` +
-                                `   Mendaftarkan ahli baharu selama 30 hari.\n` +
-                                `   Contoh: daftar 01113270914 fieyanina\n\n` +
-                                `2. padam <nombor/ID>\n` +
-                                `   Membatalkan akses ahli daripada pangkalan data.\n\n` +
-                                `3. senarai\n` +
-                                `   Memaparkan senarai semua ahli aktif dan baki tempoh.\n\n` +
-                                `4. semak <nombor/ID>\n` +
-                                `   Menyemak status langganan sesuatu akaun.\n\n` +
-                                `5. ram\n` +
-                                `   Menyemak status memori pelayan dan statistik antrian.`
-                        }, { quoted: msg });
-                    } else {
-                        await sock.sendMessage(remoteJid, {
-                            text:
-                                `PANDUAN PENGGUNA (${BOT_NAME})\n\n` +
-                                `1. Pengoptimuman Video:\n` +
-                                `   Sila hantar video anda sebagai fail Dokumen (Lampirkan > Dokumen > Galeri) bagi mengekalkan kualiti 60 FPS tanpa mampatan.\n\n` +
-                                `2. Pengoptimuman Foto (QHD+):\n` +
-                                `   Hantar foto (biasa atau dokumen) untuk diproses ke resolusi 2560px QHD+ dengan teknologi ketajaman CAS.\n\n` +
-                                `3. Semakan Langganan:\n` +
-                                `   Taip "status" untuk melihat baki tempoh keahlian anda.\n\n` +
-                                `Perkhidmatan ini dikhaskan untuk ahli yang berdaftar sahaja.`
-                        }, { quoted: msg });
-                    }
-                    continue;
-                }
-
-                if (command === 'daftar' && access.isAdmin) {
-                    const rawTarget = textParts[1];
-                    const memberName = textParts.slice(2).join(' ') || 'Ahli';
-
-                    if (!rawTarget) {
-                        await sock.sendMessage(remoteJid, {
-                            text: "Format tidak sah. Sila gunakan format: daftar <nombor> [nama]\nContoh: daftar 01113270914 fieyanina"
+                            text: "Tiada pengguna di dalam Senarai Menunggu (Waiting List) pada masa ini."
                         }, { quoted: msg });
                         continue;
                     }
 
-                    const target = normalizeIdentifier(rawTarget);
-                    const members = loadMembers();
-                    const now = Date.now();
-                    const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+                    let resp = `📋 SENARAI MENUNGGU (${waitingList.length} Orang)\n\n`;
+                    waitingList.forEach((u, i) => {
+                        const refInfo = u.referredBy ? `Dijemput oleh: ${u.referredBy}` : `Bayaran Terus (Direct)`;
+                        resp += `${i + 1}. ${u.name} (${u.phone})\n   └ Status: ${refInfo}\n\n`;
+                    });
+                    resp += `Gunakan arahan: /add <nombor> <hari> [nama] untuk mengaktifkan.`;
+                    await sock.sendMessage(remoteJid, { text: resp.trim() }, { quoted: msg });
+                    continue;
+                }
 
-                    let baseTime = now;
-                    if (members[target] && members[target].expiresTimestamp > now) {
-                        baseTime = members[target].expiresTimestamp;
+                // /add <phone> <days> [optional_name]
+                if (command === '/add') {
+                    const rawTarget = textParts[1];
+                    const days = parseInt(textParts[2], 10);
+                    const optName = textParts.slice(3).join(' ').trim();
+
+                    if (!rawTarget || isNaN(days) || days <= 0) {
+                        await sock.sendMessage(remoteJid, {
+                            text: "Format tidak sah. Sila gunakan format: /add <nombor> <hari> [nama]\nContoh: /add 01113270914 30 Fieyanina"
+                        }, { quoted: msg });
+                        continue;
                     }
 
-                    const newExpiresTimestamp = baseTime + THIRTY_DAYS;
-                    const expiryDateStr = new Date(newExpiresTimestamp).toLocaleDateString('ms-MY', {
+                    const targetPhone = normalizeIdentifier(rawTarget);
+                    let targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
+
+                    if (!targetUser) {
+                        const fallbackName = optName || 'Ahli';
+                        targetUser = {
+                            phone: targetPhone,
+                            name: fallbackName,
+                            status: 'ACTIVE',
+                            expiredAt: Date.now() + days * 24 * 60 * 60 * 1000,
+                            refCode: generateReferralCode(fallbackName, users),
+                            referredBy: null,
+                            paidReferrals: 0,
+                            totalPaidReferrals: 0,
+                            refSentToExisting: true,
+                            reminded3Days: false
+                        };
+                        users[targetPhone] = targetUser;
+                    } else {
+                        if (optName) targetUser.name = optName;
+                        const now = Date.now();
+                        const baseTime = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
+                        targetUser.expiredAt = baseTime + days * 24 * 60 * 60 * 1000;
+                        targetUser.status = 'ACTIVE';
+                        targetUser.reminded3Days = false;
+                        targetUser.refSentToExisting = true;
+                        if (!targetUser.refCode) {
+                            targetUser.refCode = generateReferralCode(targetUser.name, users);
+                        }
+                    }
+
+                    // Ganjaran Penaja (Referral Reward)
+                    let referralRewardMsg = '';
+                    if (targetUser.referredBy && !targetUser.referralCredited) {
+                        targetUser.referralCredited = true;
+                        const referrer = users[targetUser.referredBy] || Object.values(users).find(u => u.phone === targetUser.referredBy);
+                        if (referrer) {
+                            referrer.paidReferrals = (referrer.paidReferrals || 0) + 1;
+                            referrer.totalPaidReferrals = (referrer.totalPaidReferrals || 0) + 1;
+                            referralRewardMsg = `\n• Penaja Diselaraskan: ${referrer.name} (${referrer.phone}) [+1 Referral, Baki: ${referrer.paidReferrals}/3]`;
+
+                            if (referrer.paidReferrals >= 3) {
+                                referrer.paidReferrals -= 3;
+                                const refNow = Date.now();
+                                const refBase = (referrer.expiredAt && referrer.expiredAt > refNow) ? referrer.expiredAt : refNow;
+                                referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
+                                referrer.status = 'ACTIVE';
+
+                                const refJid = referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`;
+                                try {
+                                    await sock.sendMessage(refJid, {
+                                        text:
+                                            `🎉 TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!\n\n` +
+                                            `Hai ${referrer.name}, anda telah berjaya mengumpul 3 rakan yang melanggan menggunakan kod referral anda (*${referrer.refCode}*).\n\n` +
+                                            `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n` +
+                                            `Tarikh Luput Baharu: ${new Date(referrer.expiredAt).toLocaleDateString('ms-MY')}`
+                                    });
+                                } catch {}
+                                referralRewardMsg += ` ➔ BONUS +30 HARI PERCUMA DIBERIKAN!`;
+                            }
+                        }
+                    }
+
+                    saveUsers(users);
+
+                    const expDateStr = new Date(targetUser.expiredAt).toLocaleDateString('ms-MY', {
                         day: '2-digit', month: '2-digit', year: 'numeric'
                     });
 
-                    const memberData = {
-                        name: memberName,
-                        target: target,
-                        registeredAt: new Date(now).toISOString(),
-                        expiresTimestamp: newExpiresTimestamp,
-                        expiresDateStr: expiryDateStr
-                    };
-
-                    members[target] = memberData;
-
+                    // Notifikasi kepada ahli baharu/aktif
+                    const userJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
                     try {
-                        const checkJid = target.includes('@') ? target : `${target}@s.whatsapp.net`;
-                        const [waUser] = await sock.onWhatsApp(checkJid);
-                        if (waUser && waUser.lid) {
-                            const cleanLid = waUser.lid.replace(/@.*$/, '');
-                            members[cleanLid] = { ...memberData, linkedTo: target, lid: cleanLid };
-                            console.log(`[Auto-LID Sync] ${target} -> ${cleanLid}`);
-                        }
-                    } catch (err) {}
-
-                    saveMembers(members);
-
-                    const days = Math.ceil((newExpiresTimestamp - now) / (1000 * 60 * 60 * 24));
+                        await sock.sendMessage(userJid, {
+                            text:
+                                `🎉 TAHNIAH! LANGGANAN ANDA TELAH DIAKTIFKAN\n\n` +
+                                `Nama: ${targetUser.name}\n` +
+                                `Status: AKTIF (+${days} Hari)\n` +
+                                `Tarikh Luput: ${expDateStr}\n` +
+                                `Kod Referral Peribadi Anda: *${targetUser.refCode}*\n\n` +
+                                `🎁 Ganjaran Referral Peribadi:\n` +
+                                `Ajak 3 rakan anda melanggan menggunakan kod anda (*${targetUser.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan tambahan secara automatik!\n\n` +
+                                `Sila hantar video atau foto anda sebagai Dokumen untuk memulakan pemprosesan.`
+                        });
+                    } catch {}
 
                     await sock.sendMessage(remoteJid, {
                         text:
-                            `PENDAFTARAN AHLI BERJAYA\n\n` +
-                            `Nama: ${memberName}\n` +
-                            `Nombor Telefon: ${target}\n` +
-                            `Tempoh Diluluskan: 30 Hari (Baki: ${days} hari)\n` +
-                            `Tarikh Tamat: ${expiryDateStr}\n` +
-                            `Status: Aktif & Disimpan Kekal`
+                            `PENGAKTIFAN KEAHLIAN BERJAYA\n\n` +
+                            `• Nama: ${targetUser.name}\n` +
+                            `• Nombor: ${targetPhone}\n` +
+                            `• Tempoh: +${days} Hari\n` +
+                            `• Tarikh Luput: ${expDateStr}\n` +
+                            `• Kod Referral: ${targetUser.refCode}${referralRewardMsg}`
                     }, { quoted: msg });
                     continue;
                 }
 
-                if (['senarai', 'ahli'].includes(command) && access.isAdmin) {
-                    const members = loadMembers();
-                    const uniqueMembers = {};
+                // /setref <phone> <CUSTOMNAME>
+                if (command === '/setref') {
+                    const rawTarget = textParts[1];
+                    const customRaw = textParts[2];
 
-                    for (const [key, data] of Object.entries(members)) {
-                        const primaryKey = data.linkedTo || data.target || key;
-                        uniqueMembers[primaryKey] = data;
-                    }
-
-                    const keys = Object.keys(uniqueMembers);
-                    if (keys.length === 0) {
+                    if (!rawTarget || !customRaw) {
                         await sock.sendMessage(remoteJid, {
-                            text: "Tiada ahli berdaftar di dalam pangkalan data pada masa ini."
+                            text: "Format tidak sah. Sila gunakan format: /setref <nombor> <KOD_NAMA>\nContoh: /setref 01113270914 FIEYA"
                         }, { quoted: msg });
                         continue;
                     }
 
-                    const now = Date.now();
-                    let response = `SENARAI KEAHLIAN BERDAFTAR (${keys.length} Orang)\n\n`;
+                    const targetPhone = normalizeIdentifier(rawTarget);
+                    const targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
 
-                    keys.forEach((key, index) => {
-                        const m = uniqueMembers[key];
-                        const isActive = m.expiresTimestamp > now;
-                        const daysLeft = isActive ? Math.ceil((m.expiresTimestamp - now) / (1000 * 60 * 60 * 24)) : 0;
-                        const statusStr = isActive ? `Aktif (${daysLeft} hari lagi)` : `Tamat Tempoh`;
-
-                        response += `${index + 1}. ${m.name} (${key})\n   Status: ${statusStr}\n   Luput: ${m.expiresDateStr}\n\n`;
-                    });
-
-                    await sock.sendMessage(remoteJid, { text: response.trim() }, { quoted: msg });
-                    continue;
-                }
-
-                if (['padam', 'buang'].includes(command) && access.isAdmin) {
-                    const target = normalizeIdentifier(textParts[1]);
-                    const members = loadMembers();
-
-                    let found = false;
-                    for (const key of Object.keys(members)) {
-                        if (key === target || members[key]?.target === target || members[key]?.linkedTo === target) {
-                            delete members[key];
-                            found = true;
-                        }
-                    }
-
-                    if (!found) {
+                    if (!targetUser) {
                         await sock.sendMessage(remoteJid, {
-                            text: `Akaun ${target || 'tersebut'} tidak ditemui di dalam senarai ahli.`
+                            text: `Akaun ${targetPhone} tidak dijumpai di dalam pangkalan data.`
                         }, { quoted: msg });
                         continue;
                     }
 
-                    saveMembers(members);
-
-                    await sock.sendMessage(remoteJid, {
-                        text: `PENGESAHAN: Akses keahlian bagi nombor ${target} telah dibatalkan serta-merta.`
-                    }, { quoted: msg });
-                    continue;
-                }
-
-                if (['status', 'baki', 'langganan'].includes(command)) {
-                    if (access.isAdmin) {
-                        await sock.sendMessage(remoteJid, {
-                            text:
-                                `STATUS AKAUN PENTADBIR\n\n` +
-                                `Akaun: Pentadbir Utama (Danial)\n` +
-                                `Akses: Tanpa Had (Penuh)\n` +
-                                `Pelayan: Aktif`
-                        }, { quoted: msg });
-                    } else if (access.authorized) {
-                        await sock.sendMessage(remoteJid, {
-                            text:
-                                `STATUS KEAHLIAN ANDA\n\n` +
-                                `Nama: ${access.data.name}\n` +
-                                `Status: Aktif\n` +
-                                `Baki Tempoh: ${access.daysLeft} hari\n` +
-                                `Tarikh Luput: ${access.data.expiresDateStr}\n\n` +
-                                `Sila hubungi pentadbir sekiranya anda ingin memperbaharui langganan.`
-                        }, { quoted: msg });
-                    } else {
-                        const cleanSender = remoteJid.replace(/@.*$/, '');
-                        await sock.sendMessage(remoteJid, {
-                            text:
-                                `STATUS: TIADA LANGGANAN AKTIF\n\n` +
-                                `Akaun anda belum berdaftar sebagai ahli aktif ${BOT_NAME}.\n\n` +
-                                `Sila hubungi pentadbir di talian 019-4066718 untuk urusan pendaftaran keahlian bulanan.`
-                        }, { quoted: msg });
+                    let cleanCode = customRaw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+                    // Jika belum ada 3 digit di belakang, tambah 3 digit unik
+                    if (!/\d{3}$/.test(cleanCode)) {
+                        const digits = Math.floor(100 + Math.random() * 900);
+                        cleanCode = `${cleanCode.replace(/\d/g, '')}${digits}`;
                     }
-                    continue;
-                }
 
-                if (['ram', 'memori'].includes(command)) {
-                    const mem = process.memoryUsage();
-                    const rssMB = (mem.rss / (1024 * 1024)).toFixed(1);
-                    const heapUsedMB = (mem.heapUsed / (1024 * 1024)).toFixed(1);
-                    const uptimeSec = Math.floor(process.uptime());
-                    const hours = Math.floor(uptimeSec / 3600);
-                    const minutes = Math.floor((uptimeSec % 3600) / 60);
-                    const percentage = ((parseFloat(rssMB) / 256) * 100).toFixed(1);
+                    targetUser.refCode = cleanCode;
+                    saveUsers(users);
+
+                    const userJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                    try {
+                        await sock.sendMessage(userJid, {
+                            text:
+                                `PENGEMASKINIAN KOD REFERRAL (${BOT_NAME})\n\n` +
+                                `Pentadbir telah mengemas kini kod referral peribadi anda kepada: *${cleanCode}*\n\n` +
+                                `Kongsi kod baharu ini kepada rakan anda untuk menikmati ganjaran 1 bulan percuma bagi setiap 3 langganan!`
+                        });
+                    } catch {}
 
                     await sock.sendMessage(remoteJid, {
-                        text:
-                            `STATUS SISTEM & PRESTASI PELAYAN\n\n` +
-                            `Penggunaan Memori:\n` +
-                            `• Memori Fizikal (RSS): ${rssMB} MB / 256.0 MB (${percentage}%)\n` +
-                            `• Memori Heap Aktif: ${heapUsedMB} MB\n` +
-                            `• Kawalan Memori (GC): Aktif (--expose-gc)\n` +
-                            `• Status: Cemerlang & Terkawal\n\n` +
-                            `Status Antrian Pemprosesan:\n` +
-                            `• Sedang Diproses: ${videoQueue.activeJob ? '1 Media' : 'Tiada'}\n` +
-                            `• Menunggu Dalam Antrian: ${videoQueue.waitingLength} / ${MAX_QUEUE_SIZE} Media\n\n` +
-                            `Masa Operasi Pelayan: ${hours} jam ${minutes} minit`
+                        text: `PENGESAHAN: Kod referral bagi ${targetUser.name} (${targetPhone}) telah dikemas kini kepada *${cleanCode}*.`
                     }, { quoted: msg });
                     continue;
                 }
 
-                if (access.authorized) {
+                // /broadcastref: Hantar kod referral kepada semua ahli aktif
+                if (command === '/broadcastref') {
+                    const activeMembers = Object.values(users).filter(u => u.status === 'ACTIVE' && u.expiredAt > Date.now());
+                    await sock.sendMessage(remoteJid, {
+                        text: `Memulakan penghantaran kod referral kepada ${activeMembers.length} ahli aktif dengan sela masa 2 saat...`
+                    }, { quoted: msg });
+
+                    let sentCount = 0;
+                    for (const m of activeMembers) {
+                        if (!m.refCode) m.refCode = generateReferralCode(m.name, users);
+                        m.refSentToExisting = true;
+                        const targetJid = m.phone.includes('@') ? m.phone : `${m.phone}@s.whatsapp.net`;
+
+                        try {
+                            await sock.sendMessage(targetJid, {
+                                text:
+                                    `🎁 KOD REFERRAL PERIBADI ANDA: *${m.refCode}*\n\n` +
+                                    `Hai ${m.name}, sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran bulanan percuma!\n\n` +
+                                    `Ajak 3 rakan anda melanggan menggunakan kod referral peribadi anda (*${m.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan secara automatik! 🚀`
+                            });
+                            sentCount++;
+                        } catch {}
+                        await new Promise(r => setTimeout(r, 2000));
+                    }
+                    saveUsers(users);
+
+                    await sock.sendMessage(remoteJid, {
+                        text: `Selesai! Kod referral berjaya dihantar kepada ${sentCount} orang ahli aktif.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                // /check <phone>
+                if (command === '/check') {
+                    const targetPhone = normalizeIdentifier(textParts[1]);
+                    const targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
+
+                    if (!targetUser) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `Akaun ${targetPhone || 'tersebut'} tidak dijumpai di dalam pangkalan data.`
+                        }, { quoted: msg });
+                        continue;
+                    }
+
+                    const isAct = targetUser.status === 'ACTIVE' && targetUser.expiredAt && targetUser.expiredAt > Date.now();
+                    const daysLeft = isAct ? Math.ceil((targetUser.expiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0;
+                    const expStr = targetUser.expiredAt ? new Date(targetUser.expiredAt).toLocaleDateString('ms-MY') : 'Tiada';
+
                     await sock.sendMessage(remoteJid, {
                         text:
-                            `Selamat kembali ke ${BOT_NAME}.\n\n` +
-                            `Sila hantar foto atau lampirkan video sebagai Dokumen untuk memulakan pengoptimuman ultra-kualiti WhatsApp Status.\n\n` +
-                            `Taip "bantuan" untuk melihat panduan arahan.`
+                            `MAKLUMAT KEAHLIAN PENGGUNA\n\n` +
+                            `• Nama: ${targetUser.name}\n` +
+                            `• Nombor: ${targetUser.phone}\n` +
+                            `• Status: ${isAct ? 'AKTIF' : targetUser.status}\n` +
+                            `• Baki Tempoh: ${daysLeft} hari (Luput: ${expStr})\n` +
+                            `• Kod Referral: ${targetUser.refCode || 'Tiada'}\n` +
+                            `• Kemajuan Referral: ${targetUser.paidReferrals || 0}/3 (Jumlah Berjaya: ${targetUser.totalPaidReferrals || 0})\n` +
+                            `• Dijemput Oleh: ${targetUser.referredBy || 'Tiada'}`
+                    }, { quoted: msg });
+                    continue;
+                }
+            }
+
+            // ---------------------------------------------------------
+            // 2. PENGENDALIAN KOD RUJUKAN (REFERRAL REDEMPTION)
+            // ---------------------------------------------------------
+            const matchedReferrer = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === upperText);
+            if (matchedReferrer) {
+                // Sekatan Rujukan Diri Sendiri (Self-Referral)
+                if (user && (user.phone === matchedReferrer.phone || user.refCode === matchedReferrer.refCode)) {
+                    await sock.sendMessage(remoteJid, {
+                        text: "Ralat: Anda tidak boleh menggunakan kod referral peribadi anda sendiri."
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                // Jika pengguna sudah aktif
+                if (isActive) {
+                    await sock.sendMessage(remoteJid, {
+                        text: `Akaun anda sudah berstatus AKTIF sehingga ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}. Kod referral hanya sah untuk pendaftaran atau pembaharuan langganan.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                // Simpan maklumat referral & tukar status kepada WAITING
+                user.referredBy = matchedReferrer.phone;
+                user.status = 'WAITING';
+                saveUsers(users);
+
+                const confirmCaption =
+                    `✅ *KOD REFERRAL DISAHKAN!*\n\n` +
+                    `Anda dijemput oleh *${matchedReferrer.name}* (${matchedReferrer.refCode}).\n\n` +
+                    `${PACKAGE_TEMPLATE}\n\n` +
+                    `📌 Sila buat pembayaran mengikut pakej pilihan anda.\n\n` +
+                    `Anda telah dimasukkan ke dalam Senarai Menunggu (Waiting List). Sila hantar resit pembayaran anda di sini setelah selesai untuk pengesahan segera oleh pentadbir.`;
+
+                if (fs.existsSync(QR_PAYMENT_PATH)) {
+                    await sock.sendMessage(remoteJid, {
+                        image: fs.readFileSync(QR_PAYMENT_PATH),
+                        caption: confirmCaption
                     }, { quoted: msg });
                 } else {
                     await sock.sendMessage(remoteJid, {
+                        text: confirmCaption
+                    }, { quoted: msg });
+                }
+
+                // Alert Pentadbir Sistem
+                const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
+                try {
+                    await sock.sendMessage(adminJid, {
                         text:
-                            `PEMBERITAHUAN AKSES SISTEM\n\n` +
-                            `Akaun anda belum berdaftar sebagai ahli aktif ${BOT_NAME}.\n\n` +
-                            `Perkhidmatan ini dikhaskan untuk ahli yang melanggan sahaja. Sila hubungi pentadbir di talian 019-4066718 untuk pendaftaran.`
+                            `🔔 NOTIFIKASI WAITING LIST (KOD REFERRAL)\n\n` +
+                            `Pengguna: ${user.name} (${user.phone})\n` +
+                            `Dijemput Oleh: ${matchedReferrer.name} (${matchedReferrer.phone} - ${matchedReferrer.refCode})\n` +
+                            `Status: Menunggu Resit Pembayaran\n\n` +
+                            `Gunakan: /add ${user.phone} <hari>`
+                    });
+                } catch {}
+                continue;
+            }
+
+            // ---------------------------------------------------------
+            // 3. PENGENDALIAN PEMBAYARAN TERUS (BAYAR)
+            // ---------------------------------------------------------
+            if (['bayar', '/bayar', 'qr'].includes(command) || upperText === 'BAYAR') {
+                if (isActive) {
+                    await sock.sendMessage(remoteJid, {
+                        text: `Akaun anda masih berstatus AKTIF sehingga ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}. Anda tidak perlu membuat pembayaran sekarang.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                user.status = 'WAITING';
+                saveUsers(users);
+
+                const payCaption =
+                    `MAKLUMAT PEMBAYARAN LANGGANAN\n\n` +
+                    `${PACKAGE_TEMPLATE}\n\n` +
+                    `📌 Sila buat pembayaran mengikut pakej pilihan anda.\n\n` +
+                    `Anda telah dimasukkan ke dalam Senarai Menunggu (Waiting List). Sila hantar resit pembayaran anda di sini setelah selesai untuk pengesahan segera oleh pentadbir.`;
+
+                if (fs.existsSync(QR_PAYMENT_PATH)) {
+                    await sock.sendMessage(remoteJid, {
+                        image: fs.readFileSync(QR_PAYMENT_PATH),
+                        caption: payCaption
+                    }, { quoted: msg });
+                } else {
+                    await sock.sendMessage(remoteJid, {
+                        text: payCaption
+                    }, { quoted: msg });
+                }
+
+                const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
+                try {
+                    await sock.sendMessage(adminJid, {
+                        text:
+                            `🔔 NOTIFIKASI WAITING LIST (BAYARAN TERUS)\n\n` +
+                            `Pengguna: ${user.name} (${user.phone})\n` +
+                            `Status: Menunggu Resit Pembayaran\n\n` +
+                            `Gunakan: /add ${user.phone} <hari>`
+                    });
+                } catch {}
+                continue;
+            }
+
+            // ---------------------------------------------------------
+            // 4. ALIRAN START ONBOARDING & STATUS PENGGUNA
+            // ---------------------------------------------------------
+            if (['start', '/start', 'mula', 'menu', 'bantuan', 'help'].includes(command) || upperText === 'START') {
+                if (isActive) {
+                    if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
+                    user.refSentToExisting = true;
+                    saveUsers(users);
+
+                    const expDateStr = new Date(user.expiredAt).toLocaleDateString('ms-MY', {
+                        day: '2-digit', month: '2-digit', year: 'numeric'
+                    });
+
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `SELAMAT KEMBALI KE ${BOT_NAME}!\n\n` +
+                            `Status Keahlian: AKTIF\n` +
+                            `Tarikh Luput: ${expDateStr}\n` +
+                            `Kod Referral Peribadi Anda: *${user.refCode}*\n\n` +
+                            `Panduan Penggunaan:\n` +
+                            `• Video 60 FPS: Sila hantar video anda sebagai fail Dokumen (Lampiran > Dokumen > Galeri) bagi mengekalkan kualiti tanpa mampatan.\n` +
+                            `• Foto QHD+: Hantar foto anda untuk diproses ke resolusi 2560px dengan ketajaman CAS.\n\n` +
+                            `🎁 Ganjaran Referral Peribadi:\n` +
+                            `Ajak 3 rakan anda melanggan menggunakan kod anda (*${user.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik!`
+                    }, { quoted: msg });
+                } else {
+                    const isExpired = user && user.expiredAt && user.expiredAt <= Date.now();
+                    const introText = isExpired
+                        ? `STATUS: LANGGANAN TELAH TAMAT\n\nTempoh keahlian anda bagi ${BOT_NAME} telah tamat pada ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}.`
+                        : `STATUS: TIADA LANGGANAN AKTIF\n\nSelamat datang ke ${BOT_NAME}. Akaun anda belum mempunyai langganan aktif untuk memproses video 60 FPS & foto WhatsApp Status berkualiti tinggi.`;
+
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `${introText}\n\n` +
+                            `${PACKAGE_TEMPLATE}\n\n` +
+                            `Cara Mendaftar:\n` +
+                            `1. Jika anda mempunyai kod referral rakan, balas dengan kod tersebut (contoh: FIEYANINA482).\n` +
+                            `2. Atau balas *BAYAR* untuk menerima maklumat pembayaran terus.`
                     }, { quoted: msg });
                 }
                 continue;
             }
 
-            // 2. VIDEO BIASA
+            if (['status', 'baki', 'langganan'].includes(command)) {
+                if (isActive) {
+                    const daysLeft = Math.ceil((user.expiredAt - Date.now()) / (1000 * 60 * 60 * 24));
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `STATUS KEAHLIAN ANDA\n\n` +
+                            `• Nama: ${user.name}\n` +
+                            `• Status: Aktif (${daysLeft} hari lagi)\n` +
+                            `• Tarikh Luput: ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}\n` +
+                            `• Kod Referral: *${user.refCode}*\n` +
+                            `• Kemajuan Ganjaran: ${user.paidReferrals || 0}/3 rakan melanggan\n\n` +
+                            `Ajak rakan anda melanggan menggunakan kod referral anda untuk menerima 1 bulan langganan percuma!`
+                    }, { quoted: msg });
+                } else {
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `STATUS: TIADA LANGGANAN AKTIF\n\n` +
+                            `Akaun anda belum berdaftar sebagai ahli aktif ${BOT_NAME}.\n\n` +
+                            `Sila taip *START* untuk melihat pakej dan memulakan langganan.`
+                    }, { quoted: msg });
+                }
+                continue;
+            }
+
+            if (['ram', 'memori'].includes(command)) {
+                const mem = process.memoryUsage();
+                const rssMB = (mem.rss / (1024 * 1024)).toFixed(1);
+                const heapUsedMB = (mem.heapUsed / (1024 * 1024)).toFixed(1);
+                const uptimeSec = Math.floor(process.uptime());
+                const hours = Math.floor(uptimeSec / 3600);
+                const minutes = Math.floor((uptimeSec % 3600) / 60);
+                const percentage = ((parseFloat(rssMB) / 256) * 100).toFixed(1);
+
+                await sock.sendMessage(remoteJid, {
+                    text:
+                        `STATUS SISTEM & PRESTASI PELAYAN\n\n` +
+                        `Penggunaan Memori:\n` +
+                        `• Memori Fizikal (RSS): ${rssMB} MB / 256.0 MB (${percentage}%)\n` +
+                        `• Memori Heap Aktif: ${heapUsedMB} MB\n` +
+                        `• Kawalan Memori (GC): Aktif (--expose-gc)\n` +
+                        `• Status: Cemerlang & Terkawal\n\n` +
+                        `Status Antrian Pemprosesan:\n` +
+                        `• Sedang Diproses: ${videoQueue.activeJob ? '1 Media' : 'Tiada'}\n` +
+                        `• Menunggu Dalam Antrian: ${videoQueue.waitingLength} / ${MAX_QUEUE_SIZE} Media\n\n` +
+                        `Masa Operasi Pelayan: ${hours} jam ${minutes} minit`
+                }, { quoted: msg });
+                continue;
+            }
+
+            // ---------------------------------------------------------
+            // 5. PENGESANAN MEDIA & SEKATAN KEAHLIAN (MEMBERSHIP GATE)
+            // ---------------------------------------------------------
             if (inner.videoMessage) {
                 await sock.sendMessage(remoteJid, {
                     text:
@@ -851,7 +1203,6 @@ async function startBot() {
                 continue;
             }
 
-            // 3. PENGESANAN MEDIA (FOTO & DOKUMEN VIDEO/FOTO)
             const isDirectImage = !!inner.imageMessage;
             const docMsg = inner.documentMessage || inner.documentWithCaptionMessage?.message?.documentMessage;
             const docMime = (docMsg?.mimetype || '').toLowerCase();
@@ -861,23 +1212,32 @@ async function startBot() {
             const isDocVideo = !!docMsg && (docMime.startsWith('video/') || /\.(mp4|mov|mkv|avi|3gp|webm|m4v)$/i.test(docFileName));
 
             if (!isDirectImage && !isDocImage && !isDocVideo) {
+                if (textContent && !isAdmin) {
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `Selamat kembali ke ${BOT_NAME}.\n\n` +
+                            `Sila hantar foto atau lampirkan video sebagai Dokumen untuk memulakan pengoptimuman WhatsApp Status.\n\n` +
+                            `Taip *START* untuk melihat panduan pakej atau *status* untuk menyemak baki keahlian anda.`
+                    }, { quoted: msg });
+                }
                 continue;
             }
 
-            if (!access.authorized) {
-                console.log(`[Akses Ditolak] Penghantaran media oleh bukan ahli: ${remoteJid}`);
-                const reason = access.isExpired ? "Tempoh langganan keahlian anda telah tamat." : "Akaun anda belum berdaftar sebagai ahli.";
-
+            // Sekatan Keahlian Media: Hanya ahli AKTIF atau PENTADBIR dibenarkan
+            if (!isAdmin && !isActive) {
+                console.log(`[Media Ditolak] Penghantaran media oleh bukan ahli aktif: ${remoteJid}`);
                 await sock.sendMessage(remoteJid, {
                     text:
-                        `AKSES PEMPROSESAN DITOLAK\n\n` +
-                        `${reason}\n\n` +
-                        `Sila hubungi pentadbir di talian 019-4066718 untuk urusan pembaharuan atau pendaftaran langganan bulanan.`
+                        `AKSES PEMPROSESAN DISEKAT\n\n` +
+                        `Fungsi pengoptimuman video 60 FPS & foto QHD+ dikhaskan untuk ahli aktif sahaja.\n\n` +
+                        `Sila taip *START* untuk melihat senarai pakej dan memulakan langganan.`
                 }, { quoted: msg });
                 continue;
             }
 
-            // 4. CABANG A: PEMPROSESAN FOTO QHD+ 2560px DENGAN CAS SHARPENING
+            // ---------------------------------------------------------
+            // 6. CABANG A: PEMPROSESAN FOTO QHD+ 2560px CAS SHARPENING
+            // ---------------------------------------------------------
             if (isDirectImage || isDocImage) {
                 const enqueueResult = videoQueue.enqueue({
                     userId: remoteJid,
@@ -926,6 +1286,20 @@ async function startBot() {
                                 });
                             } catch {}
 
+                            // Penghantaran Kod Referral Automatik untuk Ahli Sedia Ada yang Belum Menerima
+                            if (user && user.status === 'ACTIVE' && (!user.refSentToExisting || !user.refCode)) {
+                                if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
+                                user.refSentToExisting = true;
+                                saveUsers(users);
+
+                                await sock.sendMessage(remoteJid, {
+                                    text:
+                                        `🎁 KOD REFERRAL PERIBADI ANDA: *${user.refCode}*\n\n` +
+                                        `Sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran percuma!\n\n` +
+                                        `Ajak 3 rakan anda melanggan menggunakan kod referral anda (*${user.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan tambahan secara automatik! 🚀`
+                                });
+                            }
+
                             console.log(`[Selesai] Foto 2560px QHD+ berjaya dihantar ke ${remoteJid}.`);
 
                         } catch (err) {
@@ -962,7 +1336,9 @@ async function startBot() {
                 continue;
             }
 
-            // 5. CABANG B: PEMPROSESAN DOKUMEN VIDEO (Gred 4K WhatsApp Status Passthrough)
+            // ---------------------------------------------------------
+            // 7. CABANG B: PEMPROSESAN DOKUMEN VIDEO (Gred 4K 60 FPS)
+            // ---------------------------------------------------------
             if (isDocVideo) {
                 const fileLength = Number(docMsg.fileLength || 0);
                 const sizeMB = (fileLength / (1024 * 1024)).toFixed(1);
@@ -1033,6 +1409,20 @@ async function startBot() {
                                     `• Penalaan: ${casNote} | aq-mode 3 | Audio 96k\n` +
                                     `• Profil Warna: ${colorNote}${trimNote}`
                             });
+
+                            // Penghantaran Kod Referral Automatik untuk Ahli Sedia Ada yang Belum Menerima
+                            if (user && user.status === 'ACTIVE' && (!user.refSentToExisting || !user.refCode)) {
+                                if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
+                                user.refSentToExisting = true;
+                                saveUsers(users);
+
+                                await sock.sendMessage(remoteJid, {
+                                    text:
+                                        `🎁 KOD REFERRAL PERIBADI ANDA: *${user.refCode}*\n\n` +
+                                        `Sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran percuma!\n\n` +
+                                        `Ajak 3 rakan anda melanggan menggunakan kod referral anda (*${user.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan tambahan secara automatik! 🚀`
+                                });
+                            }
 
                             console.log(`[Selesai] Video berjaya dihantar ke ${remoteJid}.`);
 
