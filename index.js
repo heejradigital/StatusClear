@@ -24,7 +24,7 @@ const ADMIN_IDENTIFIERS = [
 ];
 
 const TEMP_DIR = path.join(__dirname, 'temp');
-const AUTH_DIR = path.join(__dirname, 'auth_info');
+const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_info');
 const MEMBERS_FILE = path.join(__dirname, 'members.json');
 
 // Pembersihan Direktori Sementara Semasa Pelancaran Bot
@@ -88,7 +88,6 @@ async function checkAccess(sock, msg) {
     const cleanJid = remoteJid.replace(/@.*$/, '');
     const now = Date.now();
 
-    // 1. Semakan terus pada JID
     for (const [key, data] of Object.entries(members)) {
         if (remoteJid.includes(key) || cleanJid === key) {
             if (data.expiresTimestamp > now) {
@@ -100,7 +99,6 @@ async function checkAccess(sock, msg) {
         }
     }
 
-    // 2. Semakan melalui remoteJidAlt / participantAlt
     const altJid = msg.key.remoteJidAlt || msg.key.participantAlt || '';
     const cleanAlt = altJid.replace(/@.*$/, '').replace(/:.*$/, '');
     if (cleanAlt) {
@@ -208,7 +206,7 @@ class RobustVideoQueue {
                 try {
                     global.gc();
                     const mem = process.memoryUsage();
-                    console.log(`[Pembersihan Memori GC] RAM aktif selepas transcode: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
+                    console.log(`[Pembersihan Memori GC] RAM aktif: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
                 } catch {}
             }
 
@@ -305,10 +303,14 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // Dapatkan nombor pairing (Lalai: 601157270564)
+    const pairingNumber = (process.env.PAIRING_NUMBER || '601157270564').replace(/\D/g, '');
+
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
+        // Kod QR tidak akan dipaparkan sekiranya pairingNumber wujud
+        if (qr && !pairingNumber) {
             console.log('\nImbas Kod QR di WhatsApp:\n');
             qrcode.generate(qr, { small: true });
         }
@@ -321,10 +323,28 @@ async function startBot() {
             console.log('\n======================================================');
             console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
             console.log(`Pentadbir Sistem: 0194066718`);
-            console.log(`Penghantaran Video: Asing Teks & Video (Clean Video File)`);
+            console.log(`Status: Sambungan WhatsApp Berjaya & Aktif`);
             console.log('======================================================\n');
         }
     });
+
+    // Mohon Kod Pairing Secara Automatik ke Log
+    if (pairingNumber && !sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(pairingNumber);
+                console.log('\n======================================================');
+                console.log(`🔑 KOD PAIRING WHATSAPP ANDA: ${code}`);
+                console.log('======================================================');
+                console.log(`1. Buka WhatsApp di telefon anda (${pairingNumber})`);
+                console.log('2. Tekan Settings (titik tiga) > Linked Devices > Link a Device');
+                console.log('3. Tekan "Link with phone number instead" di bawah skrin');
+                console.log(`4. Masukkan kod 8-digit ini: ${code}\n`);
+            } catch (err) {
+                console.error('[Ralat Mohon Kod Pairing]:', err);
+            }
+        }, 3500);
+    }
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
         for (const msg of messages) {
@@ -372,7 +392,6 @@ async function startBot() {
             if (textContent) {
                 console.log(`[Mesej Masuk] ${remoteJid}: "${textContent}"`);
 
-                // Arahan Bantuan
                 if (['bantuan', 'help', 'menu'].includes(command)) {
                     if (access.isAdmin) {
                         await sock.sendMessage(remoteJid, {
@@ -404,7 +423,6 @@ async function startBot() {
                     continue;
                 }
 
-                // Arahan Pentadbir: DAFTAR
                 if (command === 'daftar' && access.isAdmin) {
                     const rawTarget = textParts[1];
                     const memberName = textParts.slice(2).join(' ') || 'Ahli';
@@ -467,7 +485,6 @@ async function startBot() {
                     continue;
                 }
 
-                // Arahan Pentadbir: SENARAI
                 if (['senarai', 'ahli'].includes(command) && access.isAdmin) {
                     const members = loadMembers();
                     const uniqueMembers = {};
@@ -501,7 +518,6 @@ async function startBot() {
                     continue;
                 }
 
-                // Arahan Pentadbir: PADAM
                 if (['padam', 'buang'].includes(command) && access.isAdmin) {
                     const target = normalizeIdentifier(textParts[1]);
                     const members = loadMembers();
@@ -529,7 +545,6 @@ async function startBot() {
                     continue;
                 }
 
-                // Semakan Status Keahlian Sendiri
                 if (['status', 'baki', 'langganan'].includes(command)) {
                     if (access.isAdmin) {
                         await sock.sendMessage(remoteJid, {
@@ -550,6 +565,7 @@ async function startBot() {
                                 `Sila hubungi pentadbir sekiranya anda ingin memperbaharui langganan.`
                         }, { quoted: msg });
                     } else {
+                        const cleanSender = remoteJid.replace(/@.*$/, '');
                         await sock.sendMessage(remoteJid, {
                             text:
                                 `STATUS: TIADA LANGGANAN AKTIF\n\n` +
@@ -560,7 +576,6 @@ async function startBot() {
                     continue;
                 }
 
-                // Semakan RAM & Prestasi Pelayan
                 if (['ram', 'memori'].includes(command)) {
                     const mem = process.memoryUsage();
                     const rssMB = (mem.rss / (1024 * 1024)).toFixed(1);
@@ -586,7 +601,6 @@ async function startBot() {
                     continue;
                 }
 
-                // Balasan Mesej Teks Am
                 if (access.authorized) {
                     await sock.sendMessage(remoteJid, {
                         text:
@@ -605,7 +619,7 @@ async function startBot() {
                 continue;
             }
 
-            // 2. VIDEO BIASA (Bukan Dokumen)
+            // 2. VIDEO BIASA
             if (inner.videoMessage) {
                 await sock.sendMessage(remoteJid, {
                     text:
@@ -619,7 +633,7 @@ async function startBot() {
                 continue;
             }
 
-            // 3. PEMPROSESAN DOKUMEN VIDEO (Asingkan Fail Video & Teks)
+            // 3. PEMPROSESAN DOKUMEN VIDEO
             const docMsg = inner.documentMessage || inner.documentWithCaptionMessage?.message?.documentMessage;
             if (!docMsg) continue;
 
@@ -632,7 +646,6 @@ async function startBot() {
             const fileLength = Number(docMsg.fileLength || 0);
             const sizeMB = (fileLength / (1024 * 1024)).toFixed(1);
 
-            // Kawalan Akses
             if (!access.authorized) {
                 console.log(`[Akses Ditolak] Penghantaran video oleh bukan ahli: ${remoteJid}`);
                 const reason = access.isExpired ? "Tempoh langganan keahlian anda telah tamat." : "Akaun anda belum berdaftar sebagai ahli.";
@@ -646,7 +659,6 @@ async function startBot() {
                 continue;
             }
 
-            // Masukkan metadata ringan ke dalam antrian pintar
             const enqueueResult = videoQueue.enqueue({
                 userId: remoteJid,
                 run: async () => {
@@ -673,13 +685,11 @@ async function startBot() {
                         console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | Durasi: ${durationSec.toFixed(1)}s`);
                         await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, scaleWidth);
 
-                        // 1. HANTAR FAIL VIDEO BERSIH (TANPA KAPSYEN TEKS)
                         await sock.sendMessage(remoteJid, {
                             video: { stream: fs.createReadStream(outputPath) },
                             mimetype: 'video/mp4'
                         }, { quoted: msg });
 
-                        // 2. HANTAR MAKLUMAT & SPESIFIKASI SECARA BERASINGAN
                         await sock.sendMessage(remoteJid, {
                             text:
                                 `PENGOPTIMUMAN VIDEO SELESAI\n\n` +
@@ -706,7 +716,6 @@ async function startBot() {
                 }
             });
 
-            // Pengendalian Respon Pemasukan Antrian
             if (!enqueueResult.success) {
                 if (enqueueResult.reason === 'full') {
                     await sock.sendMessage(remoteJid, {
