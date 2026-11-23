@@ -145,7 +145,6 @@ function loadUsers() {
             fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
         }
 
-        // Migrasi automatik ahli lama sekiranya ada
         if (Object.keys(data).length === 0) {
             const oldSource = fs.existsSync(LEGACY_MEMBERS_FILE) ? LEGACY_MEMBERS_FILE : (fs.existsSync(ROOT_MEMBERS_FILE) ? ROOT_MEMBERS_FILE : null);
             if (oldSource) {
@@ -216,6 +215,7 @@ function findUserRecord(users, remoteJid, altJid) {
 }
 
 const logger = pino({ level: 'silent' });
+const msgRetryCounterCache = new Map();
 
 function resolveBinaries() {
     let ffmpegPath = 'ffmpeg';
@@ -324,7 +324,7 @@ class RobustVideoQueue {
                 try {
                     global.gc();
                     const mem = process.memoryUsage();
-                    console.log(`[Pembersihan Memori GC] RAM aktif: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
+                    console.log(`[Pembersihan Memori GC Antrian] RAM aktif: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
                 } catch {}
             }
 
@@ -570,6 +570,7 @@ async function startBot() {
         logger: logger,
         syncFullHistory: false,
         markOnlineOnConnect: false,
+        msgRetryCounterCache: msgRetryCounterCache,
         shouldIgnoreJid: (jid) => jid.endsWith('@g.us') || jid === 'status@broadcast' || jid.endsWith('@newsletter'),
         browser: Browsers.ubuntu('Chrome'),
         generateHighQualityLinkPreview: false,
@@ -599,6 +600,7 @@ async function startBot() {
             console.log(`Enjin Video: 4K-Grade CAS Sharpening 60 FPS (15.2MB Max Bitrate & aq-mode 3)`);
             console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
             console.log(`Pangkalan Data: ./data/users.json (NAME+3DIGIT Referral Aktif)`);
+            console.log(`Kawalan RAM: Multi-layer GC & 15-Min Watchdog (<280MB Cap)`);
             console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Media`);
             console.log('======================================================\n');
         }
@@ -620,6 +622,56 @@ async function startBot() {
             }
         }, 3500);
     }
+
+    // -----------------------------------------------------------------
+    // WATCHDOG MEMORI TERBIAR & CACHE PRUNING (SETIAP 15 MINIT)
+    // -----------------------------------------------------------------
+    setInterval(() => {
+        try {
+            const mem = process.memoryUsage();
+            const rssMB = mem.rss / (1024 * 1024);
+            const isIdle = videoQueue.waitingLength === 0 && !videoQueue.activeJob;
+
+            if (isIdle) {
+                // 1. Bersihkan fail terbiar dalam ./temp melebihi 10 minit
+                if (fs.existsSync(TEMP_DIR)) {
+                    const now = Date.now();
+                    const files = fs.readdirSync(TEMP_DIR);
+                    let cleanedCount = 0;
+                    for (const f of files) {
+                        const fullP = path.join(TEMP_DIR, f);
+                        try {
+                            const stat = fs.statSync(fullP);
+                            if (now - stat.mtimeMs > 10 * 60 * 1000) {
+                                fs.unlinkSync(fullP);
+                                cleanedCount++;
+                            }
+                        } catch {}
+                    }
+                    if (cleanedCount > 0) {
+                        console.log(`[Watchdog Temp] ${cleanedCount} fail sementara terbiar dipadamkan.`);
+                    }
+                }
+
+                // 2. Kosongkan cache percubaan semula mesej Baileys
+                if (msgRetryCounterCache && msgRetryCounterCache.size > 0) {
+                    const prevSize = msgRetryCounterCache.size;
+                    msgRetryCounterCache.clear();
+                    console.log(`[Watchdog Cache] ${prevSize} rekod percubaan semula (retry cache) dikosongkan.`);
+                }
+
+                // 3. Paksa Garbage Collection jika RSS melebihi 180MB
+                const RSS_THRESHOLD_BYTES = 180 * 1024 * 1024;
+                if (mem.rss > RSS_THRESHOLD_BYTES && global.gc) {
+                    global.gc();
+                    const newMem = process.memoryUsage();
+                    console.log(`[Watchdog RAM] GC idle dilaksanakan: ${rssMB.toFixed(1)} MB ➔ ${(newMem.rss / 1024 / 1024).toFixed(1)} MB`);
+                }
+            }
+        } catch (err) {
+            console.error('[Ralat Watchdog Memori]:', err);
+        }
+    }, 15 * 60 * 1000);
 
     // Peringatan Pembaharuan Automatik Setiap 6 Jam (Bagi Tempoh <= 72 Jam)
     setInterval(async () => {
@@ -1100,7 +1152,6 @@ async function startBot() {
                     }, { quoted: msg });
                 }
 
-                // Alert Pentadbir (Danial 0194066718)
                 const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
                 try {
                     await sock.sendMessage(adminJid, {
@@ -1264,7 +1315,7 @@ async function startBot() {
                         `Penggunaan Memori:\n` +
                         `• Memori Fizikal (RSS): ${rssMB} MB / 256.0 MB (${percentage}%)\n` +
                         `• Memori Heap Aktif: ${heapUsedMB} MB\n` +
-                        `• Kawalan Memori (GC): Aktif (--expose-gc)\n` +
+                        `• Kawalan Memori (GC): Aktif (--expose-gc & PM2 280M)\n` +
                         `• Status: Cemerlang & Terkawal\n\n` +
                         `Status Antrian Pemprosesan:\n` +
                         `• Sedang Diproses: ${videoQueue.activeJob ? '1 Media' : 'Tiada'}\n` +
@@ -1372,7 +1423,6 @@ async function startBot() {
                                 });
                             } catch {}
 
-                            // Hantar kod referral secara automatik kepada ahli aktif yang belum terima
                             if (user && user.status === 'ACTIVE' && (!user.refSentToExisting || !user.refCode)) {
                                 if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
                                 user.refSentToExisting = true;
@@ -1398,6 +1448,13 @@ async function startBot() {
                         } finally {
                             if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
                             if (fs.existsSync(outputPath)) { try { fs.unlinkSync(outputPath); } catch {} }
+                            if (global.gc) {
+                                try {
+                                    global.gc();
+                                    const mem = process.memoryUsage();
+                                    console.log(`[GC Foto Selesai] RAM aktif: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
+                                } catch {}
+                            }
                         }
                     }
                 });
@@ -1517,6 +1574,13 @@ async function startBot() {
                         } finally {
                             if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
                             if (fs.existsSync(outputPath)) { try { fs.unlinkSync(outputPath); } catch {} }
+                            if (global.gc) {
+                                try {
+                                    global.gc();
+                                    const mem = process.memoryUsage();
+                                    console.log(`[GC Video Selesai] RAM aktif: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
+                                } catch {}
+                            }
                         }
                     }
                 });
