@@ -1,0 +1,50 @@
+{
+  "601113270914": {
+    "name": "fieyanina",
+    "target": "601113270914",
+    "registeredAt": "2026-11-23T05:17:13.972Z",
+    "expiresTimestamp": 1798003033972,
+    "expiresDateStr": "23/12/2026"
+  },
+  "198586520338516": {
+    "name": "fieyanina",
+    "target": "601113270914",
+    "registeredAt": "2026-11-23T05:17:13.972Z",
+    "expiresTimestamp": 1798003033972,
+    "expiresDateStr": "23/12/2026",
+    "linkedTo": "601113270914",
+    "lid": "198586520338516"
+  },
+  "601154474066": {
+    "name": "infomaulid",
+    "target": "601154474066",
+    "registeredAt": "2026-11-23T05:20:50.630Z",
+    "expiresTimestamp": 1798003250630,
+    "expiresDateStr": "23/12/2026"
+  },
+  "143796260057324": {
+    "name": "infomaulid",
+    "target": "601154474066",
+    "registeredAt": "2026-11-23T05:20:50.630Z",
+    "expiresTimestamp": 1798003250630,
+    "expiresDateStr": "23/12/2026",
+    "linkedTo": "601154474066",
+    "lid": "143796260057324"
+  },
+  "601164552773": {
+    "name": "alif hajari",
+    "target": "601164552773",
+    "registeredAt": "2026-11-23T05:27:16.764Z",
+    "expiresTimestamp": 1798003636764,
+    "expiresDateStr": "23/12/2026"
+  },
+  "227453331103878": {
+    "name": "alif hajari",
+    "target": "601164552773",
+    "registeredAt": "2026-11-23T05:27:16.764Z",
+    "expiresTimestamp": 1798003636764,
+    "expiresDateStr": "23/12/2026",
+    "linkedTo": "601164552773",
+    "lid": "227453331103878"
+  }
+}
