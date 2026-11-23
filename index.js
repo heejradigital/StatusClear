@@ -326,13 +326,13 @@ function probeVideo(filePath, binPath) {
 }
 
 /**
- * Enjin Transcode Video Anti-Glitch (Zero B-Frame & Exact PTS Timing) dengan Pemetaan Tona HDR-ke-SDR
+ * Enjin Transcode Video Gred 4K WhatsApp Status (CAS Sharpening, aq-mode 3, & Siling Bitrate 15.2MB)
  */
 function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetShortSide, sourceFps, isHDR) {
     return new Promise((resolve, reject) => {
         const isHighFps = sourceFps >= 48;
-        const maxRate = Math.floor(vBitrate * 1.25);
-        const bufSize = Math.floor(vBitrate * 2.5);
+        const maxRate = Math.floor(vBitrate * 1.2);
+        const bufSize = Math.floor(vBitrate * 2.4);
 
         // Skala Lanczos Pintar Mengikut Orientasi (Portrait 9:16 vs Landscape 16:9)
         const scaleFilter = `scale='if(gt(iw,ih),-2,min(${targetShortSide},iw))':'if(gt(iw,ih),min(${targetShortSide},ih),-2)':flags=lanczos`;
@@ -348,10 +348,15 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
             }
         }
 
-        // 2. Gabungkan Rangkaian Penapis Video (Tone Map -> Scale -> Exact PTS)
+        // 2. Ketajaman CAS Video (Contrast Adaptive Sharpening)
+        const hasCas = checkCasSupport(binPath);
+        const casFilter = hasCas ? 'cas=strength=0.35' : 'unsharp=5:5:0.35:5:5:0.0';
+
+        // 3. Gabungkan Rangkaian Penapis Video (Tone Map -> Scale -> CAS -> Exact PTS)
         const filterParts = [];
         if (colorFilter) filterParts.push(colorFilter);
         filterParts.push(scaleFilter);
+        filterParts.push(casFilter);
         if (isHighFps) {
             filterParts.push('setpts=N/(60*TB)');
         }
@@ -374,9 +379,8 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
             '-profile:v', 'high',
             '-level', '4.2',
             '-pix_fmt', 'yuv420p',
-            '-bf', '0',
             '-refs', '3',
-            '-rc-lookahead', '25',
+            '-rc-lookahead', '30',
             '-vf', vfFilter,
             '-b:v', `${vBitrate}k`,
             '-maxrate', `${maxRate}k`,
@@ -384,13 +388,13 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
             '-g', '60',
             '-keyint_min', '60',
             '-sc_threshold', '0',
-            '-x264-params', 'deblock=-1:-1:aq-mode=2:aq-strength=1.0',
+            '-x264-params', 'deblock=-1:-1:aq-mode=3:aq-strength=1.05:psy-rd=1.05:0.15:bframes=0',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
             '-color_range', 'tv',
             '-c:a', 'aac',
-            '-b:a', '128k',
+            '-b:a', '96k',
             '-ar', '44100',
             '-threads', '2',
             '-movflags', '+faststart',
@@ -533,7 +537,7 @@ async function startBot() {
             console.log('\n======================================================');
             console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
             console.log(`Pentadbir Sistem: 0194066718`);
-            console.log(`Enjin Video: Fluid Zero-B-Frame 60 FPS Anti-Glitch (Pengekalan Warna HDR/SDR)`);
+            console.log(`Enjin Video: 4K-Grade CAS Sharpening 60 FPS (15.2MB Max Bitrate & aq-mode 3)`);
             console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
             console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Media`);
             console.log(`Pangkalan Data Ahli: Kekal di dalam Volume (${MEMBERS_FILE})`);
@@ -958,7 +962,7 @@ async function startBot() {
                 continue;
             }
 
-            // 5. CABANG B: PEMPROSESAN DOKUMEN VIDEO (True CFR 60 FPS Pipeline)
+            // 5. CABANG B: PEMPROSESAN DOKUMEN VIDEO (Gred 4K WhatsApp Status Passthrough)
             if (isDocVideo) {
                 const fileLength = Number(docMsg.fileLength || 0);
                 const sizeMB = (fileLength / (1024 * 1024)).toFixed(1);
@@ -985,18 +989,18 @@ async function startBot() {
                             // Dwi-pengekstrakan Durasi, FPS, dan Metadata Warna Sumber
                             const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
 
-                            // Pengiraan Bitrate Dinamik Siling 60 Saat (Sasaran 14.5MB)
+                            // Pengiraan Bitrate Dinamik Siling 60 Saat (Sasaran 15.2MB & Audio 96kbps)
                             const effectiveDuration = Math.min(durationSec, 60);
-                            const rawBitrate = Math.floor(((14.5 * 8192) / effectiveDuration) - 128);
-                            const vBitrate = Math.max(3200, Math.min(9000, rawBitrate));
-                            const targetShortSide = vBitrate >= 4800 ? 1080 : 720;
+                            const rawBitrate = Math.floor(((15.2 * 8192) / effectiveDuration) - 96);
+                            const vBitrate = Math.max(3500, Math.min(11500, rawBitrate));
+                            const targetShortSide = vBitrate >= 4600 ? 1080 : 720;
                             const isTrimmed = durationSec > 60;
                             const isHighFps = sourceFps >= 48;
 
                             const resLabel = targetShortSide === 1080 ? (isHighFps ? '1080p (60 FPS)' : '1080p (HD)') : (isHighFps ? '720p (60 FPS)' : '720p (HD)');
                             const fpsStatus = isHighFps ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
 
-                            console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
+                            console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | CAS: 0.35 | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
                             await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
 
                             // 1. Hantar fail video bersih tanpa teks
@@ -1012,6 +1016,8 @@ async function startBot() {
                             } catch {}
 
                             // 2. Hantar mesej laporan teknikal secara berasingan
+                            const hasCas = checkCasSupport(ffmpegPath);
+                            const casNote = hasCas ? 'CAS 0.35 (Gred 4K)' : 'Unsharp Adaptive';
                             const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
                             const motionNote = isHighFps ? ' (True 60fps Native)' : ' (True Native CFR)';
                             const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
@@ -1023,7 +1029,8 @@ async function startBot() {
                                     `Spesifikasi Output:\n` +
                                     `• Resolusi: ${resLabel}${motionNote}\n` +
                                     `• Kadar Bingkai: ${fpsStatus}\n` +
-                                    `• Bitrate: ${vBitrate} kbps (Sasaran ~14.5 MB)\n` +
+                                    `• Bitrate: ${vBitrate} kbps (Sasaran ~15.2 MB Passthrough)\n` +
+                                    `• Penalaan: ${casNote} | aq-mode 3 | Audio 96k\n` +
                                     `• Profil Warna: ${colorNote}${trimNote}`
                             });
 
@@ -1050,7 +1057,7 @@ async function startBot() {
                         }, { quoted: msg });
                     } else if (enqueueResult.reason === 'duplicate') {
                         await sock.sendMessage(remoteJid, {
-                            text: `PERINGATAN: Anda sudah mempunyai satu video yang sedang menunggu atau diproses dalam antrian. Sila tunggu video semasa selesai sebelum menghantar video baharu.`
+                            text: `PERINGATAN: Anda sudah mempunyai satu media yang sedang menunggu atau diproses dalam antrian. Sila tunggu video semasa selesai sebelum menghantar video baharu.`
                         }, { quoted: msg });
                     }
                 } else {
