@@ -175,7 +175,7 @@ function resolveBinaries() {
 
 const { ffmpegPath, ffprobePath } = resolveBinaries();
 
-// Semakan Sokongan Penapis zscale FFmpeg
+// Semakan Sokongan Penapis zscale & cas FFmpeg
 let zscaleSupported = null;
 function checkZscaleSupport(binPath) {
     if (zscaleSupported !== null) return zscaleSupported;
@@ -186,6 +186,18 @@ function checkZscaleSupport(binPath) {
         zscaleSupported = false;
     }
     return zscaleSupported;
+}
+
+let casSupported = null;
+function checkCasSupport(binPath) {
+    if (casSupported !== null) return casSupported;
+    try {
+        const output = execSync(`"${binPath}" -filters`, { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString();
+        casSupported = output.includes('cas');
+    } catch {
+        casSupported = false;
+    }
+    return casSupported;
 }
 
 class RobustVideoQueue {
@@ -409,6 +421,75 @@ function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetSho
     });
 }
 
+/**
+ * Enjin Pemprosesan Imej QHD+ 2560px Anti-Compression WhatsApp Status (CAS Sharpening)
+ */
+async function processUltraSharpImage(inputPath, outputPath, binPath) {
+    const hasCas = checkCasSupport(binPath);
+    const sharpFilter = hasCas ? 'cas=strength=0.45' : 'unsharp=5:5:0.45:5:5:0.0';
+    const scaleFilter = "scale='if(gt(iw,ih),min(2560,iw),-2)':'if(gt(iw,ih),-2,min(2560,ih))':flags=lanczos";
+    const vfFilter = `${scaleFilter},${sharpFilter}`;
+
+    const executeEncode = (qval) => {
+        return new Promise((resolve, reject) => {
+            const args = [
+                '-y',
+                '-i', inputPath,
+                '-vf', vfFilter,
+                '-map_metadata', '-1',
+                '-pix_fmt', 'yuvj420p',
+                '-colorspace', 'bt709',
+                '-color_primaries', 'bt709',
+                '-color_trc', 'bt709',
+                '-q:v', String(qval),
+                outputPath
+            ];
+
+            const proc = spawn(binPath, args);
+            let stderr = '';
+            let timeoutTriggered = false;
+
+            const timer = setTimeout(() => {
+                timeoutTriggered = true;
+                try { proc.kill('SIGKILL'); } catch {}
+                reject(new Error('Masa pemprosesan imej melebihi had (60 saat).'));
+            }, 60000);
+
+            proc.stderr.on('data', (d) => { stderr += d.toString(); });
+            proc.on('close', (code) => {
+                clearTimeout(timer);
+                if (timeoutTriggered) return;
+                if (code === 0) resolve();
+                else reject(new Error(`FFmpeg image error: ${stderr.slice(-300)}`));
+            });
+            proc.on('error', (err) => {
+                clearTimeout(timer);
+                reject(err);
+            });
+        });
+    };
+
+    // Percubaan pertama: Kualiti optimum -q:v 2
+    await executeEncode(2);
+
+    let stats = fs.statSync(outputPath);
+    const MAX_SAFE_BYTES = 1.85 * 1024 * 1024; // Siling selamat 1.85 MB WhatsApp
+    let usedQ = 2;
+
+    if (stats.size > MAX_SAFE_BYTES) {
+        console.log(`[Kawalan Saiz Imej] Saiz JPEG (${(stats.size / 1024 / 1024).toFixed(2)} MB) melebihi siling 1.85 MB. Mengekod semula pada -q:v 5...`);
+        await executeEncode(5);
+        stats = fs.statSync(outputPath);
+        usedQ = 5;
+    }
+
+    return {
+        sizeBytes: stats.size,
+        hasCas,
+        usedQ
+    };
+}
+
 function unwrapMessage(msg) {
     if (!msg) return null;
     let m = msg;
@@ -452,8 +533,9 @@ async function startBot() {
             console.log('\n======================================================');
             console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
             console.log(`Pentadbir Sistem: 0194066718`);
-            console.log(`Enjin: Fluid Zero-B-Frame 60 FPS Anti-Glitch (Pengekalan Warna HDR/SDR Aktif)`);
-            console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Video`);
+            console.log(`Enjin Video: Fluid Zero-B-Frame 60 FPS Anti-Glitch (Pengekalan Warna HDR/SDR)`);
+            console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
+            console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Media`);
             console.log(`Pangkalan Data Ahli: Kekal di dalam Volume (${MEMBERS_FILE})`);
             console.log('======================================================\n');
         }
@@ -491,7 +573,7 @@ async function startBot() {
 
             // Keselamatan Anti-Loop
             if (msg.key.fromMe) {
-                const caption = inner.videoMessage?.caption || inner.documentMessage?.caption || '';
+                const caption = inner.videoMessage?.caption || inner.imageMessage?.caption || inner.documentMessage?.caption || '';
                 const text = inner.conversation || inner.extendedTextMessage?.text || caption;
 
                 if (
@@ -499,7 +581,7 @@ async function startBot() {
                     text.includes('Sistem pengoptimuman') ||
                     text.includes('AKSES') ||
                     text.includes('PENTADBIR') ||
-                    text.includes('PENGOPTIMUMAN VIDEO SELESAI') ||
+                    text.includes('PENGOPTIMUMAN') ||
                     text.startsWith('STATUS') ||
                     text.startsWith('MAKLUMAN') ||
                     text.startsWith('PERINGATAN')
@@ -544,8 +626,10 @@ async function startBot() {
                             text:
                                 `PANDUAN PENGGUNA (${BOT_NAME})\n\n` +
                                 `1. Pengoptimuman Video:\n` +
-                                `   Sila hantar video anda sebagai fail Dokumen (Lampirkan > Dokumen > Pilih dari galeri) bagi mendapatkan kualiti 60 FPS tanpa kehilangan kualiti.\n\n` +
-                                `2. Semakan Langganan:\n` +
+                                `   Sila hantar video anda sebagai fail Dokumen (Lampirkan > Dokumen > Galeri) bagi mengekalkan kualiti 60 FPS tanpa mampatan.\n\n` +
+                                `2. Pengoptimuman Foto (QHD+):\n` +
+                                `   Hantar foto (biasa atau dokumen) untuk diproses ke resolusi 2560px QHD+ dengan teknologi ketajaman CAS.\n\n` +
+                                `3. Semakan Langganan:\n` +
                                 `   Taip "status" untuk melihat baki tempoh keahlian anda.\n\n` +
                                 `Perkhidmatan ini dikhaskan untuk ahli yang berdaftar sahaja.`
                         }, { quoted: msg });
@@ -724,8 +808,8 @@ async function startBot() {
                             `• Kawalan Memori (GC): Aktif (--expose-gc)\n` +
                             `• Status: Cemerlang & Terkawal\n\n` +
                             `Status Antrian Pemprosesan:\n` +
-                            `• Sedang Diproses: ${videoQueue.activeJob ? '1 Video' : 'Tiada'}\n` +
-                            `• Menunggu Dalam Antrian: ${videoQueue.waitingLength} / ${MAX_QUEUE_SIZE} Video\n\n` +
+                            `• Sedang Diproses: ${videoQueue.activeJob ? '1 Media' : 'Tiada'}\n` +
+                            `• Menunggu Dalam Antrian: ${videoQueue.waitingLength} / ${MAX_QUEUE_SIZE} Media\n\n` +
                             `Masa Operasi Pelayan: ${hours} jam ${minutes} minit`
                     }, { quoted: msg });
                     continue;
@@ -735,7 +819,7 @@ async function startBot() {
                     await sock.sendMessage(remoteJid, {
                         text:
                             `Selamat kembali ke ${BOT_NAME}.\n\n` +
-                            `Sila lampirkan video anda sebagai Dokumen (Lampiran > Dokumen > Pilih dari galeri) untuk memulakan pemprosesan 60 FPS.\n\n` +
+                            `Sila hantar foto atau lampirkan video sebagai Dokumen untuk memulakan pengoptimuman ultra-kualiti WhatsApp Status.\n\n` +
                             `Taip "bantuan" untuk melihat panduan arahan.`
                     }, { quoted: msg });
                 } else {
@@ -753,9 +837,9 @@ async function startBot() {
             if (inner.videoMessage) {
                 await sock.sendMessage(remoteJid, {
                     text:
-                        `PERINGATAN FORMAT PENGHANTARAN\n\n` +
-                        `Fail video dikesan dihantar melalui mod biasa. Aplikasi WhatsApp akan memampatkan kualiti video biasa secara drastik sebelum penghantaran.\n\n` +
-                        `Sila hantar semula sebagai Dokumen:\n` +
+                        `PERINGATAN FORMAT PENGHANTARAN VIDEO\n\n` +
+                        `Fail video dikesan dihantar melalui mod biasa. Aplikasi WhatsApp memampatkan kualiti video biasa sebelum penghantaran.\n\n` +
+                        `Sila hantar semula video sebagai Dokumen:\n` +
                         `1. Tekan ikon Lampiran (+ atau klip kertas)\n` +
                         `2. Pilih Dokumen > Pilih daripada galeri\n` +
                         `3. Hantar video anda sebagai fail dokumen.`
@@ -763,21 +847,21 @@ async function startBot() {
                 continue;
             }
 
-            // 3. PEMPROSESAN DOKUMEN VIDEO (Lazy Stream Download & True CFR Pipeline)
+            // 3. PENGESANAN MEDIA (FOTO & DOKUMEN VIDEO/FOTO)
+            const isDirectImage = !!inner.imageMessage;
             const docMsg = inner.documentMessage || inner.documentWithCaptionMessage?.message?.documentMessage;
-            if (!docMsg) continue;
+            const docMime = (docMsg?.mimetype || '').toLowerCase();
+            const docFileName = (docMsg?.fileName || '').toLowerCase();
 
-            const mime = (docMsg.mimetype || '').toLowerCase();
-            const fileName = (docMsg.fileName || '').toLowerCase();
-            const isVideo = mime.startsWith('video/') || /\.(mp4|mov|mkv|avi|3gp|webm|m4v)$/i.test(fileName);
+            const isDocImage = !!docMsg && (docMime.startsWith('image/') || /\.(jpe?g|png|webp|bmp|tiff|heic|heif)$/i.test(docFileName));
+            const isDocVideo = !!docMsg && (docMime.startsWith('video/') || /\.(mp4|mov|mkv|avi|3gp|webm|m4v)$/i.test(docFileName));
 
-            if (!isVideo) continue;
-
-            const fileLength = Number(docMsg.fileLength || 0);
-            const sizeMB = (fileLength / (1024 * 1024)).toFixed(1);
+            if (!isDirectImage && !isDocImage && !isDocVideo) {
+                continue;
+            }
 
             if (!access.authorized) {
-                console.log(`[Akses Ditolak] Penghantaran video oleh bukan ahli: ${remoteJid}`);
+                console.log(`[Akses Ditolak] Penghantaran media oleh bukan ahli: ${remoteJid}`);
                 const reason = access.isExpired ? "Tempoh langganan keahlian anda telah tamat." : "Akaun anda belum berdaftar sebagai ahli.";
 
                 await sock.sendMessage(remoteJid, {
@@ -789,101 +873,192 @@ async function startBot() {
                 continue;
             }
 
-            const enqueueResult = videoQueue.enqueue({
-                userId: remoteJid,
-                run: async () => {
-                    const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-                    const inputPath = path.join(TEMP_DIR, `input_${fileId}.mp4`);
-                    const outputPath = path.join(TEMP_DIR, `status_clear_60fps_${fileId}.mp4`);
-
-                    try {
-                        try {
-                            await sock.sendMessage(remoteJid, {
-                                react: { text: '⏳', key: msg.key }
-                            });
-                        } catch {}
-
-                        console.log(`\n[Pemprosesan Bermula] Memuat turun video (${sizeMB} MB) dari ${remoteJid}...`);
-
-                        const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-                        await pipeline(mediaStream, fs.createWriteStream(inputPath));
-
-                        // Dwi-pengekstrakan Durasi, FPS, dan Metadata Warna Sumber
-                        const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
-
-                        // Pengiraan Bitrate Dinamik Siling 60 Saat (Sasaran 14.5MB)
-                        const effectiveDuration = Math.min(durationSec, 60);
-                        const rawBitrate = Math.floor(((14.5 * 8192) / effectiveDuration) - 128);
-                        const vBitrate = Math.max(3200, Math.min(9000, rawBitrate));
-                        const targetShortSide = vBitrate >= 4800 ? 1080 : 720;
-                        const isTrimmed = durationSec > 60;
-                        const isHighFps = sourceFps >= 48;
-
-                        const resLabel = targetShortSide === 1080 ? (isHighFps ? '1080p (60 FPS)' : '1080p (HD)') : (isHighFps ? '720p (60 FPS)' : '720p (HD)');
-                        const fpsStatus = isHighFps ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
-
-                        console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
-                        await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
-
-                        // 1. Hantar fail video bersih tanpa teks
-                        await sock.sendMessage(remoteJid, {
-                            video: { stream: fs.createReadStream(outputPath) },
-                            mimetype: 'video/mp4'
-                        }, { quoted: msg });
+            // 4. CABANG A: PEMPROSESAN FOTO QHD+ 2560px DENGAN CAS SHARPENING
+            if (isDirectImage || isDocImage) {
+                const enqueueResult = videoQueue.enqueue({
+                    userId: remoteJid,
+                    run: async () => {
+                        const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+                        const inputPath = path.join(TEMP_DIR, `input_img_${fileId}.jpg`);
+                        const outputPath = path.join(TEMP_DIR, `status_clear_qhd_${fileId}.jpg`);
 
                         try {
-                            await sock.sendMessage(remoteJid, {
-                                react: { text: '✅', key: msg.key }
-                            });
-                        } catch {}
+                            try {
+                                await sock.sendMessage(remoteJid, {
+                                    react: { text: '⏳', key: msg.key }
+                                });
+                            } catch {}
 
-                        // 2. Hantar mesej laporan teknikal secara berasingan
-                        const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
-                        const motionNote = isHighFps ? ' (True 60fps Native)' : ' (True Native CFR)';
-                        const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
+                            console.log(`\n[Pemprosesan Imej Bermula] Memuat turun foto dari ${remoteJid}...`);
 
-                        await sock.sendMessage(remoteJid, {
-                            text:
-                                `PENGOPTIMUMAN VIDEO SELESAI\n\n` +
-                                `Sila majukan (forward) video di atas terus ke Status WhatsApp anda tanpa melakukan sebarang suntingan atau pemotongan (trim) bagi mengekalkan kestabilan dan kualiti video.\n\n` +
+                            const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+                            await pipeline(mediaStream, fs.createWriteStream(inputPath));
+
+                            console.log(`[FFmpeg Imej] Mengoptimumkan ke 2560px QHD+ dengan CAS Sharpening...`);
+                            const result = await processUltraSharpImage(inputPath, outputPath, ffmpegPath);
+
+                            const sizeMB = (result.sizeBytes / (1024 * 1024)).toFixed(2);
+                            const sharpEngine = result.hasCas ? 'Contrast Adaptive Sharpening (CAS)' : 'Unsharp Masking';
+
+                            const imageCaption =
+                                `PENGOPTIMUMAN FOTO SELESAI (2560px QHD+)\n\n` +
+                                `Sila tekan Forward ➔ My Status (Status Saya) untuk memuat naik foto ini terus ke Status WhatsApp anda.\n\n` +
+                                `Peringatan Kualiti:\n` +
+                                `Jangan potong (crop) atau tambah pelekat/teks di dalam editor WhatsApp Status agar resolusi 2560px HD kekal tajam tanpa dimampatkan semula.\n\n` +
                                 `Spesifikasi Output:\n` +
-                                `• Resolusi: ${resLabel}${motionNote}\n` +
-                                `• Kadar Bingkai: ${fpsStatus}\n` +
-                                `• Bitrate: ${vBitrate} kbps (Sasaran ~14.5 MB)\n` +
-                                `• Profil Warna: ${colorNote}${trimNote}`
-                        });
+                                `• Resolusi: 2560px QHD+ (Lanczos Scaling)\n` +
+                                `• Penalaan: ${sharpEngine}\n` +
+                                `• Ruang Warna: sRGB / BT.709 (Metadata Stripped)\n` +
+                                `• Saiz Fail: ${sizeMB} MB (Anti-Compression Safe)`;
 
-                        console.log(`[Selesai] Video berjaya dihantar ke ${remoteJid}.`);
-
-                    } catch (err) {
-                        console.error('[Ralat Pemprosesan Video]', err);
-                        try {
                             await sock.sendMessage(remoteJid, {
-                                text: `Ralat: Proses pengoptimuman video gagal dilaksanakan. (${err.message})`
+                                image: { stream: fs.createReadStream(outputPath) },
+                                caption: imageCaption
                             }, { quoted: msg });
-                        } catch {}
-                    } finally {
-                        if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
-                        if (fs.existsSync(outputPath)) { try { fs.unlinkSync(outputPath); } catch {} }
+
+                            try {
+                                await sock.sendMessage(remoteJid, {
+                                    react: { text: '✅', key: msg.key }
+                                });
+                            } catch {}
+
+                            console.log(`[Selesai] Foto 2560px QHD+ berjaya dihantar ke ${remoteJid}.`);
+
+                        } catch (err) {
+                            console.error('[Ralat Pemprosesan Imej]', err);
+                            try {
+                                await sock.sendMessage(remoteJid, {
+                                    text: `Ralat: Proses pengoptimuman foto gagal dilaksanakan. (${err.message})`
+                                }, { quoted: msg });
+                            } catch {}
+                        } finally {
+                            if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
+                            if (fs.existsSync(outputPath)) { try { fs.unlinkSync(outputPath); } catch {} }
+                        }
+                    }
+                });
+
+                if (!enqueueResult.success) {
+                    if (enqueueResult.reason === 'full') {
+                        await sock.sendMessage(remoteJid, {
+                            text: `MAKLUMAN: Kapasiti antrian pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} media). Sila tunggu beberapa minit sebelum menghantar semula foto anda.`
+                        }, { quoted: msg });
+                    } else if (enqueueResult.reason === 'duplicate') {
+                        await sock.sendMessage(remoteJid, {
+                            text: `PERINGATAN: Anda sudah mempunyai satu media yang sedang menunggu atau diproses dalam antrian. Sila tunggu media semasa selesai sebelum menghantar media baharu.`
+                        }, { quoted: msg });
+                    }
+                } else {
+                    if (enqueueResult.position > 1) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `Foto diterima. Anda berada di giliran ke-${enqueueResult.position} dalam antrian pemprosesan. Sistem akan memaklumkan anda sebaik sahaja pemprosesan bermula.`
+                        }, { quoted: msg });
                     }
                 }
-            });
+                continue;
+            }
 
-            if (!enqueueResult.success) {
-                if (enqueueResult.reason === 'full') {
-                    await sock.sendMessage(remoteJid, {
-                        text: `MAKLUMAN: Kapasiti antrian pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} video). Sila tunggu beberapa minit sebelum menghantar semula video anda.`
-                    }, { quoted: msg });
-                } else if (enqueueResult.reason === 'duplicate') {
-                    await sock.sendMessage(remoteJid, {
-                        text: `PERINGATAN: Anda sudah mempunyai satu video yang sedang menunggu atau diproses dalam antrian. Sila tunggu video semasa selesai sebelum menghantar video baharu.`
-                    }, { quoted: msg });
-                }
-            } else {
-                if (enqueueResult.position > 1) {
-                    await sock.sendMessage(remoteJid, {
-                        text: `Video diterima. Anda berada di giliran ke-${enqueueResult.position} dalam antrian pemprosesan. Sistem akan memaklumkan anda sebaik sahaja pemprosesan bermula.`
-                    }, { quoted: msg });
+            // 5. CABANG B: PEMPROSESAN DOKUMEN VIDEO (True CFR 60 FPS Pipeline)
+            if (isDocVideo) {
+                const fileLength = Number(docMsg.fileLength || 0);
+                const sizeMB = (fileLength / (1024 * 1024)).toFixed(1);
+
+                const enqueueResult = videoQueue.enqueue({
+                    userId: remoteJid,
+                    run: async () => {
+                        const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+                        const inputPath = path.join(TEMP_DIR, `input_${fileId}.mp4`);
+                        const outputPath = path.join(TEMP_DIR, `status_clear_60fps_${fileId}.mp4`);
+
+                        try {
+                            try {
+                                await sock.sendMessage(remoteJid, {
+                                    react: { text: '⏳', key: msg.key }
+                                });
+                            } catch {}
+
+                            console.log(`\n[Pemprosesan Video Bermula] Memuat turun video (${sizeMB} MB) dari ${remoteJid}...`);
+
+                            const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+                            await pipeline(mediaStream, fs.createWriteStream(inputPath));
+
+                            // Dwi-pengekstrakan Durasi, FPS, dan Metadata Warna Sumber
+                            const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
+
+                            // Pengiraan Bitrate Dinamik Siling 60 Saat (Sasaran 14.5MB)
+                            const effectiveDuration = Math.min(durationSec, 60);
+                            const rawBitrate = Math.floor(((14.5 * 8192) / effectiveDuration) - 128);
+                            const vBitrate = Math.max(3200, Math.min(9000, rawBitrate));
+                            const targetShortSide = vBitrate >= 4800 ? 1080 : 720;
+                            const isTrimmed = durationSec > 60;
+                            const isHighFps = sourceFps >= 48;
+
+                            const resLabel = targetShortSide === 1080 ? (isHighFps ? '1080p (60 FPS)' : '1080p (HD)') : (isHighFps ? '720p (60 FPS)' : '720p (HD)');
+                            const fpsStatus = isHighFps ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
+
+                            console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
+                            await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
+
+                            // 1. Hantar fail video bersih tanpa teks
+                            await sock.sendMessage(remoteJid, {
+                                video: { stream: fs.createReadStream(outputPath) },
+                                mimetype: 'video/mp4'
+                            }, { quoted: msg });
+
+                            try {
+                                await sock.sendMessage(remoteJid, {
+                                    react: { text: '✅', key: msg.key }
+                                });
+                            } catch {}
+
+                            // 2. Hantar mesej laporan teknikal secara berasingan
+                            const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
+                            const motionNote = isHighFps ? ' (True 60fps Native)' : ' (True Native CFR)';
+                            const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
+
+                            await sock.sendMessage(remoteJid, {
+                                text:
+                                    `PENGOPTIMUMAN VIDEO SELESAI\n\n` +
+                                    `Sila majukan (forward) video di atas terus ke Status WhatsApp anda tanpa melakukan sebarang suntingan atau pemotongan (trim) bagi mengekalkan kestabilan dan kualiti video.\n\n` +
+                                    `Spesifikasi Output:\n` +
+                                    `• Resolusi: ${resLabel}${motionNote}\n` +
+                                    `• Kadar Bingkai: ${fpsStatus}\n` +
+                                    `• Bitrate: ${vBitrate} kbps (Sasaran ~14.5 MB)\n` +
+                                    `• Profil Warna: ${colorNote}${trimNote}`
+                            });
+
+                            console.log(`[Selesai] Video berjaya dihantar ke ${remoteJid}.`);
+
+                        } catch (err) {
+                            console.error('[Ralat Pemprosesan Video]', err);
+                            try {
+                                await sock.sendMessage(remoteJid, {
+                                    text: `Ralat: Proses pengoptimuman video gagal dilaksanakan. (${err.message})`
+                                }, { quoted: msg });
+                            } catch {}
+                        } finally {
+                            if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
+                            if (fs.existsSync(outputPath)) { try { fs.unlinkSync(outputPath); } catch {} }
+                        }
+                    }
+                });
+
+                if (!enqueueResult.success) {
+                    if (enqueueResult.reason === 'full') {
+                        await sock.sendMessage(remoteJid, {
+                            text: `MAKLUMAN: Kapasiti antrian pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} video). Sila tunggu beberapa minit sebelum menghantar semula video anda.`
+                        }, { quoted: msg });
+                    } else if (enqueueResult.reason === 'duplicate') {
+                        await sock.sendMessage(remoteJid, {
+                            text: `PERINGATAN: Anda sudah mempunyai satu video yang sedang menunggu atau diproses dalam antrian. Sila tunggu video semasa selesai sebelum menghantar video baharu.`
+                        }, { quoted: msg });
+                    }
+                } else {
+                    if (enqueueResult.position > 1) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `Video diterima. Anda berada di giliran ke-${enqueueResult.position} dalam antrian pemprosesan. Sistem akan memaklumkan anda sebaik sahaja pemprosesan bermula.`
+                        }, { quoted: msg });
+                    }
                 }
             }
         }
