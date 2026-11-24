@@ -5,12 +5,12 @@
  * Features:
  * - Direct Automated HitPay Payment Request API (FPX, DuitNow QR, eWallets, Cards)
  * - HMAC-SHA256 Verified Webhook Endpoint (POST /webhook/hitpay)
+ * - Auto WhatsApp Welcome, Confirmation & Step-by-Step Tutorial Delivery
+ * - Reliable JID Routing (user.jid & user.altJid saved on interaction)
  * - Railway Ready (process.env.PORT, persistent Volumes, native Linux FFmpeg)
  * - 60 FPS Native Video Encoding (15.2MB Bitrate Passthrough & CAS Sharpening)
  * - 2560px QHD+ Photo Enhancement (CAS Filter & Dynamic Anti-Compression Safe)
  * - Core/Middle Name + 3 Unique Digits Referral System
- * - Consistent Sender JID Normalization (@lid & @s.whatsapp.net)
- * - Zero Static QR Fallbacks: 100% Direct HitPay Links
  */
 
 const {
@@ -250,7 +250,9 @@ function loadUsers() {
                             totalPaidReferrals: v.totalPaidReferrals || 0,
                             refSentToExisting: !!v.refSentToExisting,
                             reminded3Days: !!v.reminded3Days,
-                            lid: v.lid ? normalizeIdentifier(v.lid) : null
+                            lid: v.lid ? normalizeIdentifier(v.lid) : null,
+                            jid: v.jid || null,
+                            altJid: v.altJid || null
                         };
                         if (v.lid) merged[normalizeIdentifier(v.lid)] = merged[p];
                     }
@@ -279,7 +281,9 @@ function loadUsers() {
                                 totalPaidReferrals: v.totalPaidReferrals || merged[p]?.totalPaidReferrals || 0,
                                 refSentToExisting: !!v.refSentToExisting,
                                 reminded3Days: !!v.reminded3Days,
-                                lid: v.lid ? normalizeIdentifier(v.lid) : (merged[p]?.lid || null)
+                                lid: v.lid ? normalizeIdentifier(v.lid) : (merged[p]?.lid || null),
+                                jid: v.jid || merged[p]?.jid || null,
+                                altJid: v.altJid || merged[p]?.altJid || null
                             };
                             if (v.lid) merged[normalizeIdentifier(v.lid)] = merged[p];
                         }
@@ -354,6 +358,7 @@ function findUserRecord(users, remoteJid, altJid) {
         if (u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now()) {
             if (u.phone === cleanJid || u.phone === cleanAlt) return u;
             if (u.lid === cleanJid || u.lid === cleanAlt) return u;
+            if (u.jid === remoteJid || u.altJid === altJid) return u;
         }
     }
 
@@ -364,6 +369,7 @@ function findUserRecord(users, remoteJid, altJid) {
     for (const u of Object.values(users)) {
         if (u.phone === cleanJid || u.phone === cleanAlt) return u;
         if (u.lid === cleanJid || u.lid === cleanAlt) return u;
+        if (u.jid === remoteJid || u.altJid === altJid) return u;
     }
 
     return null;
@@ -425,7 +431,6 @@ function storeRecentMessage(id, message) {
         recentMessages.delete(oldestKey);
     }
 
-    // Simpan salinan minimum tanpa buffer media berat untuk menjimatkan RAM (<384MB)
     const stub = {};
     if (message.conversation) stub.conversation = message.conversation;
     if (message.extendedTextMessage) stub.extendedTextMessage = { text: message.extendedTextMessage.text || '' };
@@ -982,7 +987,9 @@ function ensureHttpServer() {
                                     paidReferrals: 0,
                                     totalPaidReferrals: 0,
                                     refSentToExisting: true,
-                                    reminded3Days: false
+                                    reminded3Days: false,
+                                    jid: null,
+                                    altJid: null
                                 };
                                 users[targetPhone] = targetUser;
                             } else {
@@ -1028,7 +1035,7 @@ function ensureHttpServer() {
                                         referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
                                         referrer.status = 'ACTIVE';
 
-                                        const refJid = referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`;
+                                        const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
                                         if (currentSock) {
                                             try {
                                                 await currentSock.sendMessage(refJid, {
@@ -1047,27 +1054,52 @@ function ensureHttpServer() {
 
                             saveUsers(users);
 
-                            const expDateStr = new Date(targetUser.expiredAt).toLocaleDateString('ms-MY', {
+                            const formattedExpiryDate = new Date(targetUser.expiredAt).toLocaleDateString('ms-MY', {
                                 day: '2-digit', month: '2-digit', year: 'numeric'
                             });
 
-                            const userJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                            // Resolusi Sasaran JID WhatsApp yang Kebal (user.jid || user.altJid || phone@s.whatsapp.net)
+                            const targetJid = targetUser.jid || targetUser.altJid || `${targetPhone}@s.whatsapp.net`;
+
+                            const welcomeTutorialMessage = 
+`✅ *PEMBAYARAN BERJAYA & AKAUN AKTIF!*
+
+Selamat datang ke *StatusClear HD*! Langganan anda kini sudah aktif dan sedia digunakan sepenuhnya.
+
+📅 *Tempoh Aktif:* +${days} Hari
+⏳ *Tamat Pada:* ${formattedExpiryDate}
+
+━━━━━━━━━━━━━━━━━━━━
+📖 *TUTORIAL GUNA BOT (SUPAYA STATUS TAK PECAH):*
+
+1️⃣ Tekan ikon *Klip Kertas / (+)* di ruangan chat ini.
+2️⃣ Pilih *Document* (JANGAN pilih Gallery/Photos terus).
+3️⃣ Pilih *Video* (maksimum 60 saat) atau *Gambar* asal anda dan tekan *Send*.
+4️⃣ Tunggu bot proses sebentar (reaksi ⏳ bertukar ✅) dan muat turun fail HD yang bot pulangkan.
+5️⃣ Muat naik fail HD tersebut ke *WhatsApp Status* anda!
+━━━━━━━━━━━━━━━━━━━━
+
+🎁 *KOD REFERRAL PERIBADI ANDA:*
+👉 *${targetUser.refCode}*
+
+Kongsikan kod ini kepada rakan anda! Setiap *3 rakan* yang melanggan menggunakan kod anda, anda akan dapat *PERCUMA +30 Hari (1 Bulan)* secara automatik! 🎉
+
+_Sila hantar video atau gambar pertama anda sebagai Document sekarang untuk mula!_ 🚀`;
+
                             if (currentSock) {
                                 try {
-                                    await currentSock.sendMessage(userJid, {
-                                        text:
-                                            `🎉 *PEMBAYARAN DISAHKAN! LANGGANAN AKTIF*\n\n` +
-                                            `Terima kasih ${targetUser.name}! Pembayaran anda melalui HitPay telah disahkan secara automatik.\n\n` +
-                                            `• Tempoh: +${days} Hari\n` +
-                                            `• Status: *AKTIF*\n` +
-                                            `• Tarikh Luput: *${expDateStr}*\n` +
-                                            `• Kod Referral Peribadi Anda: *${targetUser.refCode}*\n\n` +
-                                            `🎁 *Ganjaran Referral Peribadi:*\n` +
-                                            `Ajak 3 rakan anda melanggan menggunakan kod anda (*${targetUser.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik!\n\n` +
-                                            `Sila hantar video anda sebagai fail Dokumen (atau terus hantar foto) untuk menikmati pengoptimuman 60 FPS & 2560px HD tanpa mampatan!`
-                                    });
-                                } catch (e) {
-                                    console.error('[HitPay Webhook] Gagal maklumkan pengguna di WhatsApp:', e);
+                                    await currentSock.sendMessage(targetJid, { text: welcomeTutorialMessage });
+                                    console.log(`[HITPAY -> WA] Sent welcome & tutorial to ${targetJid}`);
+                                } catch (waErr) {
+                                    console.error(`[HITPAY -> WA] Ralat penghantaran ke ${targetJid}:`, waErr.message);
+                                    if (targetJid !== `${targetPhone}@s.whatsapp.net`) {
+                                        try {
+                                            await currentSock.sendMessage(`${targetPhone}@s.whatsapp.net`, { text: welcomeTutorialMessage });
+                                            console.log(`[HITPAY -> WA] Sent welcome & tutorial fallback to ${targetPhone}@s.whatsapp.net`);
+                                        } catch (fallbackErr) {
+                                            console.error(`[HITPAY -> WA] Fallback juga gagal ke ${targetPhone}@s.whatsapp.net:`, fallbackErr.message);
+                                        }
+                                    }
                                 }
 
                                 const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
@@ -1076,12 +1108,15 @@ function ensureHttpServer() {
                                         text:
                                             `💰 *NOTIFIKASI JUALAN HITPAY (AUTOMATIK)*\n\n` +
                                             `• Pelanggan: *${targetUser.name}* (${targetPhone})\n` +
+                                            `• Sasaran JID: ${targetJid}\n` +
                                             `• Pakej: +${days} Hari (ID: ${paymentId})\n` +
                                             `• Kaedah: ${parsedBody.payment_type || 'HitPay Online Gateway'}\n` +
-                                            `• Tarikh Luput: ${expDateStr}\n` +
+                                            `• Tarikh Luput: ${formattedExpiryDate}\n` +
                                             `• Kod Referral: *${targetUser.refCode}*${referralRewardMsg}`
                                     });
-                                } catch {}
+                                } catch (adminErr) {
+                                    console.error('[HITPAY -> ADMIN] Gagal hantar notifikasi ke admin:', adminErr.message);
+                                }
                             }
 
                         } catch (dbErr) {
@@ -1264,7 +1299,7 @@ async function startBot() {
                     if (timeLeft <= SEVENTY_TWO_HOURS && !user.reminded3Days) {
                         user.reminded3Days = true;
                         updated = true;
-                        const targetJid = user.phone.includes('@') ? user.phone : `${user.phone}@s.whatsapp.net`;
+                        const targetJid = user.jid || user.altJid || (user.phone.includes('@') ? user.phone : `${user.phone}@s.whatsapp.net`);
                         const expDateStr = new Date(user.expiredAt).toLocaleDateString('ms-MY', {
                             day: '2-digit', month: '2-digit', year: 'numeric'
                         });
@@ -1374,7 +1409,9 @@ async function startBot() {
                     paidReferrals: 0,
                     totalPaidReferrals: 0,
                     refSentToExisting: false,
-                    reminded3Days: false
+                    reminded3Days: false,
+                    jid: remoteJid,
+                    altJid: altJid || null
                 };
                 users[phone] = user;
                 if (remoteJid.endsWith('@lid')) {
@@ -1385,6 +1422,20 @@ async function startBot() {
                     }
                 }
                 saveUsers(users);
+            } else if (user) {
+                // Sentiasa simpan dan kemas kini user.jid & user.altJid untuk penghantaran mesej yang tepat
+                let needsUpdate = false;
+                if (remoteJid && user.jid !== remoteJid) {
+                    user.jid = remoteJid;
+                    needsUpdate = true;
+                }
+                if (altJid && user.altJid !== altJid) {
+                    user.altJid = altJid;
+                    needsUpdate = true;
+                }
+                if (needsUpdate) {
+                    saveUsers(users);
+                }
             }
 
             const fromMe = msg.key.fromMe;
@@ -1463,7 +1514,9 @@ async function startBot() {
                             paidReferrals: 0,
                             totalPaidReferrals: 0,
                             refSentToExisting: true,
-                            reminded3Days: false
+                            reminded3Days: false,
+                            jid: null,
+                            altJid: null
                         };
                         users[targetPhone] = targetUser;
                     } else {
@@ -1505,7 +1558,7 @@ async function startBot() {
                                 referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
                                 referrer.status = 'ACTIVE';
 
-                                const refJid = referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`;
+                                const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
                                 try {
                                     await sock.sendMessage(refJid, {
                                         text:
@@ -1526,7 +1579,7 @@ async function startBot() {
                         day: '2-digit', month: '2-digit', year: 'numeric'
                     });
 
-                    const userJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                    const userJid = targetUser.jid || targetUser.altJid || (targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`);
                     try {
                         await sock.sendMessage(userJid, {
                             text:
@@ -1588,7 +1641,7 @@ async function startBot() {
                     targetUser.refCode = cleanCode;
                     saveUsers(users);
 
-                    const userJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                    const userJid = targetUser.jid || targetUser.altJid || (targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`);
                     try {
                         await sock.sendMessage(userJid, {
                             text:
@@ -1614,7 +1667,7 @@ async function startBot() {
                     for (const m of activeMembers) {
                         if (!m.refCode) m.refCode = generateReferralCode(m.name, users);
                         m.refSentToExisting = true;
-                        const targetJid = m.phone.includes('@') ? m.phone : `${m.phone}@s.whatsapp.net`;
+                        const targetJid = m.jid || m.altJid || (m.phone.includes('@') ? m.phone : `${m.phone}@s.whatsapp.net`);
 
                         try {
                             await sock.sendMessage(targetJid, {
@@ -1861,6 +1914,8 @@ async function startBot() {
 
                     if (user) {
                         user.status = 'WAITING';
+                        user.jid = remoteJid;
+                        if (altJid) user.altJid = altJid;
                         saveUsers(users);
                     }
 
@@ -1900,6 +1955,8 @@ async function startBot() {
 
                 user.referredBy = matchedReferrer.phone;
                 user.status = 'WAITING';
+                user.jid = remoteJid;
+                if (altJid) user.altJid = altJid;
                 saveUsers(users);
 
                 const confirmCaption =
@@ -1916,6 +1973,8 @@ async function startBot() {
             // ---------------------------------------------------------
             if (['bayar', '/bayar', 'pakej', 'beli', 'qr'].includes(cmd) || upperText === 'BAYAR' || upperText === 'PAKEJ') {
                 user.status = 'WAITING';
+                user.jid = remoteJid;
+                if (altJid) user.altJid = altJid;
                 saveUsers(users);
 
                 await sock.sendMessage(remoteJid, {
@@ -1930,6 +1989,9 @@ async function startBot() {
             // 5. ALIRAN START ONBOARDING & STATUS PENGGUNA
             // ---------------------------------------------------------
             if (['start', '/start', 'mula', 'menu', 'bantuan', 'help'].includes(cmd) || upperText === 'START') {
+                user.jid = remoteJid;
+                if (altJid) user.altJid = altJid;
+
                 if (isActive) {
                     if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
                     user.refSentToExisting = true;
@@ -1952,6 +2014,7 @@ async function startBot() {
                             `Ajak 3 rakan anda melanggan menggunakan kod anda (*${user.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik!`
                     }, { quoted: msg });
                 } else {
+                    saveUsers(users);
                     const isExpired = user && user.expiredAt && user.expiredAt <= Date.now();
                     const introText = isExpired
                         ? `STATUS: LANGGANAN TELAH TAMAT\n\nTempoh keahlian anda bagi ${BOT_NAME} telah tamat pada ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}.`
