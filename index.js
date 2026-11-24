@@ -132,50 +132,110 @@ function generateReferralCode(rawName, existingUsers = {}) {
     return code;
 }
 
+function normalizeIdentifier(input) {
+    if (!input) return '';
+    let clean = input.trim().replace(/[^0-9]/g, '');
+    if (clean.startsWith('0')) {
+        clean = '60' + clean.substring(1);
+    }
+    return clean;
+}
+
 // -------------------------------------------------------------
-// PENGURUSAN DATA PENGGUNA (users.json + Persistent Volume Sync)
+// PENGURUSAN DATA PENGGUNA (GABUNGAN SEMUA PANGKALAN DATA)
 // -------------------------------------------------------------
 function loadUsers() {
     try {
-        let data = {};
-        if (fs.existsSync(USERS_FILE)) {
-            data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-        } else if (fs.existsSync(PERSISTENT_USERS_FILE)) {
-            data = JSON.parse(fs.readFileSync(PERSISTENT_USERS_FILE, 'utf8'));
-            fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
+        let merged = {};
+
+        // 1. Muat dari members.json punca projek jika ada
+        if (fs.existsSync(ROOT_MEMBERS_FILE)) {
+            try {
+                const rootLegacy = JSON.parse(fs.readFileSync(ROOT_MEMBERS_FILE, 'utf8'));
+                for (const [k, v] of Object.entries(rootLegacy)) {
+                    const p = normalizeIdentifier(v.target || v.phone || k);
+                    if (p) {
+                        const isAct = v.expiresTimestamp ? v.expiresTimestamp > Date.now() : (v.status === 'ACTIVE');
+                        merged[p] = {
+                            phone: p,
+                            name: v.name || 'Ahli',
+                            status: isAct ? 'ACTIVE' : (v.status || 'NEW'),
+                            expiredAt: v.expiresTimestamp || v.expiredAt || null,
+                            refCode: v.refCode || generateReferralCode(v.name || 'Ahli', merged),
+                            referredBy: v.referredBy || null,
+                            paidReferrals: v.paidReferrals || 0,
+                            totalPaidReferrals: v.totalPaidReferrals || 0,
+                            refSentToExisting: !!v.refSentToExisting,
+                            reminded3Days: !!v.reminded3Days,
+                            lid: v.lid ? normalizeIdentifier(v.lid) : null
+                        };
+                        if (v.lid) merged[normalizeIdentifier(v.lid)] = merged[p];
+                    }
+                }
+            } catch {}
         }
 
-        if (Object.keys(data).length === 0) {
-            const oldSource = fs.existsSync(LEGACY_MEMBERS_FILE) ? LEGACY_MEMBERS_FILE : (fs.existsSync(ROOT_MEMBERS_FILE) ? ROOT_MEMBERS_FILE : null);
-            if (oldSource) {
-                try {
-                    const legacy = JSON.parse(fs.readFileSync(oldSource, 'utf8'));
-                    for (const [key, val] of Object.entries(legacy)) {
-                        const phone = normalizeIdentifier(val.target || key);
-                        if (!phone || data[phone]) continue;
-                        const refCode = generateReferralCode(val.name || 'Ahli', data);
-                        data[phone] = {
-                            phone: phone,
-                            name: val.name || 'Ahli',
-                            status: (val.expiresTimestamp && val.expiresTimestamp > Date.now()) ? 'ACTIVE' : 'NEW',
-                            expiredAt: val.expiresTimestamp || null,
-                            refCode: refCode,
-                            referredBy: null,
-                            paidReferrals: 0,
-                            totalPaidReferrals: 0,
-                            refSentToExisting: false,
-                            reminded3Days: false
-                        };
+        // 2. Muat dari members.json dalam Volume simpanan kekal
+        if (fs.existsSync(LEGACY_MEMBERS_FILE)) {
+            try {
+                const volLegacy = JSON.parse(fs.readFileSync(LEGACY_MEMBERS_FILE, 'utf8'));
+                for (const [k, v] of Object.entries(volLegacy)) {
+                    const p = normalizeIdentifier(v.target || v.phone || k);
+                    if (p) {
+                        const isAct = v.expiresTimestamp ? v.expiresTimestamp > Date.now() : (v.status === 'ACTIVE');
+                        const exp = v.expiresTimestamp || v.expiredAt || null;
+                        if (!merged[p] || (isAct && merged[p].status !== 'ACTIVE') || (exp && (!merged[p].expiredAt || exp > merged[p].expiredAt))) {
+                            merged[p] = {
+                                phone: p,
+                                name: v.name || merged[p]?.name || 'Ahli',
+                                status: isAct ? 'ACTIVE' : (v.status || merged[p]?.status || 'NEW'),
+                                expiredAt: exp || merged[p]?.expiredAt || null,
+                                refCode: v.refCode || merged[p]?.refCode || generateReferralCode(v.name || 'Ahli', merged),
+                                referredBy: v.referredBy || merged[p]?.referredBy || null,
+                                paidReferrals: v.paidReferrals || merged[p]?.paidReferrals || 0,
+                                totalPaidReferrals: v.totalPaidReferrals || merged[p]?.totalPaidReferrals || 0,
+                                refSentToExisting: !!v.refSentToExisting,
+                                reminded3Days: !!v.reminded3Days,
+                                lid: v.lid ? normalizeIdentifier(v.lid) : (merged[p]?.lid || null)
+                            };
+                            if (v.lid) merged[normalizeIdentifier(v.lid)] = merged[p];
+                        }
                     }
-                    saveUsers(data);
-                    console.log(`[Migrasi Ahli] Berjaya menyelaraskan ${Object.keys(data).length} ahli ke dalam ./data/users.json.`);
-                } catch (e) {
-                    console.error('Ralat migrasi members lama:', e);
                 }
-            }
+            } catch {}
         }
-        return data;
-    } catch {
+
+        // 3. Muat dari users.json tempatan
+        if (fs.existsSync(USERS_FILE)) {
+            try {
+                const localUsers = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+                for (const [k, v] of Object.entries(localUsers)) {
+                    const p = normalizeIdentifier(v.phone || k);
+                    if (p) {
+                        merged[p] = { ...merged[p], ...v, phone: p };
+                        if (v.lid) merged[normalizeIdentifier(v.lid)] = merged[p];
+                    }
+                }
+            } catch {}
+        }
+
+        // 4. Muat dari users.json kekal dalam Volume (sumber utama mutakhir)
+        if (fs.existsSync(PERSISTENT_USERS_FILE)) {
+            try {
+                const persistentUsers = JSON.parse(fs.readFileSync(PERSISTENT_USERS_FILE, 'utf8'));
+                for (const [k, v] of Object.entries(persistentUsers)) {
+                    const p = normalizeIdentifier(v.phone || k);
+                    if (p) {
+                        merged[p] = { ...merged[p], ...v, phone: p };
+                        if (v.lid) merged[normalizeIdentifier(v.lid)] = merged[p];
+                    }
+                }
+            } catch {}
+        }
+
+        return merged;
+    } catch (e) {
+        console.error('Ralat gabung loadUsers:', e);
         return {};
     }
 }
@@ -191,19 +251,30 @@ function saveUsers(data) {
     }
 }
 
-function normalizeIdentifier(input) {
-    if (!input) return '';
-    let clean = input.trim().replace(/[^0-9]/g, '');
-    if (clean.startsWith('0')) {
-        clean = '60' + clean.substring(1);
-    }
-    return clean;
-}
-
+// -------------------------------------------------------------
+// PENETAPAN IDENTITI PINTAR (DWIARAH PHONE <-> LID)
+// -------------------------------------------------------------
 function findUserRecord(users, remoteJid, altJid) {
     const cleanJid = normalizeIdentifier(remoteJid);
     const cleanAlt = normalizeIdentifier(altJid);
 
+    // 1. Semakan terus pada rekod ACTIVE
+    if (cleanJid && users[cleanJid] && users[cleanJid].status === 'ACTIVE' && users[cleanJid].expiredAt > Date.now()) {
+        return users[cleanJid];
+    }
+    if (cleanAlt && users[cleanAlt] && users[cleanAlt].status === 'ACTIVE' && users[cleanAlt].expiredAt > Date.now()) {
+        return users[cleanAlt];
+    }
+
+    // 2. Semakan melalui pemetaan LID atau telefon bagi akaun ACTIVE
+    for (const u of Object.values(users)) {
+        if (u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now()) {
+            if (u.phone === cleanJid || u.phone === cleanAlt) return u;
+            if (u.lid === cleanJid || u.lid === cleanAlt) return u;
+        }
+    }
+
+    // 3. Semakan bagi pengguna biasa (WAITING / NEW)
     if (cleanJid && users[cleanJid]) return users[cleanJid];
     if (cleanAlt && users[cleanAlt]) return users[cleanAlt];
 
@@ -211,7 +282,39 @@ function findUserRecord(users, remoteJid, altJid) {
         if (u.phone === cleanJid || u.phone === cleanAlt) return u;
         if (u.lid === cleanJid || u.lid === cleanAlt) return u;
     }
+
     return null;
+}
+
+// Penyelarasan Menyeluruh LID Ahli Aktif Menggunakan WhatsApp Server
+async function syncAllActiveLids(sock) {
+    try {
+        const users = loadUsers();
+        let updatedCount = 0;
+        const uniquePhones = new Set();
+
+        for (const u of Object.values(users)) {
+            if (u.status === 'ACTIVE' && u.phone && !uniquePhones.has(u.phone)) {
+                uniquePhones.add(u.phone);
+                try {
+                    const checkJid = u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`;
+                    const [waUser] = await sock.onWhatsApp(checkJid);
+                    if (waUser && waUser.lid) {
+                        const cleanLid = normalizeIdentifier(waUser.lid);
+                        u.lid = cleanLid;
+                        users[cleanLid] = u;
+                        updatedCount++;
+                        console.log(`[Penyelarasan LID Berjaya] ${u.phone} (${u.name}) -> ${cleanLid}`);
+                    }
+                } catch {}
+            }
+        }
+        if (updatedCount > 0) saveUsers(users);
+        return updatedCount;
+    } catch (e) {
+        console.error('Ralat syncAllActiveLids:', e);
+        return 0;
+    }
 }
 
 const logger = pino({ level: 'silent' });
@@ -599,10 +702,15 @@ async function startBot() {
             console.log(`Pentadbir Utama (Full Access): ${ADMIN_NUMBER}`);
             console.log(`Enjin Video: 4K-Grade CAS Sharpening 60 FPS (15.2MB Max Bitrate & aq-mode 3)`);
             console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
-            console.log(`Pangkalan Data: ./data/users.json (NAME+3DIGIT Referral Aktif)`);
+            console.log(`Sistem Langganan: Auto-Sync LID Dwi-Arah Aktif`);
             console.log(`Kawalan RAM: Multi-layer GC & 15-Min Watchdog (<280MB Cap)`);
-            console.log(`Kapasiti Antrian: Maksimum ${MAX_QUEUE_SIZE} Media`);
             console.log('======================================================\n');
+
+            // Segerakkan identiti WhatsApp (LID) untuk semua ahli yang aktif
+            setTimeout(async () => {
+                console.log('[Inisialisasi] Memulakan penyelarasan identiti LID ahli aktif...');
+                await syncAllActiveLids(sock);
+            }, 3000);
         }
     });
 
@@ -623,9 +731,7 @@ async function startBot() {
         }, 3500);
     }
 
-    // -----------------------------------------------------------------
-    // WATCHDOG MEMORI TERBIAR & CACHE PRUNING (SETIAP 15 MINIT)
-    // -----------------------------------------------------------------
+    // Watchdog Memori Terbiar & Cache Pruning (Setiap 15 Minit)
     setInterval(() => {
         try {
             const mem = process.memoryUsage();
@@ -633,7 +739,6 @@ async function startBot() {
             const isIdle = videoQueue.waitingLength === 0 && !videoQueue.activeJob;
 
             if (isIdle) {
-                // 1. Bersihkan fail terbiar dalam ./temp melebihi 10 minit
                 if (fs.existsSync(TEMP_DIR)) {
                     const now = Date.now();
                     const files = fs.readdirSync(TEMP_DIR);
@@ -653,14 +758,12 @@ async function startBot() {
                     }
                 }
 
-                // 2. Kosongkan cache percubaan semula mesej Baileys
                 if (msgRetryCounterCache && msgRetryCounterCache.size > 0) {
                     const prevSize = msgRetryCounterCache.size;
                     msgRetryCounterCache.clear();
                     console.log(`[Watchdog Cache] ${prevSize} rekod percubaan semula (retry cache) dikosongkan.`);
                 }
 
-                // 3. Paksa Garbage Collection jika RSS melebihi 180MB
                 const RSS_THRESHOLD_BYTES = 180 * 1024 * 1024;
                 if (mem.rss > RSS_THRESHOLD_BYTES && global.gc) {
                     global.gc();
@@ -754,6 +857,29 @@ async function startBot() {
             const cleanPhone = normalizeIdentifier(remoteJid);
             let user = findUserRecord(users, remoteJid, altJid);
 
+            // Jika mesej datang dari LID yang belum dikenali, cari semula menggunakan onWhatsApp
+            if ((!user || user.status !== 'ACTIVE') && remoteJid.endsWith('@lid')) {
+                for (const u of Object.values(users)) {
+                    if (u.status === 'ACTIVE' && u.phone) {
+                        try {
+                            const checkJid = u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`;
+                            const [waUser] = await sock.onWhatsApp(checkJid);
+                            if (waUser && waUser.lid) {
+                                const cleanLid = normalizeIdentifier(waUser.lid);
+                                u.lid = cleanLid;
+                                users[cleanLid] = u;
+                                if (cleanLid === cleanPhone) {
+                                    user = u;
+                                    saveUsers(users);
+                                    console.log(`[LID Dikenalpasti On-The-Fly] ${cleanPhone} -> ${u.phone} (${u.name})`);
+                                    break;
+                                }
+                            }
+                        } catch {}
+                    }
+                }
+            }
+
             if (!user && cleanPhone) {
                 const pushName = msg.pushName || 'Pengguna';
                 const refCode = generateReferralCode(pushName, users);
@@ -786,7 +912,7 @@ async function startBot() {
             // ---------------------------------------------------------
             // 1. PENGENDALIAN ARAHAN PENTADBIR (BAHASA MELAYU RINGKAS)
             // ---------------------------------------------------------
-            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu'].includes(cmd))) {
+            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu', 'sync', 'selaras'].includes(cmd))) {
                 console.log(`[Arahan Pentadbir Danial] ${remoteJid}: "${textContent}"`);
 
                 // 1.1 TUNGGU: Lihat senarai menunggu bayaran
@@ -828,7 +954,15 @@ async function startBot() {
                     }
 
                     const targetPhone = normalizeIdentifier(rawTarget);
-                    let targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
+                    let targetUser = users[targetPhone];
+                    if (!targetUser) {
+                        for (const u of Object.values(users)) {
+                            if (u.phone === targetPhone || u.lid === targetPhone) {
+                                targetUser = u;
+                                break;
+                            }
+                        }
+                    }
 
                     if (!targetUser) {
                         const fallbackName = optName || 'Ahli';
@@ -857,6 +991,18 @@ async function startBot() {
                             targetUser.refCode = generateReferralCode(targetUser.name, users);
                         }
                     }
+
+                    // Segerakkan LID WhatsApp secara automatik
+                    try {
+                        const checkJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                        const [waUser] = await sock.onWhatsApp(checkJid);
+                        if (waUser && waUser.lid) {
+                            const cleanLid = normalizeIdentifier(waUser.lid);
+                            targetUser.lid = cleanLid;
+                            users[cleanLid] = targetUser;
+                            console.log(`[Auto-LID Sync on Add] ${targetPhone} -> ${cleanLid}`);
+                        }
+                    } catch (e) {}
 
                     // Ganjaran Penaja (Referral Reward)
                     let referralRewardMsg = '';
@@ -896,7 +1042,6 @@ async function startBot() {
                         day: '2-digit', month: '2-digit', year: 'numeric'
                     });
 
-                    // Notifikasi Pengaktifan Terus kepada Ahli
                     const userJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
                     try {
                         await sock.sendMessage(userJid, {
@@ -917,6 +1062,7 @@ async function startBot() {
                             `✅ *PENGAKTIFAN KEAHLIAN BERJAYA*\n\n` +
                             `• Nama: ${targetUser.name}\n` +
                             `• Nombor: ${targetPhone}\n` +
+                            `• Status: AKTIF (Diselaraskan)\n` +
                             `• Tempoh: +${days} Hari\n` +
                             `• Tarikh Luput: ${expDateStr}\n` +
                             `• Kod Referral: *${targetUser.refCode}*${referralRewardMsg}`
@@ -1030,6 +1176,7 @@ async function startBot() {
                             `• Nama: *${targetUser.name}*\n` +
                             `• Nombor: ${targetUser.phone}\n` +
                             `• Status: ${isAct ? 'AKTIF' : targetUser.status}\n` +
+                            `• Identiti LID: ${targetUser.lid || 'Belum Diselaraskan'}\n` +
                             `• Baki Tempoh: ${daysLeft} hari (Luput: ${expStr})\n` +
                             `• Kod Referral: *${targetUser.refCode || 'Tiada'}*\n` +
                             `• Kemajuan Referral: ${targetUser.paidReferrals || 0}/3 (Jumlah Terkumpul: ${targetUser.totalPaidReferrals || 0})\n` +
@@ -1051,6 +1198,7 @@ async function startBot() {
                     }
 
                     delete users[targetUser.phone];
+                    if (targetUser.lid) delete users[targetUser.lid];
                     saveUsers(users);
 
                     await sock.sendMessage(remoteJid, {
@@ -1061,7 +1209,14 @@ async function startBot() {
 
                 // 1.7 SENARAI: Senarai ahli aktif
                 if (['senarai', 'ahli', 'list'].includes(cmd)) {
-                    const activeMembers = Object.values(users).filter(u => u.status === 'ACTIVE' && u.expiredAt > Date.now());
+                    const uniqueMap = new Map();
+                    for (const u of Object.values(users)) {
+                        if (u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now()) {
+                            uniqueMap.set(u.phone, u);
+                        }
+                    }
+                    const activeMembers = Array.from(uniqueMap.values());
+
                     if (activeMembers.length === 0) {
                         await sock.sendMessage(remoteJid, {
                             text: "Tiada ahli berdaftar yang aktif pada masa ini."
@@ -1072,13 +1227,27 @@ async function startBot() {
                     let resp = `👥 *SENARAI AHLI AKTIF (${activeMembers.length} Orang)*\n\n`;
                     activeMembers.forEach((m, i) => {
                         const daysLeft = Math.ceil((m.expiredAt - Date.now()) / (1000 * 60 * 60 * 24));
-                        resp += `${i + 1}. *${m.name}* (${m.phone})\n   └ Baki: ${daysLeft} hari (Luput: ${new Date(m.expiredAt).toLocaleDateString('ms-MY')})\n   └ Kod: ${m.refCode}\n\n`;
+                        const lidStatus = m.lid ? `[LID OK]` : `[LID Belum Sync]`;
+                        resp += `${i + 1}. *${m.name}* (${m.phone}) ${lidStatus}\n   └ Baki: ${daysLeft} hari (Luput: ${new Date(m.expiredAt).toLocaleDateString('ms-MY')})\n   └ Kod: ${m.refCode}\n\n`;
                     });
                     await sock.sendMessage(remoteJid, { text: resp.trim() }, { quoted: msg });
                     continue;
                 }
 
-                // 1.8 BANTUAN / MENU PENTADBIR
+                // 1.8 SELARAS / SYNC: Segerakkan LID semua ahli aktif secara manual
+                if (['sync', 'selaras'].includes(cmd)) {
+                    await sock.sendMessage(remoteJid, {
+                        text: "Memulakan penyelarasan identiti WhatsApp (LID) untuk semua ahli aktif..."
+                    }, { quoted: msg });
+
+                    const syncedCount = await syncAllActiveLids(sock);
+                    await sock.sendMessage(remoteJid, {
+                        text: `✅ Penyelarasan selesai! Sebanyak ${syncedCount} identiti ahli berjaya diselaraskan.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                // 1.9 BANTUAN / MENU PENTADBIR
                 if (['bantuan', 'menu', 'help'].includes(cmd)) {
                     await sock.sendMessage(remoteJid, {
                         text:
@@ -1100,7 +1269,9 @@ async function startBot() {
                             `   └ Batalkan keahlian pengguna.\n\n` +
                             `7. *senarai*\n` +
                             `   └ Paparkan semua ahli aktif dan tarikh luput.\n\n` +
-                            `8. *ram*\n` +
+                            `8. *selaras*\n` +
+                            `   └ Segerakkan identiti LID WhatsApp ahli aktif.\n\n` +
+                            `9. *ram*\n` +
                             `   └ Semak status memori pelayan & antrian.`
                     }, { quoted: msg });
                     continue;
@@ -1362,7 +1533,7 @@ async function startBot() {
             }
 
             if (!isAdmin && !isActive) {
-                console.log(`[Media Ditolak] Penghantaran media oleh bukan ahli aktif: ${remoteJid}`);
+                console.log(`[Media Ditolak] Penghantaran media oleh bukan ahli aktif: ${remoteJid} (Status: ${user?.status}, Exp: ${user?.expiredAt})`);
                 await sock.sendMessage(remoteJid, {
                     text:
                         `AKSES PEMPROSESAN DISEKAT\n\n` +
