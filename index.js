@@ -148,9 +148,10 @@ function saveConfig(cfg) {
 const HITPAY_API_KEY = (process.env.HITPAY_API_KEY || '').trim();
 const HITPAY_SALT = (process.env.HITPAY_SALT || '').trim();
 const HITPAY_ENV = (process.env.HITPAY_ENV || 'live').toLowerCase().trim();
-const HITPAY_API_URL = HITPAY_ENV === 'sandbox'
-    ? 'https://api.sandbox.hit-pay.com/v1/payment-requests'
-    : 'https://api.hit-pay.com/v1/payment-requests';
+const HITPAY_BASE_URL = HITPAY_ENV === 'sandbox'
+    ? 'https://api.sandbox.hit-pay.com/v1'
+    : 'https://api.hit-pay.com/v1';
+const HITPAY_API_URL = `${HITPAY_BASE_URL}/payment-requests`;
 
 // Pengecaman Automatik Domain Railway Public
 const WEBHOOK_PUBLIC_URL = (
@@ -976,11 +977,14 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
 
         const finalName = customerName || targetUser?.name || 'Ahli';
 
+        const addedMonths = Math.max(1, Math.round(days / 30));
         if (!targetUser) {
             targetUser = {
                 phone: targetPhone,
                 name: finalName,
                 status: 'ACTIVE',
+                registeredAt: new Date().toISOString(),
+                subscribedMonths: addedMonths,
                 expiredAt: Date.now() + days * 24 * 60 * 60 * 1000,
                 refCode: generateReferralCode(finalName, users),
                 referredBy: null,
@@ -998,6 +1002,8 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             }
             const now = Date.now();
             const baseTime = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
+            targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
+            targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + addedMonths;
             targetUser.expiredAt = baseTime + days * 24 * 60 * 60 * 1000;
             targetUser.status = 'ACTIVE';
             targetUser.reminded3Days = false;
@@ -1215,6 +1221,7 @@ async function syncHitPayPayments() {
         }
 
         if (activatedCount > 0) {
+            hitpayDashboardCache.fetchedAt = 0;
             console.log(`[HitPay Auto-Sync Selesai] Berjaya mengaktifkan ${activatedCount} bayaran.`);
         }
         return { checked: items.length, activated: activatedCount, list: activatedList };
@@ -1222,6 +1229,304 @@ async function syncHitPayPayments() {
         console.error('[HitPay Auto-Sync Error]:', err.message);
         return { checked: 0, activated: 0, error: err.message };
     }
+}
+
+// -------------------------------------------------------------
+// ONE-TIME USER DATA ADJUSTMENTS (ALIF, NAZHAN, IRFAN ANUAR)
+// -------------------------------------------------------------
+function applyPendingUserMigrations() {
+    try {
+        const cfg = loadConfig();
+        if (!cfg.migrations) cfg.migrations = {};
+        if (cfg.migrations.alifRef1_v1 && cfg.migrations.nazhanRefAlif_v1 && cfg.migrations.irfanAnuarPlus2Months_v1) {
+            return false;
+        }
+
+        const users = loadUsers();
+        const uniqueUsers = Object.values(users).filter((u, i, arr) => u && u.phone && arr.findIndex(x => x.phone === u.phone) === i);
+        let usersChanged = false;
+        let cfgChanged = false;
+
+        const alif = uniqueUsers.find(u => (u.name || '').toLowerCase().includes('alif')) || users['601164552773'];
+        if (alif && !cfg.migrations.alifRef1_v1) {
+            alif.paidReferrals = (alif.paidReferrals || 0) + 1;
+            alif.totalPaidReferrals = (alif.totalPaidReferrals || 0) + 1;
+            if (!alif.refCode) alif.refCode = generateReferralCode(alif.name || 'ALIF', users);
+            users[alif.phone] = alif;
+            if (alif.lid) users[alif.lid] = alif;
+            cfg.migrations.alifRef1_v1 = true;
+            usersChanged = true;
+            cfgChanged = true;
+            console.log(`[Migration] Added +1 referral to Alif (${alif.phone}).`);
+        }
+
+        const nazhan = uniqueUsers.find(u => (u.name || '').toLowerCase().includes('nazhan'));
+        if (nazhan && alif && !cfg.migrations.nazhanRefAlif_v1) {
+            nazhan.referredBy = alif.phone;
+            nazhan.referredByCode = alif.refCode || 'ALIF';
+            nazhan.referralCredited = true;
+            users[nazhan.phone] = nazhan;
+            if (nazhan.lid) users[nazhan.lid] = nazhan;
+            cfg.migrations.nazhanRefAlif_v1 = true;
+            usersChanged = true;
+            cfgChanged = true;
+            console.log(`[Migration] Linked Nazhan (${nazhan.phone}) to Alif referral code (${alif.refCode}).`);
+        }
+
+        const irfan = uniqueUsers.find(u => (u.name || '').toLowerCase().includes('irfan anuar'))
+            || uniqueUsers.find(u => (u.name || '').toLowerCase().includes('irfan'));
+        if (irfan && !cfg.migrations.irfanAnuarPlus2Months_v1) {
+            const baseExpiry = (irfan.expiredAt && irfan.expiredAt > 0) ? irfan.expiredAt : Date.now();
+            const existingMonths = irfan.subscribedMonths || Math.max(1, Math.round(Math.max(0, baseExpiry - (irfan.registeredAt ? new Date(irfan.registeredAt).getTime() : Date.now())) / (30 * 24 * 60 * 60 * 1000)) || 1);
+            irfan.expiredAt = baseExpiry + (60 * 24 * 60 * 60 * 1000);
+            irfan.status = irfan.expiredAt > Date.now() ? 'ACTIVE' : irfan.status;
+            irfan.subscribedMonths = existingMonths + 2;
+            irfan.reminded3Days = false;
+            users[irfan.phone] = irfan;
+            if (irfan.lid) users[irfan.lid] = irfan;
+            cfg.migrations.irfanAnuarPlus2Months_v1 = true;
+            usersChanged = true;
+            cfgChanged = true;
+            console.log(`[Migration] Extended Irfan Anuar (${irfan.phone}) by +2 months (+60 days).`);
+        }
+
+        if (usersChanged) saveUsers(users);
+        if (cfgChanged) saveConfig(cfg);
+        return usersChanged;
+    } catch (e) {
+        console.error('[Migration Error]:', e.message);
+        return false;
+    }
+}
+
+// -------------------------------------------------------------
+// HITPAY LIVE DASHBOARD DATA ENGINE (PAYMENTS + CHARGES + PAYOUTS)
+// -------------------------------------------------------------
+let hitpayDashboardCache = {
+    fetchedAt: 0,
+    data: null,
+    inFlight: null
+};
+
+async function fetchHitPayAllPages(endpoint, maxPages = 10) {
+    if (!HITPAY_API_KEY) return [];
+    const collected = [];
+    for (let page = 1; page <= maxPages; page++) {
+        const sep = endpoint.includes('?') ? '&' : '?';
+        const url = `${HITPAY_BASE_URL}${endpoint}${sep}per_page=100&page=${page}`;
+        const res = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'X-BUSINESS-API-KEY': HITPAY_API_KEY,
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        });
+        if (!res.ok) {
+            if (page === 1) {
+                throw new Error(`HitPay ${endpoint} HTTP ${res.status}`);
+            }
+            break;
+        }
+        const json = await res.json();
+        const items = Array.isArray(json) ? json : (json.data || []);
+        if (!Array.isArray(items) || items.length === 0) break;
+        collected.push(...items);
+
+        const lastPage = json.meta?.last_page || json.last_page;
+        const nextUrl = json.links?.next || json.next_page_url;
+        if ((lastPage && page >= lastPage) || (nextUrl === null) || (!lastPage && !nextUrl && items.length < 100)) {
+            break;
+        }
+    }
+    return collected;
+}
+
+async function fetchHitPayDashboardData(force = false) {
+    if (!HITPAY_API_KEY) {
+        return {
+            configured: false,
+            payments: [],
+            payouts: [],
+            totalCollectedRM: null,
+            totalNetRM: null,
+            totalFeesRM: null,
+            totalPaidOutRM: 0,
+            totalPendingPayoutRM: 0,
+            paymentsCount: 0,
+            payoutsCount: 0,
+            lastSyncedAt: null
+        };
+    }
+
+    const now = Date.now();
+    if (!force && hitpayDashboardCache.data && (now - hitpayDashboardCache.fetchedAt) < 60000) {
+        return hitpayDashboardCache.data;
+    }
+
+    if (hitpayDashboardCache.inFlight) {
+        return hitpayDashboardCache.inFlight;
+    }
+
+    hitpayDashboardCache.inFlight = (async () => {
+        try {
+            const [prRes, chRes, poRes] = await Promise.allSettled([
+                fetchHitPayAllPages('/payment-requests'),
+                fetchHitPayAllPages('/charges'),
+                fetchHitPayAllPages('/payouts')
+            ]);
+
+            const paymentRequests = prRes.status === 'fulfilled' ? prRes.value : [];
+            const charges = chRes.status === 'fulfilled' ? chRes.value : [];
+            const rawPayouts = poRes.status === 'fulfilled' ? poRes.value : [];
+
+            const chargesSucceeded = charges.filter(c => ['succeeded', 'completed', 'paid'].includes((c.status || '').toLowerCase()));
+            const chargeById = new Map();
+            const chargeByReqId = new Map();
+            for (const c of chargesSucceeded) {
+                if (c.id) chargeById.set(c.id, c);
+                if (c.payment_request_id) chargeByReqId.set(c.payment_request_id, c);
+            }
+
+            const usedChargeIds = new Set();
+            const payments = [];
+
+            const prCompleted = paymentRequests.filter(pr => ['completed', 'succeeded'].includes((pr.status || '').toLowerCase()));
+            for (const pr of prCompleted) {
+                const subPayment = (Array.isArray(pr.payments) && pr.payments[0]) || null;
+                const matchedCharge = (subPayment && subPayment.id && chargeById.get(subPayment.id)) || chargeByReqId.get(pr.id) || null;
+                if (matchedCharge && matchedCharge.id) usedChargeIds.add(matchedCharge.id);
+                if (subPayment && subPayment.id) usedChargeIds.add(subPayment.id);
+
+                const refParts = (pr.reference_number || '').split('|');
+                const rawPhone = pr.phone || (refParts.length >= 2 ? refParts[0] : '') || matchedCharge?.customer_phone || '';
+                const cleanPhone = rawPhone ? (normalizeIdentifier(rawPhone) || String(rawPhone).trim()) : '-';
+                const daysFromRef = refParts.length >= 2 ? parseInt(refParts[1], 10) : null;
+                const amountNum = parseFloat((matchedCharge && matchedCharge.amount) ?? (subPayment && subPayment.amount) ?? pr.amount) || 0;
+                const feeNum = matchedCharge
+                    ? ((parseFloat(matchedCharge.fixed_fee) || 0) + (parseFloat(matchedCharge.discount_fee) || 0))
+                    : (subPayment && subPayment.fees != null ? parseFloat(subPayment.fees) : null);
+                const netNum = matchedCharge && matchedCharge.amount_without_fees != null
+                    ? parseFloat(matchedCharge.amount_without_fees)
+                    : (feeNum != null ? Math.max(0, amountNum - feeNum) : null);
+
+                const tsRaw = (matchedCharge && matchedCharge.created_at) || (subPayment && subPayment.created_at) || pr.updated_at || pr.created_at;
+                const ts = tsRaw ? new Date(tsRaw).getTime() : Date.now();
+
+                payments.push({
+                    paymentId: (matchedCharge && matchedCharge.id) || (subPayment && subPayment.id) || pr.id,
+                    buyerName: pr.name || matchedCharge?.customer_name || pr.email || 'Customer',
+                    buyerPhone: cleanPhone,
+                    packageDays: Number.isFinite(daysFromRef) ? daysFromRef : 0,
+                    amount: amountNum.toFixed(2),
+                    fee: feeNum != null ? feeNum.toFixed(2) : null,
+                    netAmount: netNum != null ? netNum.toFixed(2) : null,
+                    currency: (pr.currency || matchedCharge?.currency || 'MYR').toUpperCase(),
+                    timestamp: Number.isFinite(ts) ? ts : Date.now(),
+                    method: (matchedCharge?.payment_method?.name) || (subPayment && subPayment.payment_method) || (pr.payment_methods && pr.payment_methods[0]) || 'HitPay'
+                });
+            }
+
+            // Include any succeeded charges not tied to payment-requests so total matches HitPay 100%
+            for (const c of chargesSucceeded) {
+                if (c.id && usedChargeIds.has(c.id)) continue;
+                const amountNum = parseFloat(c.amount) || 0;
+                const feeNum = (parseFloat(c.fixed_fee) || 0) + (parseFloat(c.discount_fee) || 0);
+                const netNum = c.amount_without_fees != null ? (parseFloat(c.amount_without_fees) || 0) : Math.max(0, amountNum - feeNum);
+                const ts = c.created_at ? new Date(c.created_at).getTime() : Date.now();
+                payments.push({
+                    paymentId: c.id || `CHG_${ts}`,
+                    buyerName: c.customer_name || c.remark || c.customer_email || 'HitPay Payment',
+                    buyerPhone: c.customer_phone ? (normalizeIdentifier(c.customer_phone) || c.customer_phone) : '-',
+                    packageDays: 0,
+                    amount: amountNum.toFixed(2),
+                    fee: feeNum.toFixed(2),
+                    netAmount: netNum.toFixed(2),
+                    currency: (c.currency || 'MYR').toUpperCase(),
+                    timestamp: Number.isFinite(ts) ? ts : Date.now(),
+                    method: c.payment_method?.name || 'HitPay'
+                });
+            }
+
+            payments.sort((a, b) => b.timestamp - a.timestamp);
+
+            let totalCollectedRM = 0;
+            let totalNetRM = null;
+            let totalFeesRM = null;
+            if (chargesSucceeded.length > 0) {
+                totalCollectedRM = chargesSucceeded.reduce((sum, c) => sum + (parseFloat(c.amount) || 0), 0);
+                totalNetRM = chargesSucceeded.reduce((sum, c) => {
+                    const gross = parseFloat(c.amount) || 0;
+                    const fees = (parseFloat(c.fixed_fee) || 0) + (parseFloat(c.discount_fee) || 0);
+                    return sum + (c.amount_without_fees != null ? (parseFloat(c.amount_without_fees) || 0) : Math.max(0, gross - fees));
+                }, 0);
+                totalFeesRM = Math.max(0, totalCollectedRM - totalNetRM);
+            } else {
+                totalCollectedRM = payments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+            }
+
+            const payouts = rawPayouts.map(p => {
+                const tsRaw = p.arrival_date || p.created_at;
+                const ts = tsRaw ? new Date(tsRaw).getTime() : Date.now();
+                return {
+                    id: p.id || '',
+                    amount: (parseFloat(p.amount) || 0).toFixed(2),
+                    currency: (p.currency || 'MYR').toUpperCase(),
+                    status: (p.status || 'paid').toLowerCase(),
+                    bankName: p.bank_name || 'Bank Account',
+                    bankAccount: p.bank_account || '',
+                    reference: p.reference || p.id || '-',
+                    arrivalDate: p.arrival_date || p.created_at || '',
+                    timestamp: Number.isFinite(ts) ? ts : Date.now()
+                };
+            }).sort((a, b) => b.timestamp - a.timestamp);
+
+            const totalPaidOutRM = payouts
+                .filter(p => p.status === 'paid')
+                .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+            const totalPendingPayoutRM = payouts
+                .filter(p => ['processing', 'scheduled', 'pending'].includes(p.status))
+                .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+
+            const result = {
+                configured: true,
+                payments,
+                payouts,
+                totalCollectedRM: totalCollectedRM.toFixed(2),
+                totalNetRM: totalNetRM != null ? totalNetRM.toFixed(2) : null,
+                totalFeesRM: totalFeesRM != null ? totalFeesRM.toFixed(2) : null,
+                totalPaidOutRM: totalPaidOutRM.toFixed(2),
+                totalPendingPayoutRM: totalPendingPayoutRM.toFixed(2),
+                paymentsCount: chargesSucceeded.length > 0 ? chargesSucceeded.length : payments.length,
+                payoutsCount: payouts.length,
+                lastSyncedAt: Date.now()
+            };
+
+            hitpayDashboardCache.data = result;
+            hitpayDashboardCache.fetchedAt = Date.now();
+            return result;
+        } catch (err) {
+            console.error('[HitPay Dashboard Fetch Error]:', err.message);
+            return hitpayDashboardCache.data || {
+                configured: true,
+                error: err.message,
+                payments: [],
+                payouts: [],
+                totalCollectedRM: null,
+                totalNetRM: null,
+                totalFeesRM: null,
+                totalPaidOutRM: '0.00',
+                totalPendingPayoutRM: '0.00',
+                paymentsCount: 0,
+                payoutsCount: 0,
+                lastSyncedAt: null
+            };
+        } finally {
+            hitpayDashboardCache.inFlight = null;
+        }
+    })();
+
+    return hitpayDashboardCache.inFlight;
 }
 
 // -------------------------------------------------------------
@@ -1247,7 +1552,7 @@ const PWA_MANIFEST = {
 };
 
 const PWA_SW = `
-const CACHE_NAME = 'statusclear-telemetry-v3';
+const CACHE_NAME = 'statusclear-telemetry-v4';
 const ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -1271,7 +1576,7 @@ self.addEventListener('fetch', (e) => {
 `;
 
 const PWA_HTML = `<!DOCTYPE html>
-<html lang="ms">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
@@ -1375,6 +1680,63 @@ const PWA_HTML = `<!DOCTYPE html>
       height: 125px;
     }
 
+    /* 2-COLUMN BENTO GRID */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .users-action-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .action-pill-btn {
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 11px 14px;
+      border-radius: 999px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      border: 1px solid rgba(198, 255, 0, 0.28);
+      background: rgba(198, 255, 0, 0.12);
+      color: #C6FF00;
+      transition: transform 0.1s ease;
+    }
+    .action-pill-btn.solid {
+      background: #C6FF00;
+      color: #0A0B08;
+      border-color: #C6FF00;
+    }
+    .action-pill-btn:active { transform: scale(0.97); }
+    .form-input {
+      width: 100%;
+      background: #0F110D;
+      border: 1px solid rgba(198, 255, 0, 0.2);
+      border-radius: 14px;
+      padding: 11px 13px;
+      color: #FFFFFF;
+      font-family: inherit;
+      font-size: 13px;
+      outline: none;
+      margin-bottom: 10px;
+    }
+    .form-input:focus {
+      border-color: #C6FF00;
+    }
+    .form-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #8E9387;
+      margin-bottom: 5px;
+    }
     /* 3-COLUMN BENTO GRID */
     .grid-3 {
       display: grid;
@@ -1811,7 +2173,7 @@ const PWA_HTML = `<!DOCTYPE html>
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#C6FF00" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
     </div>
     <h2 style="font-size: 20px; font-weight: 800; letter-spacing: -0.3px;">StatusClear Monitor</h2>
-    <p style="font-size: 13px; color: #8E9387; margin-top: 4px;">Masukkan 6-digit PIN keselamatan</p>
+    <p style="font-size: 13px; color: #8E9387; margin-top: 4px;">Enter 6-digit security PIN</p>
     <p id="pin-error" style="font-size: 12px; color: #FF6B6B; margin-top: 8px; min-height: 16px;"></p>
     
     <div class="pin-dots">
@@ -1848,7 +2210,7 @@ const PWA_HTML = `<!DOCTYPE html>
     <div class="top-bar">
       <div>
         <h1 class="top-title" id="page-heading">Dashboard</h1>
-        <p class="top-subtitle" id="current-date">Memuatkan tarikh...</p>
+        <p class="top-subtitle" id="current-date">Loading date...</p>
       </div>
       <div class="status-badge">
         <div class="status-dot" id="wa-dot"></div>
@@ -1871,7 +2233,7 @@ const PWA_HTML = `<!DOCTYPE html>
           </svg>
         </div>
         <div style="text-align: center; font-size: 12px; color: #8E9387; font-weight: 500; margin-top: 4px;">
-          Baileys Socket Aktif • Kawalan RAM Bebas
+          Baileys Socket Active • Memory Protected
         </div>
       </div>
 
@@ -1879,7 +2241,7 @@ const PWA_HTML = `<!DOCTYPE html>
       <div class="grid-3">
         <div class="mini-card">
           <span class="mini-label">Revenue</span>
-          <span class="mini-val" id="stat-revenue">RM 0</span>
+          <span class="mini-val" id="stat-revenue">RM 0.00</span>
           <svg viewBox="0 0 80 24" class="sparkline-svg">
             <rect x="4" y="12" width="8" height="12" rx="2" fill="rgba(198,255,0,0.3)"/>
             <rect x="20" y="8" width="8" height="16" rx="2" fill="rgba(198,255,0,0.5)"/>
@@ -1912,11 +2274,11 @@ const PWA_HTML = `<!DOCTYPE html>
       <div class="bento-card">
         <div class="chart-header">
           <div>
-            <div class="chart-title">Aktiviti Mingguan (Isnin – Ahad)</div>
-            <div class="chart-subtitle">Jumlah transaksi & pemprosesan media</div>
+            <div class="chart-title">Weekly Activity (Mon – Sun)</div>
+            <div class="chart-subtitle">Transactions & media processing volume</div>
           </div>
           <div style="font-size: 11px; font-weight: 700; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;">
-            7 Hari
+            7 Days
           </div>
         </div>
         <svg viewBox="0 0 380 110" class="line-chart-svg" id="chart-svg">
@@ -1940,11 +2302,11 @@ const PWA_HTML = `<!DOCTYPE html>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#C6FF00" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
             Railway Pro Instance
           </div>
-          <button class="pill-btn-small" onclick="promptRailwayDate()">Edit Tarikh Luput</button>
+          <button type="button" class="pill-btn-small" onclick="promptRailwayDate()">Edit Expiry</button>
         </div>
         <div class="meta-row">
-          <span>Baki Langganan:</span>
-          <span style="color: #C6FF00; font-weight: 700;" id="railway-countdown">Sedang disemak...</span>
+          <span>Subscription Remaining:</span>
+          <span style="color: #C6FF00; font-weight: 700;" id="railway-countdown">Checking...</span>
         </div>
         <div class="ram-bar-track">
           <div class="ram-bar-fill" id="ram-fill" style="width: 32%;"></div>
@@ -1959,33 +2321,105 @@ const PWA_HTML = `<!DOCTYPE html>
 
     <!-- TAB 2: USERS & REFERRALS -->
     <div id="tab-users" class="tab-content">
+      <div class="users-action-row">
+        <button type="button" class="action-pill-btn solid" onclick="toggleRegisterForm()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>
+          Register Member
+        </button>
+        <button type="button" class="action-pill-btn" id="users-sync-btn" onclick="syncAllData('users-sync-btn', 'users-sync-status')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          Sync Now
+        </button>
+      </div>
+
+      <div class="broadcast-status-box" id="users-sync-status" style="margin-top: 0; margin-bottom: 12px;"></div>
+
+      <!-- REGISTER MEMBER FORM -->
+      <div class="bento-card" id="register-member-card" style="display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+          <span style="font-size: 14px; font-weight: 700;">Register New Member</span>
+          <button type="button" class="pill-btn-small" onclick="toggleRegisterForm(false)">Close</button>
+        </div>
+        <label class="form-label" for="reg-name">Full Name</label>
+        <input type="text" id="reg-name" class="form-input" placeholder="e.g. Muhammad Ali">
+
+        <label class="form-label" for="reg-phone">WhatsApp Phone Number</label>
+        <input type="text" id="reg-phone" class="form-input" placeholder="e.g. 0123456789 or 60123456789">
+
+        <label class="form-label" for="reg-months">Subscription Duration</label>
+        <select id="reg-months" class="form-input">
+          <option value="1">1 Month (30 Days)</option>
+          <option value="2">2 Months (60 Days)</option>
+          <option value="3">3 Months (90 Days)</option>
+          <option value="6">6 Months (180 Days)</option>
+          <option value="12">12 Months (365 Days)</option>
+        </select>
+
+        <label class="form-label" for="reg-refcode">Referral Code Used (Optional)</label>
+        <input type="text" id="reg-refcode" class="form-input" placeholder="e.g. ALIF123">
+
+        <button type="button" class="primary-pill-btn" id="reg-submit-btn" onclick="submitRegisterMember()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          <span id="reg-submit-label">Activate & Save Member</span>
+        </button>
+      </div>
+
       <div class="search-wrapper">
         <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-        <input type="text" class="search-box" id="user-search" placeholder="Cari nama, nombor telefon, atau kod referral..." oninput="filterUsers()">
+        <input type="text" class="search-box" id="user-search" placeholder="Search name, phone number, or referral code..." oninput="filterUsers()">
       </div>
       <div class="pill-filter-bar" id="user-filter-bar">
-        <button type="button" class="filter-pill active" id="filter-all" onclick="setUserFilter('all')">Semua (0)</button>
-        <button type="button" class="filter-pill" id="filter-paid" onclick="setUserFilter('paid')">Sudah Bayar (0)</button>
-        <button type="button" class="filter-pill" id="filter-unpaid" onclick="setUserFilter('unpaid')">Belum Bayar (0)</button>
+        <button type="button" class="filter-pill active" id="filter-all" onclick="setUserFilter('all')">All (0)</button>
+        <button type="button" class="filter-pill" id="filter-paid" onclick="setUserFilter('paid')">Paid (0)</button>
+        <button type="button" class="filter-pill" id="filter-unpaid" onclick="setUserFilter('unpaid')">Unpaid (0)</button>
       </div>
       <div id="users-list-container">
         <!-- Rendered dynamically -->
       </div>
     </div>
 
-    <!-- TAB 3: HITPAY PAYMENTS -->
+    <!-- TAB 3: HITPAY PAYMENTS & PAYOUTS -->
     <div id="tab-hitpay" class="tab-content">
       <div class="bento-card" style="padding: 16px 20px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
-          <span style="font-size: 14px; font-weight: 700;">HitPay Gateway</span>
-          <span style="font-size: 11px; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;" id="hitpay-status-pill">LIVE ENGINE</span>
+          <div>
+            <span style="font-size: 14px; font-weight: 700;">HitPay Gateway</span>
+            <div style="font-size: 11px; color: #8E9387; margin-top: 2px;" id="hitpay-sync-time">Live API Sync</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 10px; font-weight: 700; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;" id="hitpay-status-pill">LIVE</span>
+            <button type="button" class="pill-btn-small" id="hitpay-sync-btn" onclick="syncAllData('hitpay-sync-btn', 'hitpay-sync-status')">Sync</button>
+          </div>
+        </div>
+        <div class="broadcast-status-box" id="hitpay-sync-status" style="margin-top: 10px;"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="mini-card">
+          <span class="mini-label">Successful Payments</span>
+          <span class="mini-val" id="hitpay-total-collected" style="color: #C6FF00;">RM 0.00</span>
+          <span style="font-size: 11px; color: #8E9387;" id="hitpay-collected-meta">0 payments</span>
+        </div>
+        <div class="mini-card">
+          <span class="mini-label">Bank Payouts</span>
+          <span class="mini-val" id="hitpay-total-payout">RM 0.00</span>
+          <span style="font-size: 11px; color: #8E9387;" id="hitpay-payout-meta">0 payouts</span>
         </div>
       </div>
+
+      <div class="pill-filter-bar" id="hitpay-view-bar">
+        <button type="button" class="filter-pill active" id="hp-tab-payments" onclick="setHitPayView('payments')">Payments In (0)</button>
+        <button type="button" class="filter-pill" id="hp-tab-payouts" onclick="setHitPayView('payouts')">Bank Payouts (0)</button>
+      </div>
+
       <div class="bento-card">
-        <div style="font-size: 13px; font-weight: 700; margin-bottom: 12px; color: #8E9387; text-transform: uppercase; letter-spacing: 0.5px;">
-          Suapan Transaksi Terkini
+        <div style="font-size: 12px; font-weight: 700; margin-bottom: 10px; color: #8E9387; text-transform: uppercase; letter-spacing: 0.5px;" id="hitpay-feed-heading">
+          Successful Payments Received
         </div>
         <div id="transactions-container">
+          <!-- Rendered dynamically -->
+        </div>
+        <div id="payouts-container" style="display: none;">
           <!-- Rendered dynamically -->
         </div>
       </div>
@@ -1994,12 +2428,12 @@ const PWA_HTML = `<!DOCTYPE html>
     <!-- TAB 4: SYSTEM & HARDWARE TELEMETRY -->
     <div id="tab-system" class="tab-content">
       <div class="bento-card">
-        <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Memori Pelayan (Node.js RSS)</div>
+        <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Server Memory (Node.js RSS)</div>
         <div class="ram-bar-track" style="height: 10px;">
           <div class="ram-bar-fill" id="sys-ram-fill" style="width: 35%;"></div>
         </div>
         <div class="meta-row" style="margin-top: 10px;">
-          <span>Penggunaan Fizikal:</span>
+          <span>Physical Memory:</span>
           <span style="color: #FFFFFF; font-weight: 700;" id="sys-ram-rss">-- MB / 384 MB</span>
         </div>
         <div class="meta-row" style="margin-top: 6px;">
@@ -2009,27 +2443,27 @@ const PWA_HTML = `<!DOCTYPE html>
       </div>
 
       <div class="bento-card">
-        <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Telemetri Sistem & WhatsApp</div>
+        <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">System & WhatsApp Telemetry</div>
         <div class="meta-row" style="margin-bottom: 10px;">
-          <span>Masa Operasi (Uptime):</span>
+          <span>Server Uptime:</span>
           <span style="color: #FFFFFF; font-weight: 700;" id="sys-uptime">--</span>
         </div>
         <div class="meta-row" style="margin-bottom: 10px;">
-          <span>CPU Cores & Beban:</span>
+          <span>CPU Cores & Load:</span>
           <span style="color: #FFFFFF; font-weight: 700;" id="sys-cpu">--</span>
         </div>
         <div class="meta-row" style="margin-bottom: 10px;">
-          <span>Antrian Media (FIFO):</span>
+          <span>Media Queue (FIFO):</span>
           <span style="color: #C6FF00; font-weight: 700;" id="sys-queue">0 / 25</span>
         </div>
         <div class="meta-row">
-          <span>Nombor Bot WhatsApp:</span>
+          <span>WhatsApp Bot Number:</span>
           <span style="color: #FFFFFF; font-weight: 700;" id="sys-wa-num">--</span>
         </div>
 
-        <button class="primary-pill-btn" onclick="triggerGC()">
+        <button type="button" class="primary-pill-btn" onclick="triggerGC()">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-          Sapu Memori / Flush GC (global.gc())
+          Flush Memory / Trigger GC (global.gc())
         </button>
       </div>
     </div>
@@ -2038,31 +2472,31 @@ const PWA_HTML = `<!DOCTYPE html>
     <div id="tab-broadcast" class="tab-content">
       <div class="bento-card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <span style="font-size: 14px; font-weight: 700;">Sasaran Penerima</span>
-          <span style="font-size: 11px; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;" id="broadcast-count-pill">0 Pengguna</span>
+          <span style="font-size: 14px; font-weight: 700;">Target Audience</span>
+          <span style="font-size: 11px; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;" id="broadcast-count-pill">0 Recipients</span>
         </div>
 
         <div class="pill-filter-bar" style="margin-bottom: 14px;">
-          <button type="button" class="filter-pill active" id="bcast-target-all" onclick="setBroadcastTarget('all')">Semua</button>
-          <button type="button" class="filter-pill" id="bcast-target-paid" onclick="setBroadcastTarget('paid')">Sudah Bayar</button>
-          <button type="button" class="filter-pill" id="bcast-target-unpaid" onclick="setBroadcastTarget('unpaid')">Belum Bayar</button>
+          <button type="button" class="filter-pill active" id="bcast-target-all" onclick="setBroadcastTarget('all')">All</button>
+          <button type="button" class="filter-pill" id="bcast-target-paid" onclick="setBroadcastTarget('paid')">Paid</button>
+          <button type="button" class="filter-pill" id="bcast-target-unpaid" onclick="setBroadcastTarget('unpaid')">Unpaid</button>
         </div>
 
-        <div style="font-size: 12px; color: #8E9387; margin-bottom: 8px;">Templat Pantas (Pilihan):</div>
+        <div style="font-size: 12px; color: #8E9387; margin-bottom: 8px;">Quick Templates (Optional):</div>
         <div class="chip-row">
-          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('promo')">Promo Langganan</button>
-          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('reminder')">Peringatan Sambung</button>
-          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('info')">Info Kemaskini</button>
+          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('promo')">Subscription Promo</button>
+          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('reminder')">Renewal Reminder</button>
+          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('info')">System Update</button>
         </div>
 
-        <textarea id="broadcast-message" class="broadcast-textarea" placeholder="Tulis mesej WhatsApp broadcast di sini... Gunakan {nama} untuk nama pelanggan."></textarea>
+        <textarea id="broadcast-message" class="broadcast-textarea" placeholder="Write your WhatsApp broadcast message here... Use {name} for the member's name."></textarea>
         <div style="font-size: 11px; color: #8E9387; margin-top: 8px;">
-          Pembolehubah disokong: <strong style="color: #C6FF00;">{nama}</strong> • Format WhatsApp (*bold*, _italic_)
+          Supported variable: <strong style="color: #C6FF00;">{name}</strong> • WhatsApp formatting (*bold*, _italic_)
         </div>
 
         <button type="button" class="primary-pill-btn" id="broadcast-send-btn" onclick="sendBroadcastMessage()">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-          <span id="broadcast-btn-label">Hantar Broadcast Sekarang</span>
+          <span id="broadcast-btn-label">Send Broadcast Now</span>
         </button>
 
         <div class="broadcast-status-box" id="broadcast-status-box"></div>
@@ -2157,7 +2591,7 @@ const PWA_HTML = `<!DOCTYPE html>
         document.getElementById('pin-error').textContent = '';
         document.getElementById('pin-screen').classList.add('hidden');
       } else {
-        document.getElementById('pin-error').textContent = 'PIN Tidak Sah! Sila masukkan semula.';
+        document.getElementById('pin-error').textContent = 'Invalid PIN. Please try again.';
         enteredPin = '';
         updateDots();
       }
@@ -2185,10 +2619,10 @@ const PWA_HTML = `<!DOCTYPE html>
 
       const titles = {
         overview: 'Dashboard',
-        users: 'Ahli & Referral',
+        users: 'Users & Referrals',
         hitpay: 'HitPay Gateway',
-        broadcast: 'Broadcast WhatsApp',
-        system: 'Telemetri Sistem'
+        broadcast: 'WhatsApp Broadcast',
+        system: 'System Telemetry'
       };
       document.getElementById('page-heading').innerText = titles[tabId] || 'Dashboard';
     }
@@ -2197,6 +2631,7 @@ const PWA_HTML = `<!DOCTYPE html>
     let currentData = null;
     let currentUserFilter = 'all';
     let broadcastTarget = 'all';
+    let hitpayView = 'payments';
 
     async function fetchStats() {
       try {
@@ -2212,7 +2647,7 @@ const PWA_HTML = `<!DOCTYPE html>
     function renderDashboard(data) {
       // Date & Header
       const options = { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' };
-      document.getElementById('current-date').innerText = new Date().toLocaleDateString('ms-MY', options);
+      document.getElementById('current-date').innerText = new Date().toLocaleDateString('en-GB', options);
 
       // WhatsApp Status Badge
       const waText = document.getElementById('wa-text');
@@ -2261,12 +2696,12 @@ const PWA_HTML = `<!DOCTYPE html>
       document.getElementById('sys-queue').innerText = (data.queue.waiting || 0) + ' / ' + data.queue.max;
       document.getElementById('sys-wa-num').innerText = '+' + (data.pairingNumber || data.adminNumber || '601157270564');
 
-      // Users List & HitPay Transactions & Broadcast State
+      // Users, HitPay & Broadcast
       renderUsers(data.users || []);
-      renderTransactions(data.transactions || []);
+      renderHitPaySection(data);
       updateBroadcastTargetCount();
       if (data.broadcastState && data.broadcastState.running) {
-        showBroadcastStatus('Sedang menghantar: ' + data.broadcastState.sent + ' berjaya, ' + data.broadcastState.failed + ' gagal (daripada ' + data.broadcastState.total + ')');
+        showBoxMessage('broadcast-status-box', 'Sending: ' + data.broadcastState.sent + ' sent, ' + data.broadcastState.failed + ' failed (of ' + data.broadcastState.total + ')', false);
       }
     }
 
@@ -2274,7 +2709,7 @@ const PWA_HTML = `<!DOCTYPE html>
       if (!Array.isArray(values) || values.length === 0) values = [0, 0, 0, 0, 0, 0, 0];
       const max = Math.max(...values, 5);
       const points = [];
-      const shortLabels = ['Is', 'Se', 'Ra', 'Kh', 'Ju', 'Sa', 'Ah'];
+      const shortLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
       const width = 380;
       const height = 90;
       const step = (width - 40) / 6;
@@ -2298,7 +2733,6 @@ const PWA_HTML = `<!DOCTYPE html>
       document.getElementById('chart-line').setAttribute('d', dLine);
       document.getElementById('chart-area').setAttribute('d', dArea);
 
-      // Render Nodes & Labels
       let nodesHtml = '';
       let labelsHtml = '';
       points.forEach((p, i) => {
@@ -2312,34 +2746,109 @@ const PWA_HTML = `<!DOCTYPE html>
     function renderRailwayCountdown(dateStr) {
       const elem = document.getElementById('railway-countdown');
       if (!dateStr) {
-        elem.innerText = 'Aktif (Tarikh belum diset)';
+        elem.innerText = 'Active (Date not set)';
         elem.style.color = '#C6FF00';
         return;
       }
       const target = new Date(dateStr).getTime();
       if (isNaN(target)) {
-        elem.innerText = 'Format tarikh tidak sah';
+        elem.innerText = 'Invalid date format';
         elem.style.color = '#FF6B6B';
         return;
       }
       const diff = target - Date.now();
       if (diff <= 0) {
-        elem.innerText = 'Luput / Perlu Diperbaharui';
+        elem.innerText = 'Expired / Renewal Required';
         elem.style.color = '#FF6B6B';
       } else {
         const days = Math.floor(diff / (1000 * 60 * 60 * 24));
         const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-        elem.innerText = days + ' Hari ' + hours + ' Jam Baki';
+        elem.innerText = days + ' Days ' + hours + ' Hours Left';
         elem.style.color = '#C6FF00';
       }
     }
 
     async function promptRailwayDate() {
       const current = (currentData && currentData.railwayRenewDate) || '';
-      const input = prompt('Masukkan tarikh luput langganan Railway (Format: YYYY-MM-DD):', current);
+      const input = prompt('Enter Railway subscription expiry date (Format: YYYY-MM-DD):', current);
       if (input !== null) {
         await postAction('setRailwayDate', { date: input.trim() });
         fetchStats();
+      }
+    }
+
+    function showBoxMessage(boxId, msg, isError) {
+      const box = document.getElementById(boxId);
+      if (!box) return;
+      box.style.display = 'block';
+      box.style.borderColor = isError ? 'rgba(255, 107, 107, 0.45)' : 'rgba(198, 255, 0, 0.28)';
+      box.style.background = isError ? 'rgba(255, 75, 75, 0.12)' : 'rgba(198, 255, 0, 0.08)';
+      box.style.color = isError ? '#FF6B6B' : '#FFFFFF';
+      box.innerText = msg;
+    }
+
+    // REGISTER MEMBER & SYNC
+    function toggleRegisterForm(forceState) {
+      const card = document.getElementById('register-member-card');
+      if (!card) return;
+      const shouldShow = forceState !== undefined ? forceState : (card.style.display === 'none');
+      card.style.display = shouldShow ? 'block' : 'none';
+    }
+
+    async function submitRegisterMember() {
+      const nameEl = document.getElementById('reg-name');
+      const phoneEl = document.getElementById('reg-phone');
+      const monthsEl = document.getElementById('reg-months');
+      const refEl = document.getElementById('reg-refcode');
+      const btn = document.getElementById('reg-submit-btn');
+      const lbl = document.getElementById('reg-submit-label');
+
+      const name = (nameEl && nameEl.value || '').trim();
+      const phone = (phoneEl && phoneEl.value || '').trim();
+      const months = parseInt(monthsEl && monthsEl.value, 10) || 1;
+      const referralCode = (refEl && refEl.value || '').trim();
+
+      if (!phone || phone.replace(/[^0-9]/g, '').length < 8) {
+        showBoxMessage('users-sync-status', 'Please enter a valid WhatsApp phone number.', true);
+        return;
+      }
+
+      btn.disabled = true;
+      lbl.innerText = 'Registering...';
+      const res = await postAction('registerUser', { name, phone, months, referralCode });
+      btn.disabled = false;
+      lbl.innerText = 'Activate & Save Member';
+
+      if (res && res.success) {
+        if (nameEl) nameEl.value = '';
+        if (phoneEl) phoneEl.value = '';
+        if (refEl) refEl.value = '';
+        toggleRegisterForm(false);
+        showBoxMessage('users-sync-status', res.message || 'Member registered successfully.', false);
+        fetchStats();
+      } else {
+        showBoxMessage('users-sync-status', (res && res.message) || 'Failed to register member.', true);
+      }
+    }
+
+    async function syncAllData(btnId, statusBoxId) {
+      const btn = document.getElementById(btnId);
+      const origText = btn ? btn.innerText : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Syncing...';
+      }
+      showBoxMessage(statusBoxId, 'Syncing HitPay payments, payouts & WhatsApp records...', false);
+      const res = await postAction('syncData');
+      if (btn) {
+        btn.disabled = false;
+        btn.innerText = origText || 'Sync';
+      }
+      if (res && res.success) {
+        showBoxMessage(statusBoxId, res.message || 'Sync completed.', false);
+        fetchStats();
+      } else {
+        showBoxMessage(statusBoxId, (res && res.message) || 'Sync failed.', true);
       }
     }
 
@@ -2362,9 +2871,9 @@ const PWA_HTML = `<!DOCTYPE html>
       const allBtn = document.getElementById('filter-all');
       const paidBtn = document.getElementById('filter-paid');
       const unpaidBtn = document.getElementById('filter-unpaid');
-      if (allBtn) allBtn.innerText = 'Semua (' + users.length + ')';
-      if (paidBtn) paidBtn.innerText = 'Sudah Bayar (' + paidCount + ')';
-      if (unpaidBtn) unpaidBtn.innerText = 'Belum Bayar (' + unpaidCount + ')';
+      if (allBtn) allBtn.innerText = 'All (' + users.length + ')';
+      if (paidBtn) paidBtn.innerText = 'Paid (' + paidCount + ')';
+      if (unpaidBtn) unpaidBtn.innerText = 'Unpaid (' + unpaidCount + ')';
 
       const filtered = users.filter(u => {
         const matchesCat =
@@ -2378,31 +2887,43 @@ const PWA_HTML = `<!DOCTYPE html>
       });
 
       if (filtered.length === 0) {
-        container.innerHTML = '<div style="text-align: center; color: #8E9387; padding: 30px 0; font-size: 13px;">Tiada ahli dijumpai.</div>';
+        container.innerHTML = '<div style="text-align: center; color: #8E9387; padding: 30px 0; font-size: 13px;">No members found.</div>';
         return;
       }
 
       let html = '';
       filtered.forEach(u => {
         const isAct = u.status === 'ACTIVE';
-        const badgeText = isAct ? 'AKTIF' : (u.rawStatus === 'WAITING' ? 'MENUNGGU' : (u.rawStatus === 'NEW' ? 'BELUM BAYAR' : 'LUPUT'));
+        const badgeText = isAct ? 'ACTIVE' : (u.rawStatus === 'WAITING' ? 'WAITING' : (u.rawStatus === 'NEW' ? 'UNPAID' : 'EXPIRED'));
         const safePhone = String(u.phone || '').replace(/[^0-9]/g, '');
+        const monthsNum = u.subscribedMonths || 0;
+        const monthsLabel = monthsNum > 0 ? (monthsNum + (monthsNum === 1 ? ' month' : ' months')) : 'None';
+        const daysLeftNum = u.daysLeft || 0;
+        const daysLeftLabel = isAct ? (daysLeftNum + (daysLeftNum === 1 ? ' day left' : ' days left')) : '0 days left';
+        const refByHtml = u.referredByName
+          ? '<div style="font-size: 11px; color: #8E9387;">Referred by: <strong style="color: #FFFFFF;">' + escHtml(u.referredByName) + '</strong>' + (u.referredByCode ? ' (' + escHtml(u.referredByCode) + ')' : '') + '</div>'
+          : '';
         html +=
           '<div class="user-card">' +
             '<div class="user-card-header">' +
               '<div>' +
                 '<div class="user-name">' + escHtml(u.name) + '</div>' +
-                '<div class="user-phone">' + escHtml(u.phone) + ' • Kod: <strong style="color: #C6FF00;">' + escHtml(u.refCode) + '</strong></div>' +
+                '<div class="user-phone">' + escHtml(u.phone) + ' • Code: <strong style="color: #C6FF00;">' + escHtml(u.refCode) + '</strong></div>' +
               '</div>' +
               '<span class="user-badge ' + (isAct ? 'active' : 'expired') + '">' + badgeText + '</span>' +
             '</div>' +
-            '<div style="font-size: 12px; color: #8E9387;">' +
-              'Luput: <strong style="color: #FFFFFF;">' + escHtml(u.expiredAtFormatted) + '</strong> • Tajaan: <strong style="color: #C6FF00;">' + (u.paidReferrals || 0) + '/3</strong>' +
+            '<div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #8E9387;">' +
+              '<span>Subscribed: <strong style="color: #FFFFFF;">' + escHtml(monthsLabel) + '</strong></span>' +
+              '<span style="color: ' + (isAct ? '#C6FF00' : '#FF6B6B') + '; font-weight: 700;">' + escHtml(daysLeftLabel) + '</span>' +
             '</div>' +
+            '<div style="font-size: 12px; color: #8E9387;">' +
+              'Expires: <strong style="color: #FFFFFF;">' + escHtml(u.expiredAtFormatted) + '</strong> • Referrals: <strong style="color: #C6FF00;">' + (u.paidReferrals || 0) + '/3</strong>' +
+            '</div>' +
+            refByHtml +
             '<div class="user-actions">' +
-              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-days="30">+30 Hari</button>' +
-              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-days="90">+90 Hari</button>' +
-              '<button type="button" class="btn-action danger" data-action="expire" data-phone="' + safePhone + '">Tamatkan</button>' +
+              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-days="30">+30 Days</button>' +
+              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-days="90">+90 Days</button>' +
+              '<button type="button" class="btn-action danger" data-action="expire" data-phone="' + safePhone + '">Expire</button>' +
             '</div>' +
           '</div>';
       });
@@ -2434,30 +2955,20 @@ const PWA_HTML = `<!DOCTYPE html>
       const pill = document.getElementById('broadcast-count-pill');
       if (!pill) return;
       const list = getBroadcastRecipients();
-      pill.innerText = list.length + ' Pengguna';
+      pill.innerText = list.length + (list.length === 1 ? ' Recipient' : ' Recipients');
     }
 
     function applyBroadcastTemplate(type) {
       const box = document.getElementById('broadcast-message');
       if (!box) return;
       if (type === 'promo') {
-        box.value = 'Hai {nama}, nikmati video & foto WhatsApp Status HD tanpa pecah dengan StatusClear! Balas *PAKEJ* untuk melanggan sekarang.';
+        box.value = 'Hai {name}, nikmati video & foto WhatsApp Status HD tanpa pecah dengan StatusClear! Balas *PAKEJ* untuk melanggan sekarang.';
       } else if (type === 'reminder') {
-        box.value = 'Hai {nama}, langganan StatusClear anda hampir tamat atau telah luput. Balas *1* untuk sambung 30 hari (RM10) secara automatik!';
+        box.value = 'Hai {name}, langganan StatusClear anda hampir tamat atau telah luput. Balas *1* untuk sambung 30 hari (RM10) secara automatik!';
       } else if (type === 'info') {
         box.value = 'Makluman StatusClear: Sistem telah dikemaskini untuk kelajuan pemprosesan 60 FPS yang lebih lancar. Hantar media anda sebagai Document untuk mula!';
       }
       box.focus();
-    }
-
-    function showBroadcastStatus(msg, isError) {
-      const box = document.getElementById('broadcast-status-box');
-      if (!box) return;
-      box.style.display = 'block';
-      box.style.borderColor = isError ? 'rgba(255, 107, 107, 0.45)' : 'rgba(198, 255, 0, 0.28)';
-      box.style.background = isError ? 'rgba(255, 75, 75, 0.12)' : 'rgba(198, 255, 0, 0.08)';
-      box.style.color = isError ? '#FF6B6B' : '#FFFFFF';
-      box.innerText = msg;
     }
 
     async function sendBroadcastMessage() {
@@ -2466,31 +2977,31 @@ const PWA_HTML = `<!DOCTYPE html>
       const lbl = document.getElementById('broadcast-btn-label');
       const text = (msgEl && msgEl.value || '').trim();
       if (!text) {
-        showBroadcastStatus('Sila tulis mesej broadcast terlebih dahulu.', true);
+        showBoxMessage('broadcast-status-box', 'Please enter a broadcast message first.', true);
         return;
       }
       const recipients = getBroadcastRecipients();
       if (recipients.length === 0) {
-        showBroadcastStatus('Tiada penerima dalam kategori sasaran ini.', true);
+        showBoxMessage('broadcast-status-box', 'No recipients found in the selected target group.', true);
         return;
       }
-      const targetLabel = broadcastTarget === 'paid' ? 'Sudah Bayar' : (broadcastTarget === 'unpaid' ? 'Belum Bayar' : 'Semua');
-      if (!confirm('Hantar mesej broadcast kepada ' + recipients.length + ' pengguna (' + targetLabel + ')?')) {
+      const targetLabel = broadcastTarget === 'paid' ? 'Paid' : (broadcastTarget === 'unpaid' ? 'Unpaid' : 'All');
+      if (!confirm('Send broadcast message to ' + recipients.length + ' recipients (' + targetLabel + ')?')) {
         return;
       }
 
       btn.disabled = true;
-      lbl.innerText = 'Sedang Menghantar...';
-      showBroadcastStatus('Memulakan penghantaran kepada ' + recipients.length + ' pengguna...', false);
+      lbl.innerText = 'Sending...';
+      showBoxMessage('broadcast-status-box', 'Starting broadcast to ' + recipients.length + ' recipients...', false);
 
       const res = await postAction('sendBroadcast', { target: broadcastTarget, message: text });
       btn.disabled = false;
-      lbl.innerText = 'Hantar Broadcast Sekarang';
+      lbl.innerText = 'Send Broadcast Now';
 
       if (res && res.success) {
-        showBroadcastStatus(res.message || 'Broadcast berjaya dihantar.', false);
+        showBoxMessage('broadcast-status-box', res.message || 'Broadcast sent successfully.', false);
       } else {
-        showBroadcastStatus((res && res.message) || 'Gagal menghantar broadcast.', true);
+        showBoxMessage('broadcast-status-box', (res && res.message) || 'Failed to send broadcast.', true);
       }
       fetchStats();
     }
@@ -2513,40 +3024,130 @@ const PWA_HTML = `<!DOCTYPE html>
     }
 
     async function handleUserExtend(phone, days) {
-      if (confirm('Tambah +' + days + ' hari untuk nombor ' + phone + '?')) {
+      if (confirm('Add +' + days + ' days to ' + phone + '?')) {
         await postAction('extendUser', { phone, days });
         fetchStats();
       }
     }
 
     async function handleUserExpire(phone) {
-      if (confirm('Tamatkan langganan ' + phone + ' serta-merta?')) {
+      if (confirm('Expire subscription for ' + phone + ' immediately?')) {
         await postAction('expireUser', { phone });
         fetchStats();
       }
     }
 
-    // HITPAY TRANSACTIONS RENDERING
+    // HITPAY PAYMENTS & PAYOUTS RENDERING
+    function setHitPayView(view) {
+      hitpayView = view;
+      const payBtn = document.getElementById('hp-tab-payments');
+      const outBtn = document.getElementById('hp-tab-payouts');
+      const payList = document.getElementById('transactions-container');
+      const outList = document.getElementById('payouts-container');
+      const heading = document.getElementById('hitpay-feed-heading');
+      if (payBtn) payBtn.classList.toggle('active', view === 'payments');
+      if (outBtn) outBtn.classList.toggle('active', view === 'payouts');
+      if (payList) payList.style.display = view === 'payments' ? 'block' : 'none';
+      if (outList) outList.style.display = view === 'payouts' ? 'block' : 'none';
+      if (heading) heading.innerText = view === 'payments' ? 'Successful Payments Received' : 'Transferred Bank Payouts';
+    }
+
+    function renderHitPaySection(data) {
+      const hp = data.hitpay || {};
+      const statusPill = document.getElementById('hitpay-status-pill');
+      const syncTimeEl = document.getElementById('hitpay-sync-time');
+      if (statusPill) {
+        statusPill.innerText = hp.configured ? ((data.hitpayEnv || 'LIVE').toUpperCase()) : 'NOT CONFIGURED';
+      }
+      if (syncTimeEl) {
+        syncTimeEl.innerText = hp.lastSyncedAt
+          ? 'Synced: ' + new Date(hp.lastSyncedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          : (hp.configured ? 'Waiting for sync...' : 'Local records only');
+      }
+
+      const paymentsList = (hp.configured && Array.isArray(hp.payments) && hp.payments.length > 0)
+        ? hp.payments
+        : (data.transactions || []);
+      const payoutsList = Array.isArray(hp.payouts) ? hp.payouts : [];
+
+      const collectedStr = hp.totalCollectedRM != null ? hp.totalCollectedRM : (data.metrics.revenueRM || '0.00');
+      const collectedEl = document.getElementById('hitpay-total-collected');
+      const collectedMetaEl = document.getElementById('hitpay-collected-meta');
+      if (collectedEl) collectedEl.innerText = 'RM ' + collectedStr;
+      if (collectedMetaEl) {
+        const netPart = hp.totalNetRM != null ? (' • Net RM ' + hp.totalNetRM) : '';
+        collectedMetaEl.innerText = (hp.paymentsCount || paymentsList.length) + ' payments' + netPart;
+      }
+
+      const payoutEl = document.getElementById('hitpay-total-payout');
+      const payoutMetaEl = document.getElementById('hitpay-payout-meta');
+      if (payoutEl) payoutEl.innerText = 'RM ' + (hp.totalPaidOutRM || '0.00');
+      if (payoutMetaEl) {
+        const pendingVal = parseFloat(hp.totalPendingPayoutRM || '0');
+        payoutMetaEl.innerText = payoutsList.length + ' payouts' + (pendingVal > 0 ? (' • Pending RM ' + pendingVal.toFixed(2)) : '');
+      }
+
+      const payTabBtn = document.getElementById('hp-tab-payments');
+      const outTabBtn = document.getElementById('hp-tab-payouts');
+      if (payTabBtn) payTabBtn.innerText = 'Payments In (' + paymentsList.length + ')';
+      if (outTabBtn) outTabBtn.innerText = 'Bank Payouts (' + payoutsList.length + ')';
+
+      renderTransactions(paymentsList);
+      renderPayouts(payoutsList);
+    }
+
     function renderTransactions(txs) {
       const container = document.getElementById('transactions-container');
       if (!txs || txs.length === 0) {
-        container.innerHTML = '<div style="text-align: center; color: #8E9387; padding: 24px 0; font-size: 12px;">Tiada transaksi direkodkan lagi.</div>';
+        container.innerHTML = '<div style="text-align: center; color: #8E9387; padding: 24px 0; font-size: 12px;">No successful payments found yet.</div>';
         return;
       }
       let html = '';
-      txs.slice(0, 20).forEach(t => {
-        const dateStr = new Date(t.timestamp).toLocaleDateString('ms-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+      txs.slice(0, 50).forEach(t => {
+        const dateStr = new Date(t.timestamp).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
         const amtNum = parseFloat(t.amount);
         const amtStr = Number.isFinite(amtNum) ? amtNum.toFixed(2) : '0.00';
+        const netLabel = t.netAmount != null ? (' • Net RM ' + escHtml(t.netAmount)) : '';
         html +=
           '<div class="tx-item">' +
             '<div>' +
-              '<div class="tx-name">' + escHtml(t.buyerName) + '</div>' +
-              '<div class="tx-date">' + escHtml(t.buyerPhone) + ' • ' + escHtml(dateStr) + '</div>' +
+              '<div class="tx-name">' + escHtml(t.buyerName || 'Customer') + '</div>' +
+              '<div class="tx-date">' + escHtml(t.buyerPhone || '-') + ' • ' + escHtml(dateStr) + '</div>' +
+              '<div class="tx-pkg">' + escHtml(t.method || 'HitPay') + netLabel + '</div>' +
             '</div>' +
             '<div>' +
               '<div class="tx-amount">RM ' + amtStr + '</div>' +
-              '<div class="tx-pkg">+' + (t.packageDays || 0) + ' Hari</div>' +
+              '<div class="tx-pkg" style="text-align: right;">' + (t.packageDays ? ('+' + t.packageDays + ' Days') : escHtml(t.currency || 'MYR')) + '</div>' +
+            '</div>' +
+          '</div>';
+      });
+      container.innerHTML = html;
+    }
+
+    function renderPayouts(payouts) {
+      const container = document.getElementById('payouts-container');
+      if (!container) return;
+      if (!payouts || payouts.length === 0) {
+        container.innerHTML = '<div style="text-align: center; color: #8E9387; padding: 24px 0; font-size: 12px;">No bank payouts recorded yet.</div>';
+        return;
+      }
+      let html = '';
+      payouts.slice(0, 50).forEach(p => {
+        const dateStr = p.timestamp ? new Date(p.timestamp).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : (p.arrivalDate || '-');
+        const amtNum = parseFloat(p.amount);
+        const amtStr = Number.isFinite(amtNum) ? amtNum.toFixed(2) : '0.00';
+        const st = String(p.status || 'paid').toUpperCase();
+        const isPaid = st === 'PAID';
+        const bankLabel = escHtml(p.bankName || 'Bank Account') + (p.bankAccount ? (' (' + escHtml(p.bankAccount) + ')') : '');
+        html +=
+          '<div class="tx-item">' +
+            '<div>' +
+              '<div class="tx-name">' + bankLabel + '</div>' +
+              '<div class="tx-date">' + escHtml(dateStr) + ' • Ref: ' + escHtml(p.reference || '-') + '</div>' +
+            '</div>' +
+            '<div style="text-align: right;">' +
+              '<div class="tx-amount" style="color: ' + (isPaid ? '#C6FF00' : '#FFFFFF') + ';">RM ' + amtStr + '</div>' +
+              '<span class="user-badge ' + (isPaid ? 'active' : 'expired') + '" style="display: inline-block; margin-top: 4px;">' + escHtml(st) + '</span>' +
             '</div>' +
           '</div>';
       });
@@ -2564,13 +3165,13 @@ const PWA_HTML = `<!DOCTYPE html>
         const data = await res.json();
         return data;
       } catch (err) {
-        alert('Ralat tindakan: ' + err.message);
+        alert('Action error: ' + err.message);
       }
     }
 
     async function triggerGC() {
       const res = await postAction('triggerGC');
-      alert((res && res.message) ? res.message : 'Pembersihan memori GC telah dipicu pada pelayan Node.js!');
+      alert((res && res.message) ? res.message : 'Node.js garbage collection triggered.');
       fetchStats();
     }
 
@@ -2645,6 +3246,7 @@ function ensureHttpServer() {
 
         // TELEMETRY API: GET /api/stats
         if (req.method === 'GET' && pathname === '/api/stats') {
+            applyPendingUserMigrations();
             const mem = process.memoryUsage();
             const uptime = Math.floor(process.uptime());
             const users = loadUsers();
@@ -2652,9 +3254,16 @@ function ensureHttpServer() {
             const activeUsers = userList.filter(u => u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now());
             const stats = loadStats();
             const cfg = loadConfig();
+            const hitpayData = await fetchHitPayDashboardData(false);
+
+            const hitpayPayments = (hitpayData.configured && hitpayData.payments && hitpayData.payments.length > 0)
+                ? hitpayData.payments
+                : (stats.transactions || []);
 
             let totalRevenue = 0;
-            if (stats.transactions && stats.transactions.length > 0) {
+            if (hitpayData.configured && hitpayData.totalCollectedRM != null) {
+                totalRevenue = parseFloat(hitpayData.totalCollectedRM) || 0;
+            } else if (stats.transactions && stats.transactions.length > 0) {
                 totalRevenue = stats.transactions.reduce((sum, tx) => sum + (parseFloat(tx.amount) || 0), 0);
             } else {
                 totalRevenue = activeUsers.length * 10;
@@ -2664,7 +3273,7 @@ function ensureHttpServer() {
             const dayOfWeek = (now.getDay() + 6) % 7;
             const weeklyData = [0, 0, 0, 0, 0, 0, 0];
             const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-            (stats.transactions || []).forEach(tx => {
+            hitpayPayments.forEach(tx => {
                 if (tx.timestamp >= sevenDaysAgo) {
                     const d = new Date(tx.timestamp);
                     const dayIdx = (d.getDay() + 6) % 7;
@@ -2672,7 +3281,7 @@ function ensureHttpServer() {
                 }
             });
             if (weeklyData.every(v => v === 0)) {
-                weeklyData[dayOfWeek] = (stats.transactions || []).length || activeUsers.length || 3;
+                weeklyData[dayOfWeek] = hitpayPayments.length || activeUsers.length || 3;
             }
 
             let waStatus = 'OFFLINE';
@@ -2689,9 +3298,18 @@ function ensureHttpServer() {
                 + (videoQueue.waitingLength < 10 ? 20 : 10);
             readinessScore = Math.max(10, Math.min(100, readinessScore));
 
+            const txDaysByPhone = {};
+            (stats.transactions || []).forEach(tx => {
+                if (tx.buyerPhone) {
+                    const p = normalizeIdentifier(tx.buyerPhone);
+                    txDaysByPhone[p] = (txDaysByPhone[p] || 0) + (parseInt(tx.packageDays, 10) || 30);
+                }
+            });
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
                 botName: BOT_NAME,
+                hitpayEnv: HITPAY_ENV,
                 waStatus,
                 pairingNumber: process.env.PAIRING_NUMBER || '601157270564',
                 adminNumber: ADMIN_NUMBER,
@@ -2725,18 +3343,44 @@ function ensureHttpServer() {
                 weeklyActivity: weeklyData,
                 railwayRenewDate: cfg.railwayRenewDate || '',
                 broadcastState,
-                transactions: stats.transactions || [],
-                users: userList.map(u => ({
-                    phone: u.phone,
-                    name: u.name,
-                    rawStatus: u.status || 'NEW',
-                    status: (u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now()) ? 'ACTIVE' : 'EXPIRED',
-                    expiredAt: u.expiredAt,
-                    expiredAtFormatted: u.expiredAt ? new Date(u.expiredAt).toLocaleDateString('ms-MY') : 'Tiada',
-                    refCode: u.refCode || '-',
-                    paidReferrals: u.paidReferrals || 0,
-                    totalPaidReferrals: u.totalPaidReferrals || 0
-                }))
+                hitpay: hitpayData,
+                transactions: hitpayPayments,
+                users: userList.map(u => {
+                    const isAct = u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now();
+                    const daysLeft = isAct ? Math.max(0, Math.ceil((u.expiredAt - Date.now()) / (1000 * 60 * 60 * 24))) : 0;
+                    let subMonths = u.subscribedMonths || 0;
+                    if (!subMonths) {
+                        if (txDaysByPhone[u.phone]) {
+                            subMonths = Math.max(1, Math.round(txDaysByPhone[u.phone] / 30));
+                        } else if (u.expiredAt) {
+                            const regTime = u.registeredAt ? new Date(u.registeredAt).getTime() : null;
+                            if (regTime && u.expiredAt > regTime) {
+                                subMonths = Math.max(1, Math.round((u.expiredAt - regTime) / (30 * 24 * 60 * 60 * 1000)));
+                            } else if (daysLeft > 0) {
+                                subMonths = Math.max(1, Math.ceil(daysLeft / 30));
+                            } else {
+                                subMonths = 1;
+                            }
+                        }
+                    }
+                    const refUser = u.referredBy ? (users[u.referredBy] || userList.find(x => x.phone === u.referredBy)) : null;
+                    return {
+                        phone: u.phone,
+                        name: u.name,
+                        rawStatus: u.status || 'NEW',
+                        status: isAct ? 'ACTIVE' : 'EXPIRED',
+                        expiredAt: u.expiredAt,
+                        expiredAtFormatted: u.expiredAt ? new Date(u.expiredAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'None',
+                        daysLeft,
+                        subscribedMonths: subMonths,
+                        refCode: u.refCode || '-',
+                        referredBy: u.referredBy || null,
+                        referredByName: refUser ? refUser.name : (u.referredBy || null),
+                        referredByCode: u.referredByCode || (refUser ? refUser.refCode : null),
+                        paidReferrals: u.paidReferrals || 0,
+                        totalPaidReferrals: u.totalPaidReferrals || 0
+                    };
+                })
             }));
             return;
         }
@@ -2750,6 +3394,116 @@ function ensureHttpServer() {
                     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
                     const action = body.action;
 
+                    if (action === 'registerUser') {
+                        const targetPhone = normalizeIdentifier(body.phone);
+                        const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'Member';
+                        const months = Math.max(1, parseInt(body.months, 10) || 1);
+                        const days = months === 12 ? 365 : months * 30;
+                        const refCodeInput = typeof body.referralCode === 'string' ? body.referralCode.trim().toUpperCase() : '';
+
+                        if (!targetPhone || targetPhone.length < 8) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, message: 'Invalid phone number.' }));
+                            return;
+                        }
+
+                        const users = loadUsers();
+                        let targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
+                        const now = Date.now();
+                        const base = (targetUser && targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
+
+                        let matchedReferrer = null;
+                        if (refCodeInput) {
+                            matchedReferrer = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === refCodeInput);
+                        }
+
+                        if (!targetUser) {
+                            targetUser = {
+                                phone: targetPhone,
+                                name,
+                                status: 'ACTIVE',
+                                registeredAt: new Date().toISOString(),
+                                subscribedMonths: months,
+                                expiredAt: base + (days * 24 * 60 * 60 * 1000),
+                                refCode: generateReferralCode(name, users),
+                                referredBy: matchedReferrer && matchedReferrer.phone !== targetPhone ? matchedReferrer.phone : null,
+                                referredByCode: matchedReferrer && matchedReferrer.phone !== targetPhone ? matchedReferrer.refCode : null,
+                                referralCredited: false,
+                                paidReferrals: 0,
+                                totalPaidReferrals: 0,
+                                refSentToExisting: true,
+                                reminded3Days: false,
+                                jid: null,
+                                altJid: null
+                            };
+                        } else {
+                            if (name && name !== 'Member') targetUser.name = name;
+                            targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
+                            targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + months;
+                            targetUser.expiredAt = base + (days * 24 * 60 * 60 * 1000);
+                            targetUser.status = 'ACTIVE';
+                            targetUser.reminded3Days = false;
+                            targetUser.refSentToExisting = true;
+                            if (!targetUser.refCode) targetUser.refCode = generateReferralCode(targetUser.name, users);
+                            if (matchedReferrer && matchedReferrer.phone !== targetPhone && !targetUser.referredBy) {
+                                targetUser.referredBy = matchedReferrer.phone;
+                                targetUser.referredByCode = matchedReferrer.refCode;
+                            }
+                        }
+
+                        if (matchedReferrer && matchedReferrer.phone !== targetPhone && !targetUser.referralCredited) {
+                            targetUser.referralCredited = true;
+                            matchedReferrer.paidReferrals = (matchedReferrer.paidReferrals || 0) + 1;
+                            matchedReferrer.totalPaidReferrals = (matchedReferrer.totalPaidReferrals || 0) + 1;
+                            if (matchedReferrer.paidReferrals >= 3) {
+                                matchedReferrer.paidReferrals -= 3;
+                                const refBase = (matchedReferrer.expiredAt && matchedReferrer.expiredAt > now) ? matchedReferrer.expiredAt : now;
+                                matchedReferrer.expiredAt = refBase + (30 * 24 * 60 * 60 * 1000);
+                                matchedReferrer.status = 'ACTIVE';
+                            }
+                            users[matchedReferrer.phone] = matchedReferrer;
+                            if (matchedReferrer.lid) users[matchedReferrer.lid] = matchedReferrer;
+                        }
+
+                        if (currentSock && currentSock.user) {
+                            try {
+                                const [waUser] = await currentSock.onWhatsApp(`${targetPhone}@s.whatsapp.net`);
+                                if (waUser && waUser.lid) {
+                                    const cleanLid = normalizeIdentifier(waUser.lid);
+                                    targetUser.lid = cleanLid;
+                                    users[cleanLid] = targetUser;
+                                }
+                            } catch {}
+                        }
+
+                        users[targetPhone] = targetUser;
+                        if (targetUser.lid) users[targetUser.lid] = targetUser;
+                        saveUsers(users);
+
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            success: true,
+                            message: `${targetUser.name} (${targetPhone}) activated for ${months} ${months === 1 ? 'month' : 'months'}.`
+                        }));
+                        return;
+                    }
+
+                    if (action === 'syncData') {
+                        applyPendingUserMigrations();
+                        const paySync = await syncHitPayPayments();
+                        const hpData = await fetchHitPayDashboardData(true);
+                        let lidUpdated = 0;
+                        if (currentSock && currentSock.user) {
+                            try { lidUpdated = await syncAllActiveLids(currentSock); } catch {}
+                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            success: true,
+                            message: `Sync complete: ${paySync.activated || 0} new activations, ${hpData.paymentsCount || 0} HitPay payments, ${hpData.payoutsCount || 0} payouts, ${lidUpdated} LIDs synced.`
+                        }));
+                        return;
+                    }
+
                     if (action === 'extendUser') {
                         const targetPhone = normalizeIdentifier(body.phone);
                         const days = parseInt(body.days, 10) || 30;
@@ -2759,17 +3513,18 @@ function ensureHttpServer() {
                             const now = Date.now();
                             const base = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
                             targetUser.expiredAt = base + (days * 24 * 60 * 60 * 1000);
+                            targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + Math.max(1, Math.round(days / 30));
                             targetUser.status = 'ACTIVE';
                             targetUser.reminded3Days = false;
                             if (targetUser.lid) users[targetUser.lid] = targetUser;
                             if (targetUser.phone) users[targetUser.phone] = targetUser;
                             saveUsers(users);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true, message: `+${days} hari ditambah.` }));
+                            res.end(JSON.stringify({ success: true, message: `Added +${days} days.` }));
                             return;
                         }
                         res.writeHead(404, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: false, message: 'Pengguna tidak dijumpai.' }));
+                        res.end(JSON.stringify({ success: false, message: 'User not found.' }));
                         return;
                     }
 
@@ -2784,11 +3539,11 @@ function ensureHttpServer() {
                             if (targetUser.phone) users[targetUser.phone] = targetUser;
                             saveUsers(users);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true, message: 'Status keahlian ditamatkan.' }));
+                            res.end(JSON.stringify({ success: true, message: 'Membership expired.' }));
                             return;
                         }
                         res.writeHead(404, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: false, message: 'Pengguna tidak dijumpai.' }));
+                        res.end(JSON.stringify({ success: false, message: 'User not found.' }));
                         return;
                     }
 
@@ -2796,11 +3551,11 @@ function ensureHttpServer() {
                         if (global.gc) {
                             global.gc();
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true, message: 'Garbage Collector dilaksanakan.' }));
+                            res.end(JSON.stringify({ success: true, message: 'Garbage collection executed.' }));
                             return;
                         }
                         res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: false, message: 'Node.js tidak dimulakan dengan --expose-gc.' }));
+                        res.end(JSON.stringify({ success: false, message: 'Node.js was not started with --expose-gc.' }));
                         return;
                     }
 
@@ -2809,7 +3564,7 @@ function ensureHttpServer() {
                         cfg.railwayRenewDate = typeof body.date === 'string' ? body.date.trim() : '';
                         saveConfig(cfg);
                         res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: true, message: 'Tarikh luput Railway dikemas kini.' }));
+                        res.end(JSON.stringify({ success: true, message: 'Railway expiry date updated.' }));
                         return;
                     }
 
@@ -2819,17 +3574,17 @@ function ensureHttpServer() {
 
                         if (!messageText) {
                             res.writeHead(400, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: false, message: 'Mesej broadcast tidak boleh kosong.' }));
+                            res.end(JSON.stringify({ success: false, message: 'Broadcast message cannot be empty.' }));
                             return;
                         }
                         if (!currentSock || !currentSock.user) {
                             res.writeHead(400, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: false, message: 'Bot WhatsApp sedang OFFLINE. Sila sambungkan WhatsApp dahulu.' }));
+                            res.end(JSON.stringify({ success: false, message: 'WhatsApp bot is OFFLINE. Please connect WhatsApp first.' }));
                             return;
                         }
                         if (broadcastState.running) {
                             res.writeHead(409, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: false, message: 'Broadcast lain sedang berjalan. Sila tunggu sebentar.' }));
+                            res.end(JSON.stringify({ success: false, message: 'Another broadcast is already running. Please wait.' }));
                             return;
                         }
 
@@ -2845,7 +3600,7 @@ function ensureHttpServer() {
 
                         if (recipients.length === 0) {
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: false, message: 'Tiada penerima dijumpai dalam kategori ini.' }));
+                            res.end(JSON.stringify({ success: false, message: 'No recipients found in this category.' }));
                             return;
                         }
 
@@ -2860,7 +3615,7 @@ function ensureHttpServer() {
                             for (const u of recipients) {
                                 try {
                                     const targetJid = u.jid || u.altJid || (u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`);
-                                    const personalized = messageText.replace(/\{nama\}/gi, u.name || 'Ahli');
+                                    const personalized = messageText.replace(/\{(name|nama)\}/gi, u.name || 'Ahli');
                                     await currentSock.sendMessage(targetJid, { text: personalized });
                                     broadcastState.sent++;
                                 } catch (sendErr) {
@@ -2881,7 +3636,7 @@ function ensureHttpServer() {
                                 sent: broadcastState.sent,
                                 failed: broadcastState.failed,
                                 total: broadcastState.total,
-                                message: `Broadcast selesai! ${broadcastState.sent}/${broadcastState.total} mesej berjaya dihantar${broadcastState.failed > 0 ? `, ${broadcastState.failed} gagal` : ''}.`
+                                message: `Broadcast complete! ${broadcastState.sent}/${broadcastState.total} sent${broadcastState.failed > 0 ? `, ${broadcastState.failed} failed` : ''}.`
                             }));
                         } else {
                             runBroadcast().catch(err => {
@@ -2893,14 +3648,14 @@ function ensureHttpServer() {
                                 success: true,
                                 queued: true,
                                 total: recipients.length,
-                                message: `Broadcast dimulakan secara berperingkat kepada ${recipients.length} pengguna.`
+                                message: `Broadcast started in background for ${recipients.length} recipients.`
                             }));
                         }
                         return;
                     }
 
                     res.writeHead(400, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ success: false, message: 'Tindakan tidak sah.' }));
+                    res.end(JSON.stringify({ success: false, message: 'Invalid action.' }));
                 } catch (e) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, error: e.message }));
@@ -3014,6 +3769,7 @@ function ensureHttpServer() {
 // FUNGSI UTAMA PELANCARAN BOT BAILEYS
 // -------------------------------------------------------------
 async function startBot() {
+    applyPendingUserMigrations();
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
