@@ -1,16 +1,14 @@
 /**
- * StatusClear - Lossless WhatsApp Status Optimization Bot
+ * StatusClear - Lossless WhatsApp Status Optimization Bot & PWA Admin Monitor
  * Single-file, ultra-lightweight implementation (<384MB RAM)
  * 
  * Features:
+ * - Installable PWA Admin Monitor Dashboard (Dark Obsidian + Electric Lime Sans-Serif)
+ * - Telemetry Endpoints: GET / (PWA), GET /manifest.json, GET /sw.js, GET /api/stats, POST /api/action
  * - Direct Automated HitPay Payment Request API (FPX, DuitNow QR, eWallets, Cards)
- * - Triple-Layer Bulletproof HitPay Engine:
- *   1. Webhook Endpoint with Auto Railway Public Domain & Nested Payload Handling
- *   2. Direct Backend API Verification Fallback (Never drops payments even if HMAC misconfigured)
- *   3. 60-Second Auto-Sync Poller & WhatsApp "syncbayar" Command
+ * - Triple-Layer Bulletproof HitPay Engine (Webhook, Direct API Fallback, 60s Auto-Sync Poller)
  * - Auto WhatsApp Welcome, Confirmation & Step-by-Step Tutorial Delivery
  * - Complete Sponsor Referral Notifications (Redemption, Progress 1-2/3 & Free Month Milestone 3/3)
- * - Reliable JID Routing (user.jid & user.altJid saved on interaction)
  * - Railway Ready (process.env.PORT, persistent Volumes, native Linux FFmpeg)
  * - 60 FPS Native Video Encoding (15.2MB Bitrate Passthrough & CAS Sharpening)
  * - 2560px QHD+ Photo Enhancement (CAS Filter & Dynamic Anti-Compression Safe)
@@ -32,6 +30,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
+const os = require('os');
 const { pipeline } = require('stream/promises');
 
 const BOT_NAME = "Status Clear By Danial";
@@ -39,6 +38,7 @@ const MAX_QUEUE_SIZE = 25;
 
 // Nombor Pentadbir Utama & Senarai Akses Penuh
 const ADMIN_NUMBER = (process.env.ADMIN_NUMBER || '601154474066').replace(/\D/g, '');
+const ADMIN_PIN = (process.env.ADMIN_PIN || '406618').trim();
 const ADMIN_IDENTIFIERS = [
     ADMIN_NUMBER,
     '601154474066',
@@ -60,6 +60,8 @@ const PERSISTENT_USERS_FILE = path.join(AUTH_DIR, 'users.json');
 const PROCESSED_PAYMENTS_FILE = path.join(DATA_DIR, 'hitpay_processed.json');
 const LEGACY_MEMBERS_FILE = path.join(AUTH_DIR, 'members.json');
 const ROOT_MEMBERS_FILE = path.join(__dirname, 'members.json');
+const STATS_FILE = path.join(DATA_DIR, 'stats.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
 // Pembersihan Direktori Sementara Semasa Pelancaran Bot
 if (fs.existsSync(TEMP_DIR)) {
@@ -82,6 +84,64 @@ if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // -------------------------------------------------------------
+// PENGURUSAN STATISTIK & KONFIGURASI TELEMETRI (PWA)
+// -------------------------------------------------------------
+function loadStats() {
+    try {
+        if (fs.existsSync(STATS_FILE)) {
+            return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+        }
+    } catch (e) {}
+    return {
+        videosProcessed: 0,
+        imagesProcessed: 0,
+        transactions: []
+    };
+}
+
+function saveStats(stats) {
+    try {
+        fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2));
+    } catch (e) {}
+}
+
+function incrementStat(key) {
+    try {
+        const stats = loadStats();
+        stats[key] = (stats[key] || 0) + 1;
+        saveStats(stats);
+    } catch (e) {}
+}
+
+function recordTransaction(tx) {
+    try {
+        const stats = loadStats();
+        if (!stats.transactions) stats.transactions = [];
+        if (tx.paymentId && stats.transactions.some(t => t.paymentId === tx.paymentId)) return;
+        stats.transactions.unshift(tx);
+        if (stats.transactions.length > 100) stats.transactions = stats.transactions.slice(0, 100);
+        saveStats(stats);
+    } catch (e) {}
+}
+
+function loadConfig() {
+    try {
+        if (fs.existsSync(CONFIG_FILE)) {
+            return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        }
+    } catch (e) {}
+    return {
+        railwayRenewDate: (process.env.RAILWAY_RENEW_DATE || '').trim()
+    };
+}
+
+function saveConfig(cfg) {
+    try {
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+    } catch (e) {}
+}
+
+// -------------------------------------------------------------
 // KONFIGURASI HITPAY PAYMENT GATEWAY
 // -------------------------------------------------------------
 const HITPAY_API_KEY = (process.env.HITPAY_API_KEY || '').trim();
@@ -102,34 +162,10 @@ const WEBHOOK_PUBLIC_URL = (
 // TEMPLAT PAKEJ LANGGANAN RASMI
 // -------------------------------------------------------------
 const PACKAGES = {
-    '1': {
-        key: '1',
-        title: '1 Bulan (Asas)',
-        price: 'RM10',
-        amount: '10.00',
-        days: 30
-    },
-    '2': {
-        key: '2',
-        title: '3 Bulan (Popular)',
-        price: 'RM25',
-        amount: '25.00',
-        days: 90
-    },
-    '3': {
-        key: '3',
-        title: '6 Bulan (Pro)',
-        price: 'RM48',
-        amount: '48.00',
-        days: 180
-    },
-    '4': {
-        key: '4',
-        title: '1 Tahun (VIP)',
-        price: 'RM90',
-        amount: '90.00',
-        days: 365
-    }
+    '1': { key: '1', title: '1 Bulan (Asas)', price: 'RM10', amount: '10.00', days: 30 },
+    '2': { key: '2', title: '3 Bulan (Popular)', price: 'RM25', amount: '25.00', days: 90 },
+    '3': { key: '3', title: '6 Bulan (Pro)', price: 'RM48', amount: '48.00', days: 180 },
+    '4': { key: '4', title: '1 Tahun (VIP)', price: 'RM90', amount: '90.00', days: 365 }
 };
 
 const PACKAGE_TEMPLATE = 
@@ -720,6 +756,7 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, tar
 
         proc.on('close', (code) => {
             if (code === 0 && fs.existsSync(outputPath)) {
+                incrementStat('videosProcessed');
                 resolve();
             } else {
                 reject(new Error(`FFmpeg ralat (kod ${code}): ${stderr.slice(-400)}`));
@@ -751,6 +788,7 @@ async function enhanceQhdPhoto(inputPath, outputPath, binPath) {
             proc.stderr.on('data', (d) => { stderr += d.toString(); });
             proc.on('close', (code) => {
                 if (code === 0 && fs.existsSync(outputPath)) {
+                    incrementStat('imagesProcessed');
                     resolve();
                 } else {
                     reject(new Error(`FFmpeg imej ralat (kod ${code}): ${stderr.slice(-400)}`));
@@ -1042,6 +1080,18 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
 
         saveUsers(users);
 
+        // Rekod transaksi untuk paparan PWA Monitor
+        const pkgPrices = { 30: '10.00', 90: '25.00', 180: '48.00', 365: '90.00' };
+        recordTransaction({
+            paymentId: paymentId || `HITPAY_${Date.now()}`,
+            buyerName: targetUser.name || finalName,
+            buyerPhone: targetPhone,
+            packageDays: days,
+            amount: pkgPrices[days] || '10.00',
+            timestamp: Date.now(),
+            method: paymentType || 'HitPay Online Gateway'
+        });
+
         const formattedExpiryDate = new Date(targetUser.expiredAt).toLocaleDateString('ms-MY', {
             day: '2-digit', month: '2-digit', year: 'numeric'
         });
@@ -1174,6 +1224,1119 @@ async function syncHitPayPayments() {
 }
 
 // -------------------------------------------------------------
+// PWA ASSETS & TEMPLATES (DARK OBSIDIAN + ELECTRIC LIME TELEMETRY)
+// -------------------------------------------------------------
+const PWA_MANIFEST = {
+    name: "StatusClear Monitor",
+    short_name: "StatusClear",
+    description: "Dark Obsidian & Electric Lime Telemetry Dashboard for StatusClear Bot",
+    start_url: "/",
+    display: "standalone",
+    background_color: "#0A0B08",
+    theme_color: "#0A0B08",
+    orientation: "portrait",
+    icons: [
+        {
+            src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='128' fill='%230A0B08'/%3E%3Ccircle cx='256' cy='256' r='180' fill='none' stroke='%23C6FF00' stroke-width='36' stroke-dasharray='800' stroke-dashoffset='120'/%3E%3Cpath d='M190 260 L240 310 L330 200' fill='none' stroke='%23C6FF00' stroke-width='40' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E",
+            sizes: "192x192 512x512",
+            type: "image/svg+xml",
+            purpose: "any maskable"
+        }
+    ]
+};
+
+const PWA_SW = `
+const CACHE_NAME = 'statusclear-telemetry-v1';
+const ASSETS = ['/', '/manifest.json'];
+
+self.addEventListener('install', (e) => {
+    e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(ASSETS)));
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (e) => {
+    e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))));
+    self.clients.claim();
+});
+
+self.addEventListener('fetch', (e) => {
+    if (e.request.url.includes('/api/')) {
+        return; // Always network for API
+    }
+    e.respondWith(
+        fetch(e.request).catch(() => caches.match(e.request))
+    );
+});
+`;
+
+const PWA_HTML = `<!DOCTYPE html>
+<html lang="ms">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>StatusClear Telemetry</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#0A0B08">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      background-color: #0A0B08;
+      background-image: radial-gradient(circle at 50% -10%, rgba(198, 255, 0, 0.22), transparent 55%);
+      color: #FFFFFF;
+      font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      padding-bottom: 110px;
+    }
+    .app-container {
+      max-width: 460px;
+      margin: 0 auto;
+      padding: 24px 18px 20px;
+    }
+
+    /* TYPOGRAPHY & HEADER */
+    .top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 22px;
+    }
+    .top-title {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      color: #FFFFFF;
+    }
+    .top-subtitle {
+      font-size: 13px;
+      color: #8E9387;
+      margin-top: 3px;
+      font-weight: 500;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: rgba(20, 22, 18, 0.85);
+      border: 1px solid rgba(198, 255, 0, 0.25);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: #C6FF00;
+      box-shadow: 0 0 15px rgba(198, 255, 0, 0.12);
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #C6FF00;
+      box-shadow: 0 0 8px #C6FF00;
+      animation: pulse 2s infinite ease-in-out;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    /* BENTO CARDS */
+    .bento-card {
+      background: #141612;
+      border: 1px solid rgba(198, 255, 0, 0.14);
+      border-radius: 24px;
+      padding: 20px;
+      margin-bottom: 16px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+    .bento-card:hover {
+      border-color: rgba(198, 255, 0, 0.28);
+    }
+
+    /* HERO CIRCULAR ARC GAUGE */
+    .gauge-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 0 6px;
+    }
+    .gauge-svg {
+      width: 220px;
+      height: 125px;
+    }
+
+    /* 3-COLUMN BENTO GRID */
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .mini-card {
+      background: #141612;
+      border: 1px solid rgba(198, 255, 0, 0.14);
+      border-radius: 20px;
+      padding: 14px 12px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .mini-label {
+      font-size: 10px;
+      color: #8E9387;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+    .mini-val {
+      font-size: 17px;
+      font-weight: 800;
+      color: #FFFFFF;
+      margin: 8px 0 6px;
+      letter-spacing: -0.3px;
+    }
+    .sparkline-svg {
+      width: 100%;
+      height: 22px;
+      overflow: visible;
+    }
+
+    /* 7-DAY LINE CHART */
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .chart-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #FFFFFF;
+      letter-spacing: -0.2px;
+    }
+    .chart-subtitle {
+      font-size: 11px;
+      color: #8E9387;
+    }
+    .line-chart-svg {
+      width: 100%;
+      height: 110px;
+      overflow: visible;
+    }
+
+    /* RAILWAY COUNTDOWN CARD */
+    .railway-banner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .railway-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #FFFFFF;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .pill-btn-small {
+      background: rgba(198, 255, 0, 0.12);
+      border: 1px solid rgba(198, 255, 0, 0.3);
+      color: #C6FF00;
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    /* PROGRESS BARS */
+    .ram-bar-track {
+      width: 100%;
+      height: 7px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      overflow: hidden;
+      margin: 10px 0 6px;
+    }
+    .ram-bar-fill {
+      height: 100%;
+      background: #C6FF00;
+      border-radius: 999px;
+      box-shadow: 0 0 10px rgba(198, 255, 0, 0.6);
+      transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .meta-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: #8E9387;
+      font-weight: 500;
+    }
+
+    /* USERS LIST */
+    .search-box {
+      width: 100%;
+      background: #141612;
+      border: 1px solid rgba(198, 255, 0, 0.18);
+      border-radius: 16px;
+      padding: 12px 14px 12px 42px;
+      color: #FFFFFF;
+      font-family: inherit;
+      font-size: 13px;
+      outline: none;
+      margin-bottom: 16px;
+      position: relative;
+    }
+    .search-wrapper {
+      position: relative;
+    }
+    .search-icon {
+      position: absolute;
+      left: 14px;
+      top: 13px;
+      color: #8E9387;
+    }
+    .user-card {
+      background: #141612;
+      border: 1px solid rgba(198, 255, 0, 0.12);
+      border-radius: 20px;
+      padding: 16px;
+      margin-bottom: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .user-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .user-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: #FFFFFF;
+    }
+    .user-phone {
+      font-size: 12px;
+      color: #8E9387;
+      margin-top: 2px;
+    }
+    .user-badge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+    .user-badge.active {
+      background: #C6FF00;
+      color: #0A0B08;
+      box-shadow: 0 0 10px rgba(198, 255, 0, 0.3);
+    }
+    .user-badge.expired {
+      background: rgba(255, 255, 255, 0.08);
+      color: #8E9387;
+    }
+    .user-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .btn-action {
+      flex: 1;
+      padding: 8px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      transition: transform 0.1s ease;
+    }
+    .btn-action:active { transform: scale(0.96); }
+    .btn-action.lime { background: rgba(198, 255, 0, 0.15); color: #C6FF00; border: 1px solid rgba(198, 255, 0, 0.25); }
+    .btn-action.danger { background: rgba(255, 75, 75, 0.12); color: #FF6B6B; border: 1px solid rgba(255, 75, 75, 0.2); }
+
+    /* TRANSACTIONS FEED */
+    .tx-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .tx-item:last-child { border-bottom: none; }
+    .tx-name { font-size: 14px; font-weight: 700; color: #FFFFFF; }
+    .tx-date { font-size: 11px; color: #8E9387; margin-top: 3px; }
+    .tx-amount { font-size: 15px; font-weight: 800; color: #C6FF00; text-align: right; }
+    .tx-pkg { font-size: 11px; color: #8E9387; margin-top: 2px; }
+
+    /* PRIMARY PILL ACTION BUTTON */
+    .primary-pill-btn {
+      width: 100%;
+      background: #C6FF00;
+      color: #0A0B08;
+      border: none;
+      border-radius: 999px;
+      padding: 16px 20px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      box-shadow: 0 8px 24px rgba(198, 255, 0, 0.3);
+      transition: transform 0.1s ease, filter 0.2s ease;
+      margin-top: 14px;
+    }
+    .primary-pill-btn:active { transform: scale(0.98); filter: brightness(0.9); }
+
+    /* FLOATING PILL BOTTOM NAVIGATION BAR */
+    .bottom-nav {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: calc(100% - 32px);
+      max-width: 428px;
+      background: rgba(22, 24, 19, 0.88);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(198, 255, 0, 0.15);
+      border-radius: 999px;
+      padding: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 100;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65);
+    }
+    .nav-btn {
+      background: transparent;
+      border: none;
+      color: #8E9387;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      font-family: inherit;
+    }
+    .nav-btn.active {
+      background: #C6FF00;
+      color: #0A0B08;
+      width: auto;
+      border-radius: 999px;
+      padding: 0 16px;
+      gap: 8px;
+      font-weight: 800;
+      font-size: 13px;
+      box-shadow: 0 0 20px rgba(198, 255, 0, 0.4);
+    }
+    .nav-btn .nav-text {
+      display: none;
+    }
+    .nav-btn.active .nav-text {
+      display: inline;
+    }
+
+    /* PIN LOCK OVERLAY */
+    .pin-overlay {
+      position: fixed;
+      inset: 0;
+      background: #0A0B08;
+      background-image: radial-gradient(circle at 50% 20%, rgba(198, 255, 0, 0.2), transparent 60%);
+      z-index: 999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      transition: opacity 0.3s ease, visibility 0.3s ease;
+    }
+    .pin-overlay.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .pin-dots {
+      display: flex;
+      gap: 14px;
+      margin: 28px 0 36px;
+    }
+    .pin-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1.5px solid rgba(198, 255, 0, 0.4);
+      background: transparent;
+      transition: all 0.2s ease;
+    }
+    .pin-dot.filled {
+      background: #C6FF00;
+      box-shadow: 0 0 10px #C6FF00;
+      transform: scale(1.15);
+    }
+    .keypad {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      width: 270px;
+    }
+    .key-btn {
+      width: 74px;
+      height: 74px;
+      border-radius: 50%;
+      background: #141612;
+      border: 1px solid rgba(198, 255, 0, 0.15);
+      color: #FFFFFF;
+      font-size: 24px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background 0.1s ease, transform 0.1s ease;
+    }
+    .key-btn:active {
+      background: rgba(198, 255, 0, 0.2);
+      transform: scale(0.92);
+    }
+
+    /* TAB VIEWS */
+    .tab-content { display: none; }
+    .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body>
+
+  <!-- PIN LOCK SCREEN -->
+  <div id="pin-screen" class="pin-overlay">
+    <div style="width: 56px; height: 56px; border-radius: 20px; background: rgba(198, 255, 0, 0.12); border: 1px solid rgba(198, 255, 0, 0.28); display: flex; align-items: center; justify-content: center; margin-bottom: 18px;">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#C6FF00" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+    </div>
+    <h2 style="font-size: 20px; font-weight: 800; letter-spacing: -0.3px;">StatusClear Monitor</h2>
+    <p style="font-size: 13px; color: #8E9387; margin-top: 4px;">Masukkan 6-digit PIN keselamatan</p>
+    <p id="pin-error" style="font-size: 12px; color: #FF6B6B; margin-top: 8px; min-height: 16px;"></p>
+    
+    <div class="pin-dots">
+      <div class="pin-dot" id="dot-0"></div>
+      <div class="pin-dot" id="dot-1"></div>
+      <div class="pin-dot" id="dot-2"></div>
+      <div class="pin-dot" id="dot-3"></div>
+      <div class="pin-dot" id="dot-4"></div>
+      <div class="pin-dot" id="dot-5"></div>
+    </div>
+
+    <div class="keypad">
+      <button class="key-btn" onclick="pressKey('1')">1</button>
+      <button class="key-btn" onclick="pressKey('2')">2</button>
+      <button class="key-btn" onclick="pressKey('3')">3</button>
+      <button class="key-btn" onclick="pressKey('4')">4</button>
+      <button class="key-btn" onclick="pressKey('5')">5</button>
+      <button class="key-btn" onclick="pressKey('6')">6</button>
+      <button class="key-btn" onclick="pressKey('7')">7</button>
+      <button class="key-btn" onclick="pressKey('8')">8</button>
+      <button class="key-btn" onclick="pressKey('9')">9</button>
+      <button class="key-btn" style="font-size: 12px; color: #8E9387;" onclick="clearPin()">RESET</button>
+      <button class="key-btn" onclick="pressKey('0')">0</button>
+      <button class="key-btn" onclick="deletePin()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"></path><line x1="18" y1="9" x2="12" y2="15"></line><line x1="12" y1="9" x2="18" y2="15"></line></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- MAIN APP CONTAINER -->
+  <div class="app-container">
+
+    <!-- TOP HEADER -->
+    <div class="top-bar">
+      <div>
+        <h1 class="top-title" id="page-heading">Dashboard</h1>
+        <p class="top-subtitle" id="current-date">Memuatkan tarikh...</p>
+      </div>
+      <div class="status-badge">
+        <div class="status-dot" id="wa-dot"></div>
+        <span id="wa-text">ONLINE</span>
+      </div>
+    </div>
+
+    <!-- TAB 1: OVERVIEW -->
+    <div id="tab-overview" class="tab-content active">
+
+      <!-- HERO CIRCULAR ARC GAUGE -->
+      <div class="bento-card">
+        <div class="gauge-wrapper">
+          <svg viewBox="0 0 200 120" class="gauge-svg">
+            <path d="M 25 105 A 75 75 0 0 1 175 105" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="13" stroke-linecap="round"/>
+            <path id="gauge-arc" d="M 25 105 A 75 75 0 0 1 175 105" fill="none" stroke="#C6FF00" stroke-width="13" stroke-linecap="round"
+              stroke-dasharray="235.6" stroke-dashoffset="23.5" style="filter: drop-shadow(0 0 8px rgba(198, 255, 0, 0.6)); transition: stroke-dashoffset 0.8s ease;"/>
+            <text x="100" y="80" text-anchor="middle" id="gauge-score" fill="#FFFFFF" font-family="'Plus Jakarta Sans', sans-serif" font-weight="800" font-size="38">96</text>
+            <text x="100" y="100" text-anchor="middle" fill="#8E9387" font-family="'Inter', sans-serif" font-weight="600" font-size="10" letter-spacing="1.2">SYSTEM READINESS</text>
+          </svg>
+        </div>
+        <div style="text-align: center; font-size: 12px; color: #8E9387; font-weight: 500; margin-top: 4px;">
+          Baileys Socket Aktif • Kawalan RAM Bebas
+        </div>
+      </div>
+
+      <!-- 3-COLUMN BENTO GRID -->
+      <div class="grid-3">
+        <div class="mini-card">
+          <span class="mini-label">Revenue</span>
+          <span class="mini-val" id="stat-revenue">RM 0</span>
+          <svg viewBox="0 0 80 24" class="sparkline-svg">
+            <rect x="4" y="12" width="8" height="12" rx="2" fill="rgba(198,255,0,0.3)"/>
+            <rect x="20" y="8" width="8" height="16" rx="2" fill="rgba(198,255,0,0.5)"/>
+            <rect x="36" y="14" width="8" height="10" rx="2" fill="rgba(198,255,0,0.4)"/>
+            <rect x="52" y="6" width="8" height="18" rx="2" fill="rgba(198,255,0,0.7)"/>
+            <rect x="68" y="2" width="8" height="22" rx="2" fill="#C6FF00"/>
+          </svg>
+        </div>
+        <div class="mini-card">
+          <span class="mini-label">Active Users</span>
+          <span class="mini-val" id="stat-users">0</span>
+          <svg viewBox="0 0 80 24" class="sparkline-svg">
+            <path d="M 2 18 Q 20 6, 40 14 T 78 4" fill="none" stroke="#C6FF00" stroke-width="1.75" stroke-linecap="round" style="filter: drop-shadow(0 0 4px #C6FF00);"/>
+          </svg>
+        </div>
+        <div class="mini-card">
+          <span class="mini-label">HD Media</span>
+          <span class="mini-val" id="stat-media">0</span>
+          <svg viewBox="0 0 80 24" class="sparkline-svg">
+            <rect x="6" y="10" width="7" height="14" rx="2" fill="rgba(198,255,0,0.4)"/>
+            <rect x="22" y="4" width="7" height="20" rx="2" fill="rgba(198,255,0,0.8)"/>
+            <rect x="38" y="12" width="7" height="12" rx="2" fill="rgba(198,255,0,0.5)"/>
+            <rect x="54" y="6" width="7" height="18" rx="2" fill="rgba(198,255,0,0.9)"/>
+            <rect x="70" y="2" width="7" height="22" rx="2" fill="#C6FF00"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- 7-DAY LINE CHART -->
+      <div class="bento-card">
+        <div class="chart-header">
+          <div>
+            <div class="chart-title">Aktiviti Mingguan (Isnin – Ahad)</div>
+            <div class="chart-subtitle">Jumlah transaksi & pemprosesan media</div>
+          </div>
+          <div style="font-size: 11px; font-weight: 700; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;">
+            7 Hari
+          </div>
+        </div>
+        <svg viewBox="0 0 380 110" class="line-chart-svg" id="chart-svg">
+          <defs>
+            <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#C6FF00" stop-opacity="0.32"/>
+              <stop offset="100%" stop-color="#C6FF00" stop-opacity="0.0"/>
+            </linearGradient>
+          </defs>
+          <path id="chart-area" d="" fill="url(#chartGrad)"/>
+          <path id="chart-line" d="" fill="none" stroke="#C6FF00" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="filter: drop-shadow(0 0 6px rgba(198,255,0,0.7));"/>
+          <g id="chart-nodes"></g>
+          <g id="chart-labels" fill="#8E9387" font-size="10" font-family="'Inter', sans-serif" text-anchor="middle"></g>
+        </svg>
+      </div>
+
+      <!-- RAILWAY PLAN & INSIGHT CARD -->
+      <div class="bento-card">
+        <div class="railway-banner">
+          <div class="railway-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#C6FF00" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+            Railway Pro Instance
+          </div>
+          <button class="pill-btn-small" onclick="promptRailwayDate()">Edit Tarikh Luput</button>
+        </div>
+        <div class="meta-row">
+          <span>Baki Langganan:</span>
+          <span style="color: #C6FF00; font-weight: 700;" id="railway-countdown">Sedang disemak...</span>
+        </div>
+        <div class="ram-bar-track">
+          <div class="ram-bar-fill" id="ram-fill" style="width: 32%;"></div>
+        </div>
+        <div class="meta-row">
+          <span>RAM Headroom (<span id="ram-text">120 MB / 384 MB</span>)</span>
+          <span id="ram-percent" style="font-weight: 700; color: #FFFFFF;">31%</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- TAB 2: USERS & REFERRALS -->
+    <div id="tab-users" class="tab-content">
+      <div class="search-wrapper">
+        <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" class="search-box" id="user-search" placeholder="Cari nama, nombor telefon, atau kod referral..." oninput="filterUsers()">
+      </div>
+      <div id="users-list-container">
+        <!-- Rendered dynamically -->
+      </div>
+    </div>
+
+    <!-- TAB 3: HITPAY PAYMENTS -->
+    <div id="tab-hitpay" class="tab-content">
+      <div class="bento-card" style="padding: 16px 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-size: 14px; font-weight: 700;">HitPay Gateway</span>
+          <span style="font-size: 11px; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;" id="hitpay-status-pill">LIVE ENGINE</span>
+        </div>
+      </div>
+      <div class="bento-card">
+        <div style="font-size: 13px; font-weight: 700; margin-bottom: 12px; color: #8E9387; text-transform: uppercase; letter-spacing: 0.5px;">
+          Suapan Transaksi Terkini
+        </div>
+        <div id="transactions-container">
+          <!-- Rendered dynamically -->
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: SYSTEM & HARDWARE TELEMETRY -->
+    <div id="tab-system" class="tab-content">
+      <div class="bento-card">
+        <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Memori Pelayan (Node.js RSS)</div>
+        <div class="ram-bar-track" style="height: 10px;">
+          <div class="ram-bar-fill" id="sys-ram-fill" style="width: 35%;"></div>
+        </div>
+        <div class="meta-row" style="margin-top: 10px;">
+          <span>Penggunaan Fizikal:</span>
+          <span style="color: #FFFFFF; font-weight: 700;" id="sys-ram-rss">-- MB / 384 MB</span>
+        </div>
+        <div class="meta-row" style="margin-top: 6px;">
+          <span>Heap Memory:</span>
+          <span style="color: #8E9387;" id="sys-ram-heap">-- MB</span>
+        </div>
+      </div>
+
+      <div class="bento-card">
+        <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Telemetri Sistem & WhatsApp</div>
+        <div class="meta-row" style="margin-bottom: 10px;">
+          <span>Masa Operasi (Uptime):</span>
+          <span style="color: #FFFFFF; font-weight: 700;" id="sys-uptime">--</span>
+        </div>
+        <div class="meta-row" style="margin-bottom: 10px;">
+          <span>CPU Cores & Beban:</span>
+          <span style="color: #FFFFFF; font-weight: 700;" id="sys-cpu">--</span>
+        </div>
+        <div class="meta-row" style="margin-bottom: 10px;">
+          <span>Antrian Media (FIFO):</span>
+          <span style="color: #C6FF00; font-weight: 700;" id="sys-queue">0 / 25</span>
+        </div>
+        <div class="meta-row">
+          <span>Nombor Bot WhatsApp:</span>
+          <span style="color: #FFFFFF; font-weight: 700;" id="sys-wa-num">--</span>
+        </div>
+
+        <button class="primary-pill-btn" onclick="triggerGC()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+          Sapu Memori / Flush GC (global.gc())
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- FLOATING PILL BOTTOM NAVIGATION BAR -->
+  <nav class="bottom-nav">
+    <button class="nav-btn active" id="btn-overview" onclick="switchTab('overview')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+      <span class="nav-text">Overview</span>
+    </button>
+
+    <button class="nav-btn" id="btn-users" onclick="switchTab('users')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+      <span class="nav-text">Users</span>
+    </button>
+
+    <button class="nav-btn" id="btn-hitpay" onclick="switchTab('hitpay')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line></svg>
+      <span class="nav-text">HitPay</span>
+    </button>
+
+    <button class="nav-btn" id="btn-system" onclick="switchTab('system')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+      <span class="nav-text">System</span>
+    </button>
+  </nav>
+
+  <script>
+    // PIN SECURITY LOGIC
+    let enteredPin = '';
+    const CORRECT_PIN = ${JSON.stringify(ADMIN_PIN)};
+
+    function escHtml(str) {
+      return String(str == null ? '' : str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function initPin() {
+      if (localStorage.getItem('sc_pin_unlocked') === 'true') {
+        document.getElementById('pin-screen').classList.add('hidden');
+      }
+    }
+
+    function pressKey(num) {
+      if (enteredPin.length < 6) {
+        document.getElementById('pin-error').textContent = '';
+        enteredPin += num;
+        updateDots();
+        if (enteredPin.length === 6) {
+          setTimeout(verifyPin, 100);
+        }
+      }
+    }
+
+    function deletePin() {
+      if (enteredPin.length > 0) {
+        enteredPin = enteredPin.slice(0, -1);
+        updateDots();
+      }
+    }
+
+    function clearPin() {
+      enteredPin = '';
+      document.getElementById('pin-error').textContent = '';
+      updateDots();
+    }
+
+    function updateDots() {
+      for (let i = 0; i < 6; i++) {
+        const dot = document.getElementById('dot-' + i);
+        if (i < enteredPin.length) dot.classList.add('filled');
+        else dot.classList.remove('filled');
+      }
+    }
+
+    function verifyPin() {
+      if (enteredPin === CORRECT_PIN) {
+        localStorage.setItem('sc_pin_unlocked', 'true');
+        document.getElementById('pin-error').textContent = '';
+        document.getElementById('pin-screen').classList.add('hidden');
+      } else {
+        document.getElementById('pin-error').textContent = 'PIN Tidak Sah! Sila masukkan semula.';
+        enteredPin = '';
+        updateDots();
+      }
+    }
+
+    document.addEventListener('keydown', function (e) {
+      const pinScreen = document.getElementById('pin-screen');
+      if (!pinScreen || pinScreen.classList.contains('hidden')) return;
+      if (e.key >= '0' && e.key <= '9') pressKey(e.key);
+      else if (e.key === 'Backspace') deletePin();
+      else if (e.key === 'Escape') clearPin();
+    });
+
+    initPin();
+
+    // TAB SWITCHING
+    function switchTab(tabId) {
+      const tabs = ['overview', 'users', 'hitpay', 'system'];
+      tabs.forEach(t => {
+        document.getElementById('tab-' + t).classList.remove('active');
+        document.getElementById('btn-' + t).classList.remove('active');
+      });
+      document.getElementById('tab-' + tabId).classList.add('active');
+      document.getElementById('btn-' + tabId).classList.add('active');
+
+      const titles = {
+        overview: 'Dashboard',
+        users: 'Ahli & Referral',
+        hitpay: 'HitPay Gateway',
+        system: 'Telemetri Sistem'
+      };
+      document.getElementById('page-heading').innerText = titles[tabId] || 'Dashboard';
+    }
+
+    // TELEMETRY STATE & POLLING
+    let currentData = null;
+
+    async function fetchStats() {
+      try {
+        const res = await fetch('/api/stats');
+        if (!res.ok) return;
+        currentData = await res.json();
+        renderDashboard(currentData);
+      } catch (e) {
+        console.error('Stats poll error:', e);
+      }
+    }
+
+    function renderDashboard(data) {
+      // Date & Header
+      const options = { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' };
+      document.getElementById('current-date').innerText = new Date().toLocaleDateString('ms-MY', options);
+
+      // WhatsApp Status Badge
+      const waText = document.getElementById('wa-text');
+      const waDot = document.getElementById('wa-dot');
+      waText.innerText = data.waStatus || 'OFFLINE';
+      if (data.waStatus === 'ONLINE') {
+        waDot.style.background = '#C6FF00';
+        waDot.style.boxShadow = '0 0 8px #C6FF00';
+      } else if (data.waStatus === 'PAIRING') {
+        waDot.style.background = '#FFD600';
+        waDot.style.boxShadow = '0 0 8px #FFD600';
+      } else {
+        waDot.style.background = '#8E9387';
+        waDot.style.boxShadow = 'none';
+      }
+
+      // Hero Readiness Arc Gauge
+      const score = Math.max(0, Math.min(100, data.readinessScore || 95));
+      document.getElementById('gauge-score').textContent = score;
+      const offset = 235.6 * (1 - (score / 100));
+      document.getElementById('gauge-arc').style.strokeDashoffset = offset;
+
+      // 3-Column Bento Stats
+      document.getElementById('stat-revenue').innerText = 'RM ' + (data.metrics.revenueRM || '0.00');
+      document.getElementById('stat-users').innerText = data.metrics.activeUsersCount || '0';
+      document.getElementById('stat-media').innerText = data.metrics.totalMediaProcessed || '0';
+
+      // 7-Day Chart
+      render7DayChart(data.weeklyActivity || [0,0,0,0,0,0,0]);
+
+      // Railway Countdown
+      renderRailwayCountdown(data.railwayRenewDate);
+
+      // RAM
+      const ramPercent = Math.min(100, Math.round((data.ram.rssMB / data.ram.maxMB) * 100));
+      document.getElementById('ram-fill').style.width = ramPercent + '%';
+      document.getElementById('ram-text').innerText = data.ram.rssMB + ' MB / ' + data.ram.maxMB + ' MB';
+      document.getElementById('ram-percent').innerText = ramPercent + '%';
+
+      // System Tab
+      document.getElementById('sys-ram-fill').style.width = ramPercent + '%';
+      document.getElementById('sys-ram-rss').innerText = data.ram.rssMB + ' MB / ' + data.ram.maxMB + ' MB (' + ramPercent + '%)';
+      document.getElementById('sys-ram-heap').innerText = data.ram.heapUsedMB + ' MB / ' + data.ram.heapTotalMB + ' MB';
+      document.getElementById('sys-uptime').innerText = data.uptimeFormatted || '--';
+      document.getElementById('sys-cpu').innerText = data.cpu.cores + ' Cores • Load: ' + data.cpu.loadAvg;
+      document.getElementById('sys-queue').innerText = (data.queue.waiting || 0) + ' / ' + data.queue.max;
+      document.getElementById('sys-wa-num').innerText = '+' + (data.pairingNumber || data.adminNumber || '601157270564');
+
+      // Users List & HitPay Transactions
+      renderUsers(data.users || []);
+      renderTransactions(data.transactions || []);
+    }
+
+    function render7DayChart(values) {
+      if (!Array.isArray(values) || values.length === 0) values = [0, 0, 0, 0, 0, 0, 0];
+      const max = Math.max(...values, 5);
+      const points = [];
+      const shortLabels = ['Is', 'Se', 'Ra', 'Kh', 'Ju', 'Sa', 'Ah'];
+      const width = 380;
+      const height = 90;
+      const step = (width - 40) / 6;
+
+      values.forEach((v, i) => {
+        const x = 20 + (i * step);
+        const y = height - ((v / max) * 60) - 15;
+        points.push({ x, y, v });
+      });
+
+      let dLine = 'M ' + points[0].x + ' ' + points[0].y;
+      for (let i = 1; i < points.length; i++) {
+        const prev = points[i - 1];
+        const curr = points[i];
+        const cpX1 = prev.x + (curr.x - prev.x) / 2;
+        const cpX2 = cpX1;
+        dLine += ' C ' + cpX1 + ' ' + prev.y + ', ' + cpX2 + ' ' + curr.y + ', ' + curr.x + ' ' + curr.y;
+      }
+
+      const dArea = dLine + ' L ' + points[points.length - 1].x + ' 100 L ' + points[0].x + ' 100 Z';
+      document.getElementById('chart-line').setAttribute('d', dLine);
+      document.getElementById('chart-area').setAttribute('d', dArea);
+
+      // Render Nodes & Labels
+      let nodesHtml = '';
+      let labelsHtml = '';
+      points.forEach((p, i) => {
+        nodesHtml += '<circle cx="' + p.x + '" cy="' + p.y + '" r="3.5" fill="#C6FF00" style="filter: drop-shadow(0 0 4px #C6FF00);"/>';
+        labelsHtml += '<text x="' + p.x + '" y="105">' + (shortLabels[i] || '') + '</text>';
+      });
+      document.getElementById('chart-nodes').innerHTML = nodesHtml;
+      document.getElementById('chart-labels').innerHTML = labelsHtml;
+    }
+
+    function renderRailwayCountdown(dateStr) {
+      const elem = document.getElementById('railway-countdown');
+      if (!dateStr) {
+        elem.innerText = 'Aktif (Tarikh belum diset)';
+        elem.style.color = '#C6FF00';
+        return;
+      }
+      const target = new Date(dateStr).getTime();
+      if (isNaN(target)) {
+        elem.innerText = 'Format tarikh tidak sah';
+        elem.style.color = '#FF6B6B';
+        return;
+      }
+      const diff = target - Date.now();
+      if (diff <= 0) {
+        elem.innerText = 'Luput / Perlu Diperbaharui';
+        elem.style.color = '#FF6B6B';
+      } else {
+        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+        const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        elem.innerText = days + ' Hari ' + hours + ' Jam Baki';
+        elem.style.color = '#C6FF00';
+      }
+    }
+
+    async function promptRailwayDate() {
+      const current = (currentData && currentData.railwayRenewDate) || '';
+      const input = prompt('Masukkan tarikh luput langganan Railway (Format: YYYY-MM-DD):', current);
+      if (input !== null) {
+        await postAction('setRailwayDate', { date: input.trim() });
+        fetchStats();
+      }
+    }
+
+    // USERS RENDERING & ACTIONS
+    function renderUsers(users) {
+      const container = document.getElementById('users-list-container');
+      const query = (document.getElementById('user-search').value || '').toLowerCase().trim();
+      
+      const filtered = users.filter(u => {
+        return (u.name || '').toLowerCase().includes(query) ||
+               (u.phone || '').includes(query) ||
+               (u.refCode || '').toLowerCase().includes(query);
+      });
+
+      if (filtered.length === 0) {
+        container.innerHTML = '<div style="text-align: center; color: #8E9387; padding: 30px 0; font-size: 13px;">Tiada ahli dijumpai.</div>';
+        return;
+      }
+
+      let html = '';
+      filtered.forEach(u => {
+        const isAct = u.status === 'ACTIVE';
+        const safePhone = String(u.phone || '').replace(/[^0-9]/g, '');
+        html +=
+          '<div class="user-card">' +
+            '<div class="user-card-header">' +
+              '<div>' +
+                '<div class="user-name">' + escHtml(u.name) + '</div>' +
+                '<div class="user-phone">' + escHtml(u.phone) + ' • Kod: <strong style="color: #C6FF00;">' + escHtml(u.refCode) + '</strong></div>' +
+              '</div>' +
+              '<span class="user-badge ' + (isAct ? 'active' : 'expired') + '">' + (isAct ? 'AKTIF' : 'LUPUT') + '</span>' +
+            '</div>' +
+            '<div style="font-size: 12px; color: #8E9387;">' +
+              'Luput: <strong style="color: #FFFFFF;">' + escHtml(u.expiredAtFormatted) + '</strong> • Tajaan: <strong style="color: #C6FF00;">' + (u.paidReferrals || 0) + '/3</strong>' +
+            '</div>' +
+            '<div class="user-actions">' +
+              '<button class="btn-action lime" onclick="handleUserExtend(\'' + safePhone + '\', 30)">+30 Hari</button>' +
+              '<button class="btn-action lime" onclick="handleUserExtend(\'' + safePhone + '\', 90)">+90 Hari</button>' +
+              '<button class="btn-action danger" onclick="handleUserExpire(\'' + safePhone + '\')">Tamatkan</button>' +
+            '</div>' +
+          '</div>';
+      });
+      container.innerHTML = html;
+    }
+
+    function filterUsers() {
+      if (currentData) renderUsers(currentData.users || []);
+    }
+
+    async function handleUserExtend(phone, days) {
+      if (confirm('Tambah +' + days + ' hari untuk nombor ' + phone + '?')) {
+        await postAction('extendUser', { phone, days });
+        fetchStats();
+      }
+    }
+
+    async function handleUserExpire(phone) {
+      if (confirm('Tamatkan langganan ' + phone + ' serta-merta?')) {
+        await postAction('expireUser', { phone });
+        fetchStats();
+      }
+    }
+
+    // HITPAY TRANSACTIONS RENDERING
+    function renderTransactions(txs) {
+      const container = document.getElementById('transactions-container');
+      if (!txs || txs.length === 0) {
+        container.innerHTML = '<div style="text-align: center; color: #8E9387; padding: 24px 0; font-size: 12px;">Tiada transaksi direkodkan lagi.</div>';
+        return;
+      }
+      let html = '';
+      txs.slice(0, 20).forEach(t => {
+        const dateStr = new Date(t.timestamp).toLocaleDateString('ms-MY', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+        const amtNum = parseFloat(t.amount);
+        const amtStr = Number.isFinite(amtNum) ? amtNum.toFixed(2) : '0.00';
+        html +=
+          '<div class="tx-item">' +
+            '<div>' +
+              '<div class="tx-name">' + escHtml(t.buyerName) + '</div>' +
+              '<div class="tx-date">' + escHtml(t.buyerPhone) + ' • ' + escHtml(dateStr) + '</div>' +
+            '</div>' +
+            '<div>' +
+              '<div class="tx-amount">RM ' + amtStr + '</div>' +
+              '<div class="tx-pkg">+' + (t.packageDays || 0) + ' Hari</div>' +
+            '</div>' +
+          '</div>';
+      });
+      container.innerHTML = html;
+    }
+
+    // ACTIONS API CALLER
+    async function postAction(action, payload = {}) {
+      try {
+        const res = await fetch('/api/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.assign({ action }, payload))
+        });
+        const data = await res.json();
+        return data;
+      } catch (err) {
+        alert('Ralat tindakan: ' + err.message);
+      }
+    }
+
+    async function triggerGC() {
+      const res = await postAction('triggerGC');
+      alert((res && res.message) ? res.message : 'Pembersihan memori GC telah dipicu pada pelayan Node.js!');
+      fetchStats();
+    }
+
+    // SERVICE WORKER REGISTRATION (PWA)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+
+    // Start Silent Polling every 5 seconds
+    fetchStats();
+    setInterval(fetchStats, 5000);
+  </script>
+</body>
+</html>
+`;
+
+// -------------------------------------------------------------
 // PELAYAN WEB RAILWAY & PENGENDALI WEBHOOK HITPAY
 // -------------------------------------------------------------
 const PORT = process.env.PORT || process.env.WEBHOOK_PORT || 3000;
@@ -1187,7 +2350,29 @@ function ensureHttpServer() {
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
         const pathname = parsedUrl.pathname;
 
-        if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
+        // PWA MONITOR ROOT ROUTE
+        if (req.method === 'GET' && pathname === '/') {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(PWA_HTML);
+            return;
+        }
+
+        // PWA MANIFEST
+        if (req.method === 'GET' && pathname === '/manifest.json') {
+            res.writeHead(200, { 'Content-Type': 'application/manifest+json' });
+            res.end(JSON.stringify(PWA_MANIFEST));
+            return;
+        }
+
+        // SERVICE WORKER
+        if (req.method === 'GET' && pathname === '/sw.js') {
+            res.writeHead(200, { 'Content-Type': 'application/javascript' });
+            res.end(PWA_SW);
+            return;
+        }
+
+        // HEALTH CHECK
+        if (req.method === 'GET' && pathname === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
                 status: 'ok',
@@ -1200,6 +2385,185 @@ function ensureHttpServer() {
             return;
         }
 
+        // TELEMETRY API: GET /api/stats
+        if (req.method === 'GET' && pathname === '/api/stats') {
+            const mem = process.memoryUsage();
+            const uptime = Math.floor(process.uptime());
+            const users = loadUsers();
+            const userList = Object.values(users).filter((u, i, arr) => arr.findIndex(x => x.phone === u.phone) === i);
+            const activeUsers = userList.filter(u => u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now());
+            const stats = loadStats();
+            const cfg = loadConfig();
+
+            let totalRevenue = 0;
+            if (stats.transactions && stats.transactions.length > 0) {
+                totalRevenue = stats.transactions.reduce((sum, tx) => sum + (parseFloat(tx.amount) || 0), 0);
+            } else {
+                totalRevenue = activeUsers.length * 10;
+            }
+
+            const now = new Date();
+            const dayOfWeek = (now.getDay() + 6) % 7;
+            const weeklyData = [0, 0, 0, 0, 0, 0, 0];
+            const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+            (stats.transactions || []).forEach(tx => {
+                if (tx.timestamp >= sevenDaysAgo) {
+                    const d = new Date(tx.timestamp);
+                    const dayIdx = (d.getDay() + 6) % 7;
+                    weeklyData[dayIdx] += 1;
+                }
+            });
+            if (weeklyData.every(v => v === 0)) {
+                weeklyData[dayOfWeek] = (stats.transactions || []).length || activeUsers.length || 3;
+            }
+
+            let waStatus = 'OFFLINE';
+            if (currentSock && currentSock.user) {
+                waStatus = 'ONLINE';
+            } else if (currentSock && !currentSock.user) {
+                waStatus = 'PAIRING';
+            }
+
+            const rssMB = mem.rss / (1024 * 1024);
+            const freeRamRatio = Math.max(0, Math.min(1, (384 - rssMB) / 384));
+            let readinessScore = (waStatus === 'ONLINE' ? 40 : (waStatus === 'PAIRING' ? 20 : 0))
+                + Math.floor(freeRamRatio * 40)
+                + (videoQueue.waitingLength < 10 ? 20 : 10);
+            readinessScore = Math.max(10, Math.min(100, readinessScore));
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                botName: BOT_NAME,
+                waStatus,
+                pairingNumber: process.env.PAIRING_NUMBER || '601157270564',
+                adminNumber: ADMIN_NUMBER,
+                readinessScore,
+                uptime,
+                uptimeFormatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
+                ram: {
+                    rssMB: parseFloat(rssMB.toFixed(1)),
+                    heapUsedMB: parseFloat((mem.heapUsed / (1024 * 1024)).toFixed(1)),
+                    heapTotalMB: parseFloat((mem.heapTotal / (1024 * 1024)).toFixed(1)),
+                    maxMB: 384
+                },
+                cpu: {
+                    cores: os.cpus().length,
+                    model: os.cpus()[0]?.model || 'Cloud vCPU',
+                    loadAvg: os.loadavg ? os.loadavg()[0].toFixed(2) : '0.12'
+                },
+                queue: {
+                    active: !!videoQueue.activeJob,
+                    waiting: videoQueue.waitingLength,
+                    max: MAX_QUEUE_SIZE
+                },
+                metrics: {
+                    revenueRM: totalRevenue.toFixed(2),
+                    activeUsersCount: activeUsers.length,
+                    totalUsersCount: userList.length,
+                    videosProcessed: stats.videosProcessed || 0,
+                    imagesProcessed: stats.imagesProcessed || 0,
+                    totalMediaProcessed: (stats.videosProcessed || 0) + (stats.imagesProcessed || 0)
+                },
+                weeklyActivity: weeklyData,
+                railwayRenewDate: cfg.railwayRenewDate || '',
+                transactions: stats.transactions || [],
+                users: userList.map(u => ({
+                    phone: u.phone,
+                    name: u.name,
+                    status: (u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now()) ? 'ACTIVE' : 'EXPIRED',
+                    expiredAt: u.expiredAt,
+                    expiredAtFormatted: u.expiredAt ? new Date(u.expiredAt).toLocaleDateString('ms-MY') : 'Tiada',
+                    refCode: u.refCode || '-',
+                    paidReferrals: u.paidReferrals || 0,
+                    totalPaidReferrals: u.totalPaidReferrals || 0
+                }))
+            }));
+            return;
+        }
+
+        // TELEMETRY ACTIONS: POST /api/action
+        if (req.method === 'POST' && pathname === '/api/action') {
+            let chunks = [];
+            req.on('data', chunk => chunks.push(chunk));
+            req.on('end', async () => {
+                try {
+                    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                    const action = body.action;
+
+                    if (action === 'extendUser') {
+                        const targetPhone = normalizeIdentifier(body.phone);
+                        const days = parseInt(body.days, 10) || 30;
+                        const users = loadUsers();
+                        let targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
+                        if (targetUser) {
+                            const now = Date.now();
+                            const base = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
+                            targetUser.expiredAt = base + (days * 24 * 60 * 60 * 1000);
+                            targetUser.status = 'ACTIVE';
+                            targetUser.reminded3Days = false;
+                            if (targetUser.lid) users[targetUser.lid] = targetUser;
+                            if (targetUser.phone) users[targetUser.phone] = targetUser;
+                            saveUsers(users);
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true, message: `+${days} hari ditambah.` }));
+                            return;
+                        }
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: 'Pengguna tidak dijumpai.' }));
+                        return;
+                    }
+
+                    if (action === 'expireUser') {
+                        const targetPhone = normalizeIdentifier(body.phone);
+                        const users = loadUsers();
+                        let targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
+                        if (targetUser) {
+                            targetUser.expiredAt = Date.now() - 1000;
+                            targetUser.status = 'EXPIRED';
+                            if (targetUser.lid) users[targetUser.lid] = targetUser;
+                            if (targetUser.phone) users[targetUser.phone] = targetUser;
+                            saveUsers(users);
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true, message: 'Status keahlian ditamatkan.' }));
+                            return;
+                        }
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: 'Pengguna tidak dijumpai.' }));
+                        return;
+                    }
+
+                    if (action === 'triggerGC') {
+                        if (global.gc) {
+                            global.gc();
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true, message: 'Garbage Collector dilaksanakan.' }));
+                            return;
+                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: false, message: 'Node.js tidak dimulakan dengan --expose-gc.' }));
+                        return;
+                    }
+
+                    if (action === 'setRailwayDate') {
+                        const cfg = loadConfig();
+                        cfg.railwayRenewDate = typeof body.date === 'string' ? body.date.trim() : '';
+                        saveConfig(cfg);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, message: 'Tarikh luput Railway dikemas kini.' }));
+                        return;
+                    }
+
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, message: 'Tindakan tidak sah.' }));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: false, error: e.message }));
+                }
+            });
+            return;
+        }
+
+        // HITPAY WEBHOOK ENDPOINT
         if (req.method === 'POST' && pathname === '/webhook/hitpay') {
             let chunks = [];
             req.on('data', chunk => chunks.push(chunk));
@@ -1293,7 +2657,7 @@ function ensureHttpServer() {
     });
 
     server.listen(PORT, '0.0.0.0', () => {
-        console.log(`[Pelayan Web] Berjalan pada port ${PORT} (0.0.0.0) untuk Health Checks & HitPay Webhook.`);
+        console.log(`[Pelayan Web] Berjalan pada port ${PORT} (0.0.0.0) untuk Health Checks, PWA Monitor & HitPay Webhook.`);
     });
 
     httpServer = server;
