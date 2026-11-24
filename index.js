@@ -32,6 +32,7 @@ const http = require('http');
 const crypto = require('crypto');
 const os = require('os');
 const { pipeline } = require('stream/promises');
+const heicConvert = require('heic-convert');
 
 const BOT_NAME = "Status Clear By Danial";
 const MAX_QUEUE_SIZE = 25;
@@ -3903,9 +3904,34 @@ async function startBot() {
 
             const isDirectImage = !!inner.imageMessage;
             const docMsg = inner.documentMessage || inner.documentWithCaptionMessage?.message?.documentMessage;
-            const docMime = (docMsg?.mimetype || '').toLowerCase();
-            const isDocVideo = docMime.startsWith('video/');
-            const isDocImage = docMime.startsWith('image/');
+            const docMime = (docMsg?.mimetype || '').toLowerCase().split(';')[0].trim();
+            const docFileName = (docMsg?.fileName || '').trim();
+            const docExt = path.extname(docFileName).toLowerCase();
+
+            const VIDEO_EXTS = new Set(['.mp4', '.mov', '.m4v', '.mkv', '.avi', '.webm', '.3gp']);
+            const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif']);
+            const MIME_TO_VIDEO_EXT = {
+                'video/mp4': '.mp4',
+                'video/quicktime': '.mov',
+                'video/x-m4v': '.m4v',
+                'video/x-matroska': '.mkv',
+                'video/x-msvideo': '.avi',
+                'video/avi': '.avi',
+                'video/webm': '.webm',
+                'video/3gpp': '.3gp',
+                'video/3gpp2': '.3gp'
+            };
+
+            const isDocVideo = !!docMsg && (docMime.startsWith('video/') || VIDEO_EXTS.has(docExt));
+            const isHeicDoc = !!docMsg && !isDocVideo && (
+                docExt === '.heic' ||
+                docExt === '.heif' ||
+                docMime === 'image/heic' ||
+                docMime === 'image/heif' ||
+                docMime.startsWith('image/heic') ||
+                docMime.startsWith('image/heif')
+            );
+            const isDocImage = !!docMsg && !isDocVideo && (docMime.startsWith('image/') || IMAGE_EXTS.has(docExt));
 
             if (!isDirectImage && !isDocVideo && !isDocImage) {
                 continue;
@@ -3925,10 +3951,13 @@ async function startBot() {
             // 7. CABANG A: PEMPROSESAN FOTO / IMEJ (Resolusi 2560px HD)
             // ---------------------------------------------------------
             if (isDirectImage || isDocImage) {
+                const isHeicJob = isHeicDoc;
+                const heicExt = docExt === '.heif' ? '.heif' : '.heic';
                 const enqueueResult = videoQueue.enqueue({
                     userId: remoteJid,
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+                        const rawHeicPath = isHeicJob ? path.join(TEMP_DIR, `raw_${fileId}${heicExt}`) : null;
                         const inputPath = path.join(TEMP_DIR, `input_${fileId}.jpg`);
                         const outputPath = path.join(TEMP_DIR, `status_clear_photo_${fileId}.jpg`);
 
@@ -3939,9 +3968,23 @@ async function startBot() {
                                 });
                             } catch {}
 
-                            console.log(`\n[Pemprosesan Imej Bermula] Memuat turun foto dari ${remoteJid}...`);
+                            console.log(`\n[Pemprosesan Imej Bermula] Memuat turun foto${isHeicJob ? ` (${heicExt.toUpperCase()})` : ''} dari ${remoteJid}...`);
                             const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-                            await pipeline(mediaStream, fs.createWriteStream(inputPath));
+                            await pipeline(mediaStream, fs.createWriteStream(isHeicJob ? rawHeicPath : inputPath));
+
+                            if (isHeicJob) {
+                                console.log(`[HEIC/HEIF Convert] Menyahkod ${path.basename(rawHeicPath)} ke JPEG (Q=0.98)...`);
+                                let heicBuffer = await fs.promises.readFile(rawHeicPath);
+                                let jpegBuffer = await heicConvert({
+                                    buffer: heicBuffer,
+                                    format: 'JPEG',
+                                    quality: 0.98
+                                });
+                                await fs.promises.writeFile(inputPath, jpegBuffer);
+                                heicBuffer = null;
+                                jpegBuffer = null;
+                                if (fs.existsSync(rawHeicPath)) { try { fs.unlinkSync(rawHeicPath); } catch {} }
+                            }
 
                             console.log(`[FFmpeg Imej] Meningkatkan foto ke 2560px QHD+ dengan penapis Lanczos & CAS...`);
                             const { sizeBytes, hasCas, usedQ } = await enhanceQhdPhoto(inputPath, outputPath, ffmpegPath);
@@ -3988,6 +4031,7 @@ async function startBot() {
                                 }, { quoted: msg });
                             } catch {}
                         } finally {
+                            if (rawHeicPath && fs.existsSync(rawHeicPath)) { try { fs.unlinkSync(rawHeicPath); } catch {} }
                             if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
                             if (fs.existsSync(outputPath)) { try { fs.unlinkSync(outputPath); } catch {} }
                             if (global.gc) {
@@ -4027,12 +4071,13 @@ async function startBot() {
             if (isDocVideo) {
                 const fileLength = Number(docMsg.fileLength || 0);
                 const sizeMB = (fileLength / (1024 * 1024)).toFixed(1);
+                const videoInputExt = VIDEO_EXTS.has(docExt) ? docExt : (MIME_TO_VIDEO_EXT[docMime] || '.mp4');
 
                 const enqueueResult = videoQueue.enqueue({
                     userId: remoteJid,
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-                        const inputPath = path.join(TEMP_DIR, `input_${fileId}.mp4`);
+                        const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
                         const outputPath = path.join(TEMP_DIR, `status_clear_60fps_${fileId}.mp4`);
 
                         try {
@@ -4042,7 +4087,7 @@ async function startBot() {
                                 });
                             } catch {}
 
-                            console.log(`\n[Pemprosesan Video Bermula] Memuat turun video (${sizeMB} MB) dari ${remoteJid}...`);
+                            console.log(`\n[Pemprosesan Video Bermula] Memuat turun video (${sizeMB} MB, format ${videoInputExt}) dari ${remoteJid}...`);
 
                             const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
                             await pipeline(mediaStream, fs.createWriteStream(inputPath));

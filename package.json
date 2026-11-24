@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "statusclear",
   "version": "1.0.0",
   "description": "Status Clear By Danial - Sistem Pengoptimuman Video Status 60 FPS",
@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.19",
+    "heic-convert": "^2.1.0",
     "pino": "^9.6.0",
     "qrcode-terminal": "^0.12.0"
   },
