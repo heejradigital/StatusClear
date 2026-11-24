@@ -4,7 +4,10 @@
  * 
  * Features:
  * - Direct Automated HitPay Payment Request API (FPX, DuitNow QR, eWallets, Cards)
- * - HMAC-SHA256 Verified Webhook Endpoint (POST /webhook/hitpay)
+ * - Triple-Layer Bulletproof HitPay Engine:
+ *   1. Webhook Endpoint with Auto Railway Public Domain & Nested Payload Handling
+ *   2. Direct Backend API Verification Fallback (Never drops payments even if HMAC misconfigured)
+ *   3. 60-Second Auto-Sync Poller & WhatsApp "syncbayar" Command
  * - Auto WhatsApp Welcome, Confirmation & Step-by-Step Tutorial Delivery
  * - Complete Sponsor Referral Notifications (Redemption, Progress 1-2/3 & Free Month Milestone 3/3)
  * - Reliable JID Routing (user.jid & user.altJid saved on interaction)
@@ -87,7 +90,13 @@ const HITPAY_ENV = (process.env.HITPAY_ENV || 'live').toLowerCase().trim();
 const HITPAY_API_URL = HITPAY_ENV === 'sandbox'
     ? 'https://api.sandbox.hit-pay.com/v1/payment-requests'
     : 'https://api.hit-pay.com/v1/payment-requests';
-const WEBHOOK_PUBLIC_URL = (process.env.WEBHOOK_PUBLIC_URL || '').trim();
+
+// Pengecaman Automatik Domain Railway Public
+const WEBHOOK_PUBLIC_URL = (
+    process.env.WEBHOOK_PUBLIC_URL ||
+    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '') ||
+    (process.env.RAILWAY_STATIC_URL ? `https://${process.env.RAILWAY_STATIC_URL}` : '')
+).trim();
 
 // -------------------------------------------------------------
 // TEMPLAT PAKEJ LANGGANAN RASMI
@@ -845,8 +854,10 @@ async function createHitPayPaymentRequest({ phone, pushName, days, amount }) {
 // -------------------------------------------------------------
 function safeCompareHex(a, b) {
     if (!a || !b) return false;
-    const bufA = Buffer.from(a, 'utf8');
-    const bufB = Buffer.from(b, 'utf8');
+    const cleanA = a.toLowerCase().trim();
+    const cleanB = b.toLowerCase().trim();
+    const bufA = Buffer.from(cleanA, 'utf8');
+    const bufB = Buffer.from(cleanB, 'utf8');
     if (bufA.length !== bufB.length) return false;
     return crypto.timingSafeEqual(bufA, bufB);
 }
@@ -857,9 +868,9 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
         return true;
     }
 
-    const hmacInPayload = parsedBody?.hmac;
+    const hmacInPayload = parsedBody?.hmac || parsedBody?.data?.hmac;
     if (hmacInPayload) {
-        const dataToSign = { ...parsedBody };
+        const dataToSign = { ...(parsedBody?.data || parsedBody) };
         delete dataToSign.hmac;
 
         const sortedKeys = Object.keys(dataToSign).sort();
@@ -875,14 +886,15 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
         }
     }
 
-    const hitpaySignatureHeader = headers['x-hitpay-signature'] || headers['hitpay-signature'];
+    const hitpaySignatureHeader = headers['hitpay-signature'] || headers['x-hitpay-signature'] || headers['Hitpay-Signature'];
     if (hitpaySignatureHeader) {
+        const cleanHeader = hitpaySignatureHeader.replace(/^sha256=/i, '').trim();
         const computedHeaderHmac = crypto
             .createHmac('sha256', HITPAY_SALT)
             .update(rawBuffer)
             .digest('hex');
 
-        if (safeCompareHex(computedHeaderHmac, hitpaySignatureHeader)) {
+        if (safeCompareHex(computedHeaderHmac, cleanHeader)) {
             return true;
         }
     }
@@ -891,209 +903,153 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
 }
 
 // -------------------------------------------------------------
-// PELAYAN WEB RAILWAY & PENGENDALI WEBHOOK HITPAY
+// FUNGSI PUSAT PENGAKTIFAN BAYARAN BERJAYA (WEBHOOK & AUTO-SYNC)
 // -------------------------------------------------------------
-const PORT = process.env.PORT || process.env.WEBHOOK_PORT || 3000;
-let currentSock = null;
-let httpServer = null;
+async function processCompletedPayment({ paymentId, referenceNumber, customerName, paymentType }) {
+    if (!referenceNumber || !referenceNumber.includes('|')) {
+        return { success: false, reason: 'invalid_reference' };
+    }
 
-function ensureHttpServer() {
-    if (httpServer) return httpServer;
+    const processed = loadProcessedPayments();
+    if (paymentId && processed.has(paymentId)) {
+        return { success: false, reason: 'already_processed' };
+    }
 
-    const server = http.createServer(async (req, res) => {
-        const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-        const pathname = parsedUrl.pathname;
+    if (paymentId) recordProcessedPayment(paymentId);
 
-        if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-                status: 'ok',
-                bot: BOT_NAME,
-                uptime: Math.floor(process.uptime()),
-                hitpayConfigured: !!HITPAY_API_KEY,
-                env: HITPAY_ENV
-            }));
-            return;
+    const [rawPhone, rawDays] = referenceNumber.split('|');
+    const targetPhone = normalizeIdentifier(rawPhone);
+    const days = parseInt(rawDays, 10) || 30;
+
+    if (!targetPhone) return { success: false, reason: 'no_target_phone' };
+
+    try {
+        const users = loadUsers();
+        let targetUser = users[targetPhone];
+        if (!targetUser) {
+            for (const u of Object.values(users)) {
+                if (u.phone === targetPhone || u.lid === targetPhone) {
+                    targetUser = u;
+                    break;
+                }
+            }
         }
 
-        if (req.method === 'POST' && pathname === '/webhook/hitpay') {
-            let chunks = [];
-            req.on('data', chunk => chunks.push(chunk));
-            req.on('end', async () => {
-                const rawBuffer = Buffer.concat(chunks);
-                const rawBody = rawBuffer.toString('utf8');
-                let parsedBody = {};
+        const finalName = customerName || targetUser?.name || 'Ahli';
 
-                const contentType = (req.headers['content-type'] || '').toLowerCase();
-                if (contentType.includes('application/json')) {
-                    try { parsedBody = JSON.parse(rawBody); } catch {}
-                } else {
-                    try {
-                        const params = new URLSearchParams(rawBody);
-                        for (const [key, value] of params.entries()) {
-                            parsedBody[key] = value;
-                        }
-                    } catch {}
+        if (!targetUser) {
+            targetUser = {
+                phone: targetPhone,
+                name: finalName,
+                status: 'ACTIVE',
+                expiredAt: Date.now() + days * 24 * 60 * 60 * 1000,
+                refCode: generateReferralCode(finalName, users),
+                referredBy: null,
+                paidReferrals: 0,
+                totalPaidReferrals: 0,
+                refSentToExisting: true,
+                reminded3Days: false,
+                jid: null,
+                altJid: null
+            };
+            users[targetPhone] = targetUser;
+        } else {
+            if (finalName && (!targetUser.name || targetUser.name === 'Ahli' || targetUser.name === 'Pengguna')) {
+                targetUser.name = finalName;
+            }
+            const now = Date.now();
+            const baseTime = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
+            targetUser.expiredAt = baseTime + days * 24 * 60 * 60 * 1000;
+            targetUser.status = 'ACTIVE';
+            targetUser.reminded3Days = false;
+            targetUser.refSentToExisting = true;
+            if (!targetUser.refCode) {
+                targetUser.refCode = generateReferralCode(targetUser.name, users);
+            }
+        }
+
+        if (currentSock) {
+            try {
+                const checkJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                const [waUser] = await currentSock.onWhatsApp(checkJid);
+                if (waUser && waUser.lid) {
+                    const cleanLid = normalizeIdentifier(waUser.lid);
+                    targetUser.lid = cleanLid;
+                    users[cleanLid] = targetUser;
                 }
+            } catch {}
+        }
 
-                const paymentId = parsedBody.payment_id || parsedBody.id || parsedBody.reference_number;
-                const status = (parsedBody.status || '').toLowerCase();
-                const referenceNumber = parsedBody.reference_number || '';
+        let referralRewardMsg = '';
+        if (targetUser.referredBy && !targetUser.referralCredited) {
+            targetUser.referralCredited = true;
+            const referrer = users[targetUser.referredBy] || Object.values(users).find(u => u.phone === targetUser.referredBy);
+            if (referrer) {
+                referrer.paidReferrals = (referrer.paidReferrals || 0) + 1;
+                referrer.totalPaidReferrals = (referrer.totalPaidReferrals || 0) + 1;
+                referralRewardMsg = `\n• Penaja: ${referrer.name} (${referrer.phone}) [+1 Tajaan, Baki: ${referrer.paidReferrals}/3]`;
 
-                console.log(`[HitPay Webhook] Menerima event: payment_id=${paymentId}, status=${status}, ref=${referenceNumber}`);
+                const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
+                const friendDisplayName = targetUser.name || finalName || targetPhone;
 
-                const isSignatureValid = verifyHitPaySignature(rawBuffer, req.headers, parsedBody);
-                if (!isSignatureValid) {
-                    console.error('[HitPay Webhook] Ralat Keselamatan: Tandatangan HMAC tidak sah!');
-                    res.writeHead(401, { 'Content-Type': 'text/plain' });
-                    res.end('Invalid signature');
-                    return;
-                }
+                if (referrer.paidReferrals >= 3) {
+                    referrer.paidReferrals -= 3;
+                    const refNow = Date.now();
+                    const refBase = (referrer.expiredAt && referrer.expiredAt > refNow) ? referrer.expiredAt : refNow;
+                    referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
+                    referrer.status = 'ACTIVE';
 
-                const processed = loadProcessedPayments();
-                if (paymentId && processed.has(paymentId)) {
-                    console.log(`[HitPay Webhook] Idempotensi: Transaksi ${paymentId} sudah diproses.`);
-                    res.writeHead(200, { 'Content-Type': 'text/plain' });
-                    res.end('Already processed');
-                    return;
-                }
+                    const newExpiryStr = new Date(referrer.expiredAt).toLocaleDateString('ms-MY', {
+                        day: '2-digit', month: '2-digit', year: 'numeric'
+                    });
 
-                if (status === 'completed') {
-                    console.log(`[HitPay Webhook] Bayaran ${paymentId} disahkan berjaya! Mengaktifkan akaun: ${referenceNumber}...`);
-                    if (paymentId) recordProcessedPayment(paymentId);
-
-                    const [rawPhone, rawDays] = referenceNumber.split('|');
-                    const targetPhone = normalizeIdentifier(rawPhone);
-                    const days = parseInt(rawDays, 10) || 30;
-
-                    if (targetPhone) {
+                    if (currentSock) {
                         try {
-                            const users = loadUsers();
-                            let targetUser = users[targetPhone];
-                            if (!targetUser) {
-                                for (const u of Object.values(users)) {
-                                    if (u.phone === targetPhone || u.lid === targetPhone) {
-                                        targetUser = u;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            const customerName = parsedBody.name || targetUser?.name || 'Ahli';
-
-                            if (!targetUser) {
-                                targetUser = {
-                                    phone: targetPhone,
-                                    name: customerName,
-                                    status: 'ACTIVE',
-                                    expiredAt: Date.now() + days * 24 * 60 * 60 * 1000,
-                                    refCode: generateReferralCode(customerName, users),
-                                    referredBy: null,
-                                    paidReferrals: 0,
-                                    totalPaidReferrals: 0,
-                                    refSentToExisting: true,
-                                    reminded3Days: false,
-                                    jid: null,
-                                    altJid: null
-                                };
-                                users[targetPhone] = targetUser;
-                            } else {
-                                if (customerName && (!targetUser.name || targetUser.name === 'Ahli' || targetUser.name === 'Pengguna')) {
-                                    targetUser.name = customerName;
-                                }
-                                const now = Date.now();
-                                const baseTime = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
-                                targetUser.expiredAt = baseTime + days * 24 * 60 * 60 * 1000;
-                                targetUser.status = 'ACTIVE';
-                                targetUser.reminded3Days = false;
-                                targetUser.refSentToExisting = true;
-                                if (!targetUser.refCode) {
-                                    targetUser.refCode = generateReferralCode(targetUser.name, users);
-                                }
-                            }
-
-                            if (currentSock) {
-                                try {
-                                    const checkJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
-                                    const [waUser] = await currentSock.onWhatsApp(checkJid);
-                                    if (waUser && waUser.lid) {
-                                        const cleanLid = normalizeIdentifier(waUser.lid);
-                                        targetUser.lid = cleanLid;
-                                        users[cleanLid] = targetUser;
-                                    }
-                                } catch {}
-                            }
-
-                            let referralRewardMsg = '';
-                            if (targetUser.referredBy && !targetUser.referralCredited) {
-                                targetUser.referralCredited = true;
-                                const referrer = users[targetUser.referredBy] || Object.values(users).find(u => u.phone === targetUser.referredBy);
-                                if (referrer) {
-                                    referrer.paidReferrals = (referrer.paidReferrals || 0) + 1;
-                                    referrer.totalPaidReferrals = (referrer.totalPaidReferrals || 0) + 1;
-                                    referralRewardMsg = `\n• Penaja: ${referrer.name} (${referrer.phone}) [+1 Tajaan, Baki: ${referrer.paidReferrals}/3]`;
-
-                                    const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
-                                    const friendDisplayName = targetUser.name || customerName || targetPhone;
-
-                                    if (referrer.paidReferrals >= 3) {
-                                        referrer.paidReferrals -= 3;
-                                        const refNow = Date.now();
-                                        const refBase = (referrer.expiredAt && referrer.expiredAt > refNow) ? referrer.expiredAt : refNow;
-                                        referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
-                                        referrer.status = 'ACTIVE';
-
-                                        const newExpiryStr = new Date(referrer.expiredAt).toLocaleDateString('ms-MY', {
-                                            day: '2-digit', month: '2-digit', year: 'numeric'
-                                        });
-
-                                        if (currentSock) {
-                                            try {
-                                                await currentSock.sendMessage(refJid, {
-                                                    text:
-                                                        `🎉 *TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!*\n\n` +
-                                                        `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah melengkapkan *3/3 tajaan* menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
-                                                        `🎁 *Ganjaran Diterima:*\n` +
-                                                        `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n\n` +
-                                                        `⏳ *Tarikh Luput Baharu:* *${newExpiryStr}*\n\n` +
-                                                        `Teruskan berkongsi kod anda untuk mendapatkan lebih banyak ganjaran percuma! 🚀`
-                                                });
-                                                console.log(`[REFERRAL BONUS] Berjaya hantar notifikasi +30 hari ke ${refJid}`);
-                                            } catch (refErr) {
-                                                console.error(`[REFERRAL BONUS] Gagal hantar notifikasi bonus ke ${refJid}:`, refErr.message);
-                                            }
-                                        }
-                                        referralRewardMsg += ` ➔ BONUS +30 HARI TELAH DIBERIKAN!`;
-                                    } else {
-                                        const remaining = 3 - referrer.paidReferrals;
-                                        if (currentSock) {
-                                            try {
-                                                await currentSock.sendMessage(refJid, {
-                                                    text:
-                                                        `🎉 *TAJAAN BERJAYA (+1 RAKAN)!*\n\n` +
-                                                        `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah berjaya melanggan menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
-                                                        `📊 *Kemajuan Ganjaran:* *${referrer.paidReferrals}/3 Rakan*\n` +
-                                                        `💡 Ajak lagi *${remaining} rakan* sahaja lagi untuk menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik! 🚀`
-                                                });
-                                                console.log(`[REFERRAL PROGRESS] Berjaya hantar notifikasi kemajuan (${referrer.paidReferrals}/3) ke ${refJid}`);
-                                            } catch (refErr) {
-                                                console.error(`[REFERRAL PROGRESS] Gagal hantar notifikasi kemajuan ke ${refJid}:`, refErr.message);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            saveUsers(users);
-
-                            const formattedExpiryDate = new Date(targetUser.expiredAt).toLocaleDateString('ms-MY', {
-                                day: '2-digit', month: '2-digit', year: 'numeric'
+                            await currentSock.sendMessage(refJid, {
+                                text:
+                                    `🎉 *TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!*\n\n` +
+                                    `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah melengkapkan *3/3 tajaan* menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
+                                    `🎁 *Ganjaran Diterima:*\n` +
+                                    `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n\n` +
+                                    `⏳ *Tarikh Luput Baharu:* *${newExpiryStr}*\n\n` +
+                                    `Teruskan berkongsi kod anda untuk mendapatkan lebih banyak ganjaran percuma! 🚀`
                             });
+                            console.log(`[REFERRAL BONUS] Berjaya hantar notifikasi +30 hari ke ${refJid}`);
+                        } catch (refErr) {
+                            console.error(`[REFERRAL BONUS] Gagal hantar notifikasi bonus ke ${refJid}:`, refErr.message);
+                        }
+                    }
+                    referralRewardMsg += ` ➔ BONUS +30 HARI TELAH DIBERIKAN!`;
+                } else {
+                    const remaining = 3 - referrer.paidReferrals;
+                    if (currentSock) {
+                        try {
+                            await currentSock.sendMessage(refJid, {
+                                text:
+                                    `🎉 *TAJAAN BERJAYA (+1 RAKAN)!*\n\n` +
+                                    `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah berjaya melanggan menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
+                                    `📊 *Kemajuan Ganjaran:* *${referrer.paidReferrals}/3 Rakan*\n` +
+                                    `💡 Ajak lagi *${remaining} rakan* sahaja lagi untuk menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik! 🚀`
+                            });
+                            console.log(`[REFERRAL PROGRESS] Berjaya hantar notifikasi kemajuan (${referrer.paidReferrals}/3) ke ${refJid}`);
+                        } catch (refErr) {
+                            console.error(`[REFERRAL PROGRESS] Gagal hantar notifikasi kemajuan ke ${refJid}:`, refErr.message);
+                        }
+                    }
+                }
+            }
+        }
 
-                            // Resolusi Sasaran JID WhatsApp yang Kebal (user.jid || user.altJid || phone@s.whatsapp.net)
-                            const targetJid = targetUser.jid || targetUser.altJid || `${targetPhone}@s.whatsapp.net`;
+        saveUsers(users);
 
-                            const welcomeTutorialMessage = 
+        const formattedExpiryDate = new Date(targetUser.expiredAt).toLocaleDateString('ms-MY', {
+            day: '2-digit', month: '2-digit', year: 'numeric'
+        });
+
+        // Resolusi Sasaran JID WhatsApp yang Kebal
+        const targetJid = targetUser.jid || targetUser.altJid || `${targetPhone}@s.whatsapp.net`;
+
+        const welcomeTutorialMessage = 
 `✅ *PEMBAYARAN BERJAYA & AKAUN AKTIF!*
 
 Selamat datang ke *StatusClear HD*! Langganan anda kini sudah aktif dan sedia digunakan sepenuhnya.
@@ -1118,43 +1074,212 @@ Kongsikan kod ini kepada rakan anda! Setiap *3 rakan* yang melanggan menggunakan
 
 _Sila hantar video atau gambar pertama anda sebagai Document sekarang untuk mula!_ 🚀`;
 
-                            if (currentSock) {
-                                try {
-                                    await currentSock.sendMessage(targetJid, { text: welcomeTutorialMessage });
-                                    console.log(`[HITPAY -> WA] Sent welcome & tutorial to ${targetJid}`);
-                                } catch (waErr) {
-                                    console.error(`[HITPAY -> WA] Ralat penghantaran ke ${targetJid}:`, waErr.message);
-                                    if (targetJid !== `${targetPhone}@s.whatsapp.net`) {
-                                        try {
-                                            await currentSock.sendMessage(`${targetPhone}@s.whatsapp.net`, { text: welcomeTutorialMessage });
-                                            console.log(`[HITPAY -> WA] Sent welcome & tutorial fallback to ${targetPhone}@s.whatsapp.net`);
-                                        } catch (fallbackErr) {
-                                            console.error(`[HITPAY -> WA] Fallback juga gagal ke ${targetPhone}@s.whatsapp.net:`, fallbackErr.message);
-                                        }
-                                    }
-                                }
-
-                                const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
-                                try {
-                                    await currentSock.sendMessage(adminJid, {
-                                        text:
-                                            `💰 *NOTIFIKASI JUALAN HITPAY (AUTOMATIK)*\n\n` +
-                                            `• Pelanggan: *${targetUser.name}* (${targetPhone})\n` +
-                                            `• Sasaran JID: ${targetJid}\n` +
-                                            `• Pakej: +${days} Hari (ID: ${paymentId})\n` +
-                                            `• Kaedah: ${parsedBody.payment_type || 'HitPay Online Gateway'}\n` +
-                                            `• Tarikh Luput: ${formattedExpiryDate}\n` +
-                                            `• Kod Referral: *${targetUser.refCode}*${referralRewardMsg}`
-                                    });
-                                } catch (adminErr) {
-                                    console.error('[HITPAY -> ADMIN] Gagal hantar notifikasi ke admin:', adminErr.message);
-                                }
-                            }
-
-                        } catch (dbErr) {
-                            console.error('[HitPay Webhook] Ralat pengaktifan pangkalan data:', dbErr);
-                        }
+        if (currentSock) {
+            try {
+                await currentSock.sendMessage(targetJid, { text: welcomeTutorialMessage });
+                console.log(`[HITPAY -> WA] Sent welcome & tutorial to ${targetJid}`);
+            } catch (waErr) {
+                console.error(`[HITPAY -> WA] Ralat penghantaran ke ${targetJid}:`, waErr.message);
+                if (targetJid !== `${targetPhone}@s.whatsapp.net`) {
+                    try {
+                        await currentSock.sendMessage(`${targetPhone}@s.whatsapp.net`, { text: welcomeTutorialMessage });
+                        console.log(`[HITPAY -> WA] Sent welcome & tutorial fallback to ${targetPhone}@s.whatsapp.net`);
+                    } catch (fallbackErr) {
+                        console.error(`[HITPAY -> WA] Fallback juga gagal:`, fallbackErr.message);
                     }
+                }
+            }
+
+            const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
+            try {
+                await currentSock.sendMessage(adminJid, {
+                    text:
+                        `💰 *NOTIFIKASI JUALAN HITPAY (AUTOMATIK)*\n\n` +
+                        `• Pelanggan: *${targetUser.name}* (${targetPhone})\n` +
+                        `• Sasaran JID: ${targetJid}\n` +
+                        `• Pakej: +${days} Hari (ID: ${paymentId || '-'})\n` +
+                        `• Kaedah: ${paymentType || 'HitPay Online Gateway'}\n` +
+                        `• Tarikh Luput: ${formattedExpiryDate}\n` +
+                        `• Kod Referral: *${targetUser.refCode}*${referralRewardMsg}`
+                });
+            } catch (adminErr) {
+                console.error('[HITPAY -> ADMIN] Gagal hantar notifikasi ke admin:', adminErr.message);
+            }
+        }
+
+        return { success: true, user: targetUser, days, formattedExpiryDate };
+    } catch (err) {
+        console.error('[processCompletedPayment] Ralat pemprosesan:', err);
+        return { success: false, error: err.message };
+    }
+}
+
+// -------------------------------------------------------------
+// SISTEM PENYELARASAN AUTO-SYNC TRANSAKSI HITPAY DARI API
+// -------------------------------------------------------------
+async function syncHitPayPayments() {
+    if (!HITPAY_API_KEY) return { checked: 0, activated: 0 };
+    try {
+        console.log('[HitPay Auto-Sync] Menyemak transaksi completed di pelayan HitPay...');
+        const response = await fetch(`${HITPAY_API_URL}?per_page=15`, {
+            method: 'GET',
+            headers: {
+                'X-BUSINESS-API-KEY': HITPAY_API_KEY,
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        });
+
+        if (!response.ok) {
+            console.error(`[HitPay Auto-Sync] Ralat status API: ${response.status}`);
+            return { checked: 0, activated: 0 };
+        }
+
+        const resData = await response.json();
+        const items = Array.isArray(resData) ? resData : (resData.data || []);
+        let activatedCount = 0;
+        let activatedList = [];
+
+        for (const item of items) {
+            const status = (item.status || '').toLowerCase();
+            const paymentId = item.id || item.payment_id;
+            const ref = item.reference_number || '';
+
+            if (status === 'completed' && ref && ref.includes('|')) {
+                const processed = loadProcessedPayments();
+                if (!processed.has(paymentId)) {
+                    console.log(`[HitPay Auto-Sync] Menemui pembayaran berjaya tertunggak: ${paymentId} (${ref})`);
+                    const result = await processCompletedPayment({
+                        paymentId,
+                        referenceNumber: ref,
+                        customerName: item.name || '',
+                        paymentType: (item.payment_methods && item.payment_methods[0]) || 'HitPay Gateway'
+                    });
+                    if (result.success) {
+                        activatedCount++;
+                        activatedList.push(`${result.user.name} (${result.user.phone}) +${result.days}H`);
+                    }
+                }
+            }
+        }
+
+        if (activatedCount > 0) {
+            console.log(`[HitPay Auto-Sync Selesai] Berjaya mengaktifkan ${activatedCount} bayaran.`);
+        }
+        return { checked: items.length, activated: activatedCount, list: activatedList };
+    } catch (err) {
+        console.error('[HitPay Auto-Sync Error]:', err.message);
+        return { checked: 0, activated: 0, error: err.message };
+    }
+}
+
+// -------------------------------------------------------------
+// PELAYAN WEB RAILWAY & PENGENDALI WEBHOOK HITPAY
+// -------------------------------------------------------------
+const PORT = process.env.PORT || process.env.WEBHOOK_PORT || 3000;
+let currentSock = null;
+let httpServer = null;
+
+function ensureHttpServer() {
+    if (httpServer) return httpServer;
+
+    const server = http.createServer(async (req, res) => {
+        const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+        const pathname = parsedUrl.pathname;
+
+        if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                status: 'ok',
+                bot: BOT_NAME,
+                uptime: Math.floor(process.uptime()),
+                hitpayConfigured: !!HITPAY_API_KEY,
+                env: HITPAY_ENV,
+                webhookUrl: WEBHOOK_PUBLIC_URL
+            }));
+            return;
+        }
+
+        if (req.method === 'POST' && pathname === '/webhook/hitpay') {
+            let chunks = [];
+            req.on('data', chunk => chunks.push(chunk));
+            req.on('end', async () => {
+                const rawBuffer = Buffer.concat(chunks);
+                const rawBody = rawBuffer.toString('utf8');
+                let parsedBody = {};
+
+                const contentType = (req.headers['content-type'] || '').toLowerCase();
+                if (contentType.includes('application/json')) {
+                    try { parsedBody = JSON.parse(rawBody); } catch {}
+                } else {
+                    try {
+                        const params = new URLSearchParams(rawBody);
+                        for (const [key, value] of params.entries()) {
+                            parsedBody[key] = value;
+                        }
+                    } catch {}
+                }
+
+                const data = parsedBody.data || parsedBody;
+                let paymentId = data.payment_id || data.id || parsedBody.payment_id || parsedBody.id;
+                let status = (data.status || parsedBody.status || '').toLowerCase();
+                let referenceNumber = data.reference_number || parsedBody.reference_number || '';
+                const paymentRequestId = data.payment_request_id || parsedBody.payment_request_id || paymentId;
+
+                console.log(`[HitPay Webhook] Menerima event: payment_id=${paymentId}, status=${status}, ref=${referenceNumber}, reqId=${paymentRequestId}`);
+
+                let isVerified = verifyHitPaySignature(rawBuffer, req.headers, parsedBody);
+
+                // Fallback Keselamatan: Semak terus ke HitPay API jika HMAC ragu-ragu
+                if (!isVerified && paymentRequestId && HITPAY_API_KEY) {
+                    try {
+                        console.log(`[HitPay Webhook Fallback] Mengesahkan status terus dengan pelayan HitPay API...`);
+                        const verifyRes = await fetch(`${HITPAY_API_URL}/${paymentRequestId}`, {
+                            method: 'GET',
+                            headers: {
+                                'X-BUSINESS-API-KEY': HITPAY_API_KEY,
+                                'Accept': 'application/json',
+                                'X-Requested-With': 'XMLHttpRequest'
+                            }
+                        });
+                        if (verifyRes.ok) {
+                            const verifyJson = await verifyRes.json();
+                            if ((verifyJson.status || '').toLowerCase() === 'completed') {
+                                isVerified = true;
+                                status = 'completed';
+                                if (!referenceNumber) referenceNumber = verifyJson.reference_number || '';
+                                if (!paymentId) paymentId = verifyJson.id || paymentRequestId;
+                                console.log(`[HitPay Webhook Fallback] Transaksi disahkan SAH oleh HitPay API!`);
+                            }
+                        }
+                    } catch (verifyErr) {
+                        console.error('[HitPay Webhook Fallback Error]:', verifyErr.message);
+                    }
+                }
+
+                if (!isVerified) {
+                    console.error('[HitPay Webhook] Tandatangan HMAC tidak sah dan semakan API gagal.');
+                    res.writeHead(401, { 'Content-Type': 'text/plain' });
+                    res.end('Invalid signature');
+                    return;
+                }
+
+                const processed = loadProcessedPayments();
+                if (paymentId && processed.has(paymentId)) {
+                    console.log(`[HitPay Webhook] Idempotensi: Transaksi ${paymentId} sudah diproses.`);
+                    res.writeHead(200, { 'Content-Type': 'text/plain' });
+                    res.end('Already processed');
+                    return;
+                }
+
+                if (status === 'completed' || status === 'succeeded' || (parsedBody.event_type && parsedBody.event_type.endsWith('.completed'))) {
+                    console.log(`[HitPay Webhook] Bayaran ${paymentId} berjaya disahkan! Memulakan pengaktifan...`);
+                    await processCompletedPayment({
+                        paymentId,
+                        referenceNumber,
+                        customerName: data.name || parsedBody.name || '',
+                        paymentType: data.payment_type || parsedBody.payment_type || (data.payment_methods && data.payment_methods[0]) || 'HitPay Online Gateway'
+                    });
                 }
 
                 res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -1203,6 +1328,12 @@ async function startBot() {
 
     currentSock = sock;
     ensureHttpServer();
+
+    // Auto-Sync Watchdog: Periksa bayaran HitPay secara berkala
+    if (HITPAY_API_KEY) {
+        setTimeout(() => syncHitPayPayments(), 8000);
+        setInterval(() => syncHitPayPayments(), 60000);
+    }
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -1368,8 +1499,34 @@ async function startBot() {
             // ---------------------------------------------------------
             // 1. PENGENDALIAN ARAHAN PENTADBIR
             // ---------------------------------------------------------
-            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu', 'help', 'sync', 'selaras', 'fixsession', 'sesi', 'ram', 'memori'].includes(cmd))) {
+            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu', 'help', 'sync', 'selaras', 'fixsession', 'sesi', 'ram', 'memori', 'syncbayar', 'cekbayar', 'checkhitpay'].includes(cmd))) {
                 console.log(`[Arahan Pentadbir] ${remoteJid}: "${textContent}"`);
+
+                if (['syncbayar', 'cekbayar', 'checkhitpay'].includes(cmd)) {
+                    await sock.sendMessage(remoteJid, {
+                        text: `🔄 *MEMULAKAN SEMAKAN HITPAY...*\n\nSedang menyemak transaksi pembayaran terkini di pelayan HitPay...`
+                    }, { quoted: msg });
+
+                    const syncRes = await syncHitPayPayments();
+                    if (syncRes.activated > 0) {
+                        await sock.sendMessage(remoteJid, {
+                            text:
+                                `✅ *SEMAKAN HITPAY BERJAYA!*\n\n` +
+                                `Sebanyak *${syncRes.activated} pembayaran* tertunggak telah berjaya diaktifkan:\n` +
+                                `• ${syncRes.list.join('\n• ')}\n\n` +
+                                `Mesej aluan, tarikh luput & tutorial telah dihantar terus ke WhatsApp pelanggan! 🚀`
+                        }, { quoted: msg });
+                    } else if (syncRes.error) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `❌ *Ralat Semakan HitPay:*\n${syncRes.error}\n\nSila pastikan HITPAY_API_KEY telah dimasukkan di Railway Variables.`
+                        }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(remoteJid, {
+                            text: `ℹ️ *Semakan Selesai:* ${syncRes.checked} transaksi disemak di HitPay. Tiada bayaran tertunggak baharu ditemui.`
+                        }, { quoted: msg });
+                    }
+                    continue;
+                }
 
                 if (['tunggu', 'waiting'].includes(cmd)) {
                     const waitingList = Object.values(users).filter(u => u.status === 'WAITING');
@@ -1792,28 +1949,30 @@ async function startBot() {
                     await sock.sendMessage(remoteJid, {
                         text:
                             `📋 *PANDUAN PERINTAH PENTADBIR (${BOT_NAME})*\n\n` +
-                            `1. *tunggu*\n` +
+                            `1. *syncbayar* (atau */cekbayar*)\n` +
+                            `   └ Semak dan aktifkan bayaran HitPay tertunggak secara manual dari API.\n\n` +
+                            `2. *tunggu*\n` +
                             `   └ Lihat senarai pengguna yang belum bayar / hantar resit.\n\n` +
-                            `2. *tambah <nombor> <hari> [nama]* (atau */add*)\n` +
+                            `3. *tambah <nombor> <hari> [nama]* (atau */add*)\n` +
                             `   └ Aktifkan ahli baharu atau sambung tempoh.\n` +
                             `   Contoh: tambah 01113270914 30 Fieya\n\n` +
-                            `3. *kod <nombor> <nama_khas>* (atau */setref*)\n` +
+                            `4. *kod <nombor> <nama_khas>* (atau */setref*)\n` +
                             `   └ Tukar kod referral ahli.\n` +
                             `   Contoh: kod 01113270914 FIEYA\n\n` +
-                            `4. *hebah* (atau */broadcastref*)\n` +
+                            `5. *hebah* (atau */broadcastref*)\n` +
                             `   └ Hantar kod referral ke semua ahli aktif secara automatik.\n\n` +
-                            `5. *semak <nombor>* (atau */check*)\n` +
+                            `6. *semak <nombor>* (atau */check*)\n` +
                             `   └ Semak baki hari dan status referral ahli.\n` +
                             `   Contoh: semak 01113270914\n\n` +
-                            `6. *padam <nombor>*\n` +
+                            `7. *padam <nombor>*\n` +
                             `   └ Batalkan keahlian pengguna.\n\n` +
-                            `7. *senarai*\n` +
+                            `8. *senarai*\n` +
                             `   └ Paparkan semua ahli aktif dan tarikh luput.\n\n` +
-                            `8. *selaras*\n` +
+                            `9. *selaras*\n` +
                             `   └ Segerakkan identiti LID WhatsApp ahli aktif.\n\n` +
-                            `9. *fixsession [nombor]*\n` +
+                            `10. *fixsession [nombor]*\n` +
                             `   └ Pulihkan sesi enkripsi Signal WhatsApp.\n\n` +
-                            `10. *ram*\n` +
+                            `11. *ram*\n` +
                             `   └ Semak status memori pelayan & antrian.`
                     }, { quoted: msg });
                     continue;
