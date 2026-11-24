@@ -6,6 +6,7 @@
  * - Direct Automated HitPay Payment Request API (FPX, DuitNow QR, eWallets, Cards)
  * - HMAC-SHA256 Verified Webhook Endpoint (POST /webhook/hitpay)
  * - Auto WhatsApp Welcome, Confirmation & Step-by-Step Tutorial Delivery
+ * - Complete Sponsor Referral Notifications (Redemption, Progress 1-2/3 & Free Month Milestone 3/3)
  * - Reliable JID Routing (user.jid & user.altJid saved on interaction)
  * - Railway Ready (process.env.PORT, persistent Volumes, native Linux FFmpeg)
  * - 60 FPS Native Video Encoding (15.2MB Bitrate Passthrough & CAS Sharpening)
@@ -698,8 +699,8 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, tar
             '-b:a', '96k',
             '-ar', '44100',
             '-ac', '2',
-            '-movflags', '+faststart',
             '-threads', '2',
+            '-movflags', '+faststart',
             outputPath
         );
 
@@ -709,35 +710,30 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, tar
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
         proc.on('close', (code) => {
-            if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 1024) {
+            if (code === 0 && fs.existsSync(outputPath)) {
                 resolve();
             } else {
-                reject(new Error(`FFmpeg video gagal dengan kod ${code}. Log: ${stderr.slice(-500)}`));
+                reject(new Error(`FFmpeg ralat (kod ${code}): ${stderr.slice(-400)}`));
             }
         });
 
-        proc.on('error', (err) => reject(err));
+        proc.on('error', reject);
     });
 }
 
-async function processUltraSharpImage(inputPath, outputPath, binPath) {
+async function enhanceQhdPhoto(inputPath, outputPath, binPath) {
     const hasCas = checkCasSupport(binPath);
-    const sharpFilter = hasCas ? 'cas=strength=0.45' : 'unsharp=5:5:0.45:5:5:0.0';
-    const scaleFilter = "scale='if(gt(iw,ih),min(2560,iw),-2)':'if(gt(iw,ih),-2,min(2560,ih))':flags=lanczos";
+    const sharpFilter = hasCas ? 'cas=strength=0.35' : 'unsharp=5:5:0.35:5:5:0.0';
+    const scaleFilter = "scale='if(gt(iw,ih),-2,min(ih,2560))':'if(gt(iw,ih),min(iw,2560),-2)':flags=lanczos";
     const vfChain = `${scaleFilter},${sharpFilter}`;
 
-    const runEncode = (qScale) => {
+    const runEncode = async (qValue) => {
         return new Promise((resolve, reject) => {
             const args = [
                 '-y',
                 '-i', inputPath,
                 '-vf', vfChain,
-                '-map_metadata', '-1',
-                '-pix_fmt', 'yuvj420p',
-                '-colorspace', 'bt709',
-                '-color_primaries', 'bt709',
-                '-color_trc', 'bt709',
-                '-q:v', `${qScale}`,
+                '-q:v', `${qValue}`,
                 outputPath
             ];
 
@@ -790,49 +786,58 @@ function unwrapMessage(msg) {
 }
 
 // -------------------------------------------------------------
-// PANGGILAN HITPAY PAYMENT REQUEST API (TERUS TANPA QR STATIK)
+// PANGGILAN HITPAY PAYMENT REQUEST API (ASLI FETCH)
 // -------------------------------------------------------------
 async function createHitPayPaymentRequest({ phone, pushName, days, amount }) {
-    const apiKey = (process.env.HITPAY_API_KEY || '').trim();
-    if (!apiKey) {
-        throw new Error('HITPAY_API_KEY tidak dikonfigurasikan dalam Environment Variables');
+    if (!HITPAY_API_KEY) {
+        throw new Error('HITPAY_API_KEY belum dikonfigurasikan di persekitaran (Environment Variables).');
     }
-
-    const hitpayUrl = (process.env.HITPAY_ENV || '').toLowerCase() === 'sandbox'
-        ? 'https://api.sandbox.hit-pay.com/v1/payment-requests'
-        : 'https://api.hit-pay.com/v1/payment-requests';
 
     console.log(`[HITPAY] Creating payment request for ${phone} (${days} days)...`);
 
-    const bodyData = {
-        amount: amount,
+    const cleanAmount = parseFloat(amount).toFixed(2);
+    const payload = {
+        amount: cleanAmount,
         currency: 'MYR',
-        name: pushName || phone,
+        name: (pushName || phone || 'Ahli StatusClear').slice(0, 50),
         purpose: `StatusClear (${days} Hari)`,
         reference_number: `${phone}|${days}`,
-        webhook: (process.env.WEBHOOK_PUBLIC_URL || '').trim()
+        redirect_url: 'https://wa.me/' + (process.env.PAIRING_NUMBER || ADMIN_NUMBER),
+        send_email: false,
+        send_sms: false
     };
 
-    const res = await fetch(hitpayUrl, {
-        method: 'POST',
-        headers: {
-            'X-BUSINESS-API-KEY': apiKey,
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest'
-        },
-        body: JSON.stringify(bodyData)
-    });
-
-    console.log(`[HITPAY] Response status: ${res.status} ${res.statusText}`);
-
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data || !data.url) {
-        const errMsg = data?.message || (data ? JSON.stringify(data) : 'Tiada respon sah');
-        console.error(`[HITPAY] Gagal menjana pautan HitPay (${res.status}):`, errMsg);
-        throw new Error(`HitPay API Error (${res.status}): ${errMsg}`);
+    if (WEBHOOK_PUBLIC_URL) {
+        payload.webhook = `${WEBHOOK_PUBLIC_URL.replace(/\/+$/, '')}/webhook/hitpay`;
     }
 
-    return data;
+    const response = await fetch(HITPAY_API_URL, {
+        method: 'POST',
+        headers: {
+            'X-BUSINESS-API-KEY': HITPAY_API_KEY,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: JSON.stringify(payload)
+    });
+
+    console.log(`[HITPAY] Response status: ${response.status} ${response.statusText}`);
+
+    const resText = await response.text();
+    let resJson = {};
+    try {
+        resJson = JSON.parse(resText);
+    } catch {
+        throw new Error(`HitPay API Ralat (${response.status}): ${resText.slice(0, 200)}`);
+    }
+
+    if (!response.ok) {
+        const errMsg = resJson.message || resJson.error || JSON.stringify(resJson);
+        throw new Error(`HitPay Gateway Ralat (${response.status}): ${errMsg}`);
+    }
+
+    return resJson;
 }
 
 // -------------------------------------------------------------
@@ -870,14 +875,14 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
         }
     }
 
-    const headerSig = headers['hitpay-signature'] || headers['x-signature'];
-    if (headerSig) {
+    const hitpaySignatureHeader = headers['x-hitpay-signature'] || headers['hitpay-signature'];
+    if (hitpaySignatureHeader) {
         const computedHeaderHmac = crypto
             .createHmac('sha256', HITPAY_SALT)
             .update(rawBuffer)
             .digest('hex');
 
-        if (safeCompareHex(computedHeaderHmac, headerSig)) {
+        if (safeCompareHex(computedHeaderHmac, hitpaySignatureHeader)) {
             return true;
         }
     }
@@ -1028,6 +1033,9 @@ function ensureHttpServer() {
                                     referrer.totalPaidReferrals = (referrer.totalPaidReferrals || 0) + 1;
                                     referralRewardMsg = `\n• Penaja: ${referrer.name} (${referrer.phone}) [+1 Tajaan, Baki: ${referrer.paidReferrals}/3]`;
 
+                                    const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
+                                    const friendDisplayName = targetUser.name || customerName || targetPhone;
+
                                     if (referrer.paidReferrals >= 3) {
                                         referrer.paidReferrals -= 3;
                                         const refNow = Date.now();
@@ -1035,19 +1043,43 @@ function ensureHttpServer() {
                                         referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
                                         referrer.status = 'ACTIVE';
 
-                                        const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
+                                        const newExpiryStr = new Date(referrer.expiredAt).toLocaleDateString('ms-MY', {
+                                            day: '2-digit', month: '2-digit', year: 'numeric'
+                                        });
+
                                         if (currentSock) {
                                             try {
                                                 await currentSock.sendMessage(refJid, {
                                                     text:
                                                         `🎉 *TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!*\n\n` +
-                                                        `Hai ${referrer.name}, seorang lagi rakan telah melanggan menggunakan kod referral anda (*${referrer.refCode}*).\n\n` +
-                                                        `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n` +
-                                                        `Tarikh Luput Baharu: ${new Date(referrer.expiredAt).toLocaleDateString('ms-MY')}`
+                                                        `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah melengkapkan *3/3 tajaan* menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
+                                                        `🎁 *Ganjaran Diterima:*\n` +
+                                                        `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n\n` +
+                                                        `⏳ *Tarikh Luput Baharu:* *${newExpiryStr}*\n\n` +
+                                                        `Teruskan berkongsi kod anda untuk mendapatkan lebih banyak ganjaran percuma! 🚀`
                                                 });
-                                            } catch {}
+                                                console.log(`[REFERRAL BONUS] Berjaya hantar notifikasi +30 hari ke ${refJid}`);
+                                            } catch (refErr) {
+                                                console.error(`[REFERRAL BONUS] Gagal hantar notifikasi bonus ke ${refJid}:`, refErr.message);
+                                            }
                                         }
                                         referralRewardMsg += ` ➔ BONUS +30 HARI TELAH DIBERIKAN!`;
+                                    } else {
+                                        const remaining = 3 - referrer.paidReferrals;
+                                        if (currentSock) {
+                                            try {
+                                                await currentSock.sendMessage(refJid, {
+                                                    text:
+                                                        `🎉 *TAJAAN BERJAYA (+1 RAKAN)!*\n\n` +
+                                                        `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah berjaya melanggan menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
+                                                        `📊 *Kemajuan Ganjaran:* *${referrer.paidReferrals}/3 Rakan*\n` +
+                                                        `💡 Ajak lagi *${remaining} rakan* sahaja lagi untuk menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik! 🚀`
+                                                });
+                                                console.log(`[REFERRAL PROGRESS] Berjaya hantar notifikasi kemajuan (${referrer.paidReferrals}/3) ke ${refJid}`);
+                                            } catch (refErr) {
+                                                console.error(`[REFERRAL PROGRESS] Gagal hantar notifikasi kemajuan ke ${refJid}:`, refErr.message);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1148,185 +1180,81 @@ _Sila hantar video atau gambar pertama anda sebagai Document sekarang untuk mula
 // -------------------------------------------------------------
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { version } = await fetchLatestBaileysVersion();
 
-    let version;
-    try {
-        const baileysVersion = await fetchLatestBaileysVersion();
-        version = baileysVersion.version;
-        console.log(`[Baileys Protocol] Menggunakan versi Baileys WhatsApp Web: v${version.join('.')}`);
-    } catch (e) {
-        console.warn('[Baileys Protocol] Menggunakan versi lalai Baileys:', e.message);
-    }
+    const pairingNumber = (process.env.PAIRING_NUMBER || '601157270564').replace(/\D/g, '');
 
     const sock = makeWASocket({
         version,
         auth: state,
-        logger: logger,
+        logger,
+        printQRInTerminal: !pairingNumber,
+        browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
-        msgRetryCounterCache: msgRetryCounterCache,
-        shouldIgnoreJid: (jid) => jid.endsWith('@g.us') || jid === 'status@broadcast' || jid.endsWith('@newsletter'),
-        browser: Browsers.macOS('Desktop'),
-        generateHighQualityLinkPreview: false,
+        msgRetryCounterCache,
         getMessage: async (key) => {
-            return recentMessages.get(key.id) || { conversation: '' };
+            if (key && key.id && recentMessages.has(key.id)) {
+                return recentMessages.get(key.id);
+            }
+            return { conversation: '' };
         }
     });
 
     currentSock = sock;
     ensureHttpServer();
 
-    const origSendMessage = sock.sendMessage.bind(sock);
-    sock.sendMessage = async function(jid, content, options) {
-        const res = await origSendMessage(jid, content, options);
-        if (res && res.key && res.key.id && res.message) {
-            storeRecentMessage(res.key.id, res.message);
-        }
-        return res;
-    };
-
     sock.ev.on('creds.update', saveCreds);
 
-    const pairingNumber = (process.env.PAIRING_NUMBER || '601157270564').replace(/\D/g, '');
+    if (pairingNumber && !sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(pairingNumber);
+                console.log(`\n=============================================`);
+                console.log(`🔑 Your WhatsApp 8-Digit Pairing Code: ${code}`);
+                console.log(`=============================================\n`);
+            } catch (err) {
+                console.error('[Pairing Code Error]:', err);
+            }
+        }, 3000);
+    }
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr && !pairingNumber) {
-            console.log('\nImbas Kod QR di WhatsApp:\n');
+            console.log('\n[WhatsApp QR] Sila imbas kod QR di bawah:');
             qrcode.generate(qr, { small: true });
         }
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) setTimeout(startBot, 3000);
+            console.log(`[Sambungan Terputus] Kod status: ${statusCode}. Memulakan semula: ${shouldReconnect}`);
+
+            if (shouldReconnect) {
+                setTimeout(() => startBot(), 3000);
+            } else {
+                console.log('Sesi log keluar dikesan. Sila padamkan auth_info dan log masuk semula.');
+            }
         } else if (connection === 'open') {
-            console.log('\n======================================================');
-            console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
-            console.log(`Pentadbir Utama (Full Access): ${ADMIN_NUMBER}`);
-            console.log(`HitPay Gateway: ${HITPAY_API_KEY ? 'Aktif (' + HITPAY_ENV + ')' : 'HITPAY_API_KEY Tiada'}`);
-            console.log(`Webhook URL: ${WEBHOOK_PUBLIC_URL || 'Belum Ditetapkan'}`);
-            console.log(`Enjin Video: 4K-Grade CAS Sharpening 60 FPS (15.2MB Max Bitrate & aq-mode 3)`);
-            console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
-            console.log(`Kawalan RAM: Multi-layer GC & 15-Min Watchdog (<384MB Cap)`);
-            console.log('======================================================\n');
+            console.log(`\n=================================================`);
+            console.log(`🚀 ${BOT_NAME} bersambung secara rasmi ke WhatsApp!`);
+            console.log(`=================================================\n`);
 
             setTimeout(async () => {
-                console.log('[Inisialisasi] Memulakan penyelarasan identiti LID ahli aktif...');
-                await syncAllActiveLids(sock);
-            }, 3000);
+                const updated = await syncAllActiveLids(sock);
+                if (updated > 0) {
+                    console.log(`[Auto-Sync Mula] ${updated} rekod LID ahli aktif telah diselaraskan.`);
+                }
+            }, 5000);
         }
     });
 
-    if (pairingNumber && !sock.authState.creds.registered) {
-        setTimeout(async () => {
-            try {
-                const code = await sock.requestPairingCode(pairingNumber);
-                console.log('\n======================================================');
-                console.log(`🔑 KOD PAIRING WHATSAPP ANDA: ${code}`);
-                console.log('======================================================');
-                console.log(`1. Buka WhatsApp di telefon anda (${pairingNumber})`);
-                console.log('2. Tekan Settings > Linked Devices > Link a Device');
-                console.log('3. Tekan "Link with phone number instead"');
-                console.log(`4. Masukkan kod 8-digit ini: ${code}\n`);
-            } catch (err) {
-                console.error('[Ralat Mohon Kod Pairing]:', err);
-            }
-        }, 3500);
-    }
+    sock.ev.on('messages.upsert', async (m) => {
+        if (!m.messages || m.messages.length === 0) return;
 
-    // Watchdog Memori Terbiar & Cache Pruning (Setiap 15 Minit)
-    setInterval(() => {
-        try {
-            const mem = process.memoryUsage();
-            const rssMB = mem.rss / (1024 * 1024);
-            const isIdle = videoQueue.waitingLength === 0 && !videoQueue.activeJob;
-
-            if (isIdle) {
-                if (fs.existsSync(TEMP_DIR)) {
-                    const now = Date.now();
-                    const files = fs.readdirSync(TEMP_DIR);
-                    let cleanedCount = 0;
-                    for (const f of files) {
-                        const fullP = path.join(TEMP_DIR, f);
-                        try {
-                            const stat = fs.statSync(fullP);
-                            if (now - stat.mtimeMs > 10 * 60 * 1000) {
-                                fs.unlinkSync(fullP);
-                                cleanedCount++;
-                            }
-                        } catch {}
-                    }
-                    if (cleanedCount > 0) {
-                        console.log(`[Watchdog Temp] ${cleanedCount} fail sementara terbiar dipadamkan.`);
-                    }
-                }
-
-                if (msgRetryCounterCache && msgRetryCounterCache.size > 0) {
-                    const prevSize = msgRetryCounterCache.size;
-                    msgRetryCounterCache.clear();
-                    console.log(`[Watchdog Cache] ${prevSize} rekod percubaan semula (retry cache) dikosongkan.`);
-                }
-
-                if (recentMessages.size > 50) {
-                    recentMessages.clear();
-                }
-
-                const RSS_THRESHOLD_BYTES = 220 * 1024 * 1024;
-                if (mem.rss > RSS_THRESHOLD_BYTES && global.gc) {
-                    global.gc();
-                    const newMem = process.memoryUsage();
-                    console.log(`[Watchdog RAM] GC idle dilaksanakan: ${rssMB.toFixed(1)} MB ➔ ${(newMem.rss / 1024 / 1024).toFixed(1)} MB`);
-                }
-            }
-        } catch (err) {
-            console.error('[Ralat Watchdog Memori]:', err);
-        }
-    }, 15 * 60 * 1000);
-
-    // Peringatan Pembaharuan Automatik Setiap 6 Jam (Bagi Tempoh <= 72 Jam)
-    setInterval(async () => {
-        try {
-            const users = loadUsers();
-            const now = Date.now();
-            const SEVENTY_TWO_HOURS = 72 * 60 * 60 * 1000;
-            let updated = false;
-
-            for (const user of Object.values(users)) {
-                if (user.status === 'ACTIVE' && user.expiredAt && user.expiredAt > now) {
-                    const timeLeft = user.expiredAt - now;
-                    if (timeLeft <= SEVENTY_TWO_HOURS && !user.reminded3Days) {
-                        user.reminded3Days = true;
-                        updated = true;
-                        const targetJid = user.jid || user.altJid || (user.phone.includes('@') ? user.phone : `${user.phone}@s.whatsapp.net`);
-                        const expDateStr = new Date(user.expiredAt).toLocaleDateString('ms-MY', {
-                            day: '2-digit', month: '2-digit', year: 'numeric'
-                        });
-
-                        try {
-                            await sock.sendMessage(targetJid, {
-                                text:
-                                    `⚠️ *PERINGATAN PEMBAHARUAN LANGGANAN (${BOT_NAME})*\n\n` +
-                                    `Hai ${user.name}, tempoh langganan keahlian anda akan tamat pada *${expDateStr}* (kurang 3 hari lagi).\n\n` +
-                                    `Untuk mengelakkan sebarang gangguan terhadap pemprosesan video 60 FPS & foto QHD+, sila perbaharui langganan anda:\n\n` +
-                                    `${PACKAGE_TEMPLATE}\n\n` +
-                                    `Balas *1, 2, 3, atau 4* untuk menjana pautan pembayaran segera.`
-                            });
-                        } catch {}
-                    }
-                }
-            }
-            if (updated) saveUsers(users);
-        } catch (e) {
-            console.error('[Ralat Peringatan Pembaharuan]:', e);
-        }
-    }, 6 * 60 * 60 * 1000);
-
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        for (const msg of messages) {
-            if (!msg || !msg.message) continue;
-
+        for (const msg of m.messages) {
             if (msg.key && msg.key.id) {
                 storeRecentMessage(msg.key.id, unwrapMessage(msg.message) || msg.message);
             }
@@ -1423,19 +1351,8 @@ async function startBot() {
                 }
                 saveUsers(users);
             } else if (user) {
-                // Sentiasa simpan dan kemas kini user.jid & user.altJid untuk penghantaran mesej yang tepat
-                let needsUpdate = false;
-                if (remoteJid && user.jid !== remoteJid) {
-                    user.jid = remoteJid;
-                    needsUpdate = true;
-                }
-                if (altJid && user.altJid !== altJid) {
-                    user.altJid = altJid;
-                    needsUpdate = true;
-                }
-                if (needsUpdate) {
-                    saveUsers(users);
-                }
+                user.jid = remoteJid;
+                if (altJid) user.altJid = altJid;
             }
 
             const fromMe = msg.key.fromMe;
@@ -1551,6 +1468,9 @@ async function startBot() {
                             referrer.totalPaidReferrals = (referrer.totalPaidReferrals || 0) + 1;
                             referralRewardMsg = `\n• Penaja: ${referrer.name} (${referrer.phone}) [+1 Tajaan, Baki: ${referrer.paidReferrals}/3]`;
 
+                            const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
+                            const friendDisplayName = targetUser.name || targetPhone;
+
                             if (referrer.paidReferrals >= 3) {
                                 referrer.paidReferrals -= 3;
                                 const refNow = Date.now();
@@ -1558,17 +1478,33 @@ async function startBot() {
                                 referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
                                 referrer.status = 'ACTIVE';
 
-                                const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
+                                const newExpiryStr = new Date(referrer.expiredAt).toLocaleDateString('ms-MY', {
+                                    day: '2-digit', month: '2-digit', year: 'numeric'
+                                });
+
                                 try {
                                     await sock.sendMessage(refJid, {
                                         text:
                                             `🎉 *TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!*\n\n` +
-                                            `Hai ${referrer.name}, anda telah berjaya mengumpul 3 tajaan rakan (*${referrer.refCode}*).\n\n` +
-                                            `Tempoh akaun anda telah ditambah secara automatik selama *+30 HARI*!\n` +
-                                            `Tarikh Luput Baharu: ${new Date(referrer.expiredAt).toLocaleDateString('ms-MY')}`
+                                            `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah melengkapkan *3/3 tajaan* menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
+                                            `🎁 *Ganjaran Diterima:*\n` +
+                                            `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n\n` +
+                                            `⏳ *Tarikh Luput Baharu:* *${newExpiryStr}*\n\n` +
+                                            `Teruskan berkongsi kod anda untuk mendapatkan lebih banyak ganjaran percuma! 🚀`
                                     });
                                 } catch {}
                                 referralRewardMsg += ` ➔ BONUS +30 HARI TELAH DIBERIKAN!`;
+                            } else {
+                                const remaining = 3 - referrer.paidReferrals;
+                                try {
+                                    await sock.sendMessage(refJid, {
+                                        text:
+                                            `🎉 *TAJAAN BERJAYA (+1 RAKAN)!*\n\n` +
+                                            `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah berjaya melanggan menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
+                                            `📊 *Kemajuan Ganjaran:* *${referrer.paidReferrals}/3 Rakan*\n` +
+                                            `💡 Ajak lagi *${remaining} rakan* sahaja lagi untuk menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik! 🚀`
+                                    });
+                                } catch {}
                             }
                         }
                     }
@@ -1652,142 +1588,149 @@ async function startBot() {
                     } catch {}
 
                     await sock.sendMessage(remoteJid, {
-                        text: `✅ Kod referral bagi *${targetUser.name}* (${targetPhone}) berjaya ditukar kepada *${cleanCode}*.`
+                        text: `Kod referral untuk ${targetUser.name} (${targetPhone}) berjaya dikemas kini kepada *${cleanCode}*.`
                     }, { quoted: msg });
                     continue;
                 }
 
                 if (['hebah', 'broadcast', 'broadcastref'].includes(cmd)) {
-                    const activeMembers = Object.values(users).filter(u => u.status === 'ACTIVE' && u.expiredAt > Date.now());
+                    const activeUsers = Object.values(users).filter(u => u.status === 'ACTIVE' && u.phone && u.phone !== ADMIN_NUMBER);
                     await sock.sendMessage(remoteJid, {
-                        text: `Memulakan hebahan kod referral kepada ${activeMembers.length} ahli aktif dengan sela masa 2 saat...`
+                        text: `Memulakan hebahan kod referral kepada ${activeUsers.length} ahli aktif...`
                     }, { quoted: msg });
 
                     let sentCount = 0;
-                    for (const m of activeMembers) {
-                        if (!m.refCode) m.refCode = generateReferralCode(m.name, users);
-                        m.refSentToExisting = true;
-                        const targetJid = m.jid || m.altJid || (m.phone.includes('@') ? m.phone : `${m.phone}@s.whatsapp.net`);
-
+                    for (const u of activeUsers) {
                         try {
+                            if (!u.refCode) u.refCode = generateReferralCode(u.name, users);
+                            u.refSentToExisting = true;
+                            const targetJid = u.jid || u.altJid || (u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`);
                             await sock.sendMessage(targetJid, {
                                 text:
-                                    `🎁 *KOD REFERRAL PERIBADI ANDA: ${m.refCode}*\n\n` +
-                                    `Hai ${m.name}, sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran bulanan percuma!\n\n` +
-                                    `Ajak 3 rakan anda melanggan menggunakan kod referral peribadi anda (*${m.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan secara automatik! 🚀`
+                                    `MAKLUMAN GANJARAN REFERRAL (${BOT_NAME})\n\n` +
+                                    `Hai ${u.name}, nikmati langganan PERCUMA dengan berkongsi kod jemputan anda!\n\n` +
+                                    `Kod Referral Peribadi Anda: *${u.refCode}*\n\n` +
+                                    `Ganjaran:\n` +
+                                    `Setiap kali 3 rakan anda melanggan menggunakan kod anda, akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan secara automatik!`
                             });
                             sentCount++;
-                        } catch {}
-                        await new Promise(r => setTimeout(r, 2000));
+                            await new Promise(r => setTimeout(r, 1200));
+                        } catch (err) {
+                            console.error(`Gagal hebah ke ${u.phone}:`, err);
+                        }
                     }
                     saveUsers(users);
-
                     await sock.sendMessage(remoteJid, {
-                        text: `✅ Hebahan selesai! Kod referral dihantar kepada ${sentCount} orang ahli aktif.`
+                        text: `Hebahan selesai. Sebanyak ${sentCount} mesej berjaya dihantar.`
                     }, { quoted: msg });
                     continue;
                 }
 
                 if (['semak', 'check'].includes(cmd)) {
-                    const targetPhone = normalizeIdentifier(textParts[1]);
-                    const targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
-
-                    if (!targetUser) {
+                    const rawTarget = textParts[1];
+                    if (!rawTarget) {
                         await sock.sendMessage(remoteJid, {
-                            text: `Akaun ${targetPhone || 'tersebut'} tidak dijumpai di dalam pangkalan data.`
+                            text: "Sila masukkan nombor telefon yang ingin disemak. Contoh: semak 01113270914"
                         }, { quoted: msg });
                         continue;
                     }
 
+                    const targetPhone = normalizeIdentifier(rawTarget);
+                    const targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
+
+                    if (!targetUser) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `Akaun bagi nombor ${targetPhone} tidak dijumpai di dalam pangkalan data.`
+                        }, { quoted: msg });
+                        continue;
+                    }
+
+                    const expDateStr = targetUser.expiredAt ? new Date(targetUser.expiredAt).toLocaleDateString('ms-MY') : 'Tiada';
                     const isAct = targetUser.status === 'ACTIVE' && targetUser.expiredAt && targetUser.expiredAt > Date.now();
                     const daysLeft = isAct ? Math.ceil((targetUser.expiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0;
-                    const expStr = targetUser.expiredAt ? new Date(targetUser.expiredAt).toLocaleDateString('ms-MY') : 'Tiada';
 
                     await sock.sendMessage(remoteJid, {
                         text:
-                            `🔍 *MAKLUMAT KEAHLIAN PENGGUNA*\n\n` +
-                            `• Nama: *${targetUser.name}*\n` +
+                            `MAKLUMAT KEAHLIAN (${BOT_NAME})\n\n` +
+                            `• Nama: ${targetUser.name}\n` +
                             `• Nombor: ${targetUser.phone}\n` +
                             `• Status: ${isAct ? 'AKTIF' : targetUser.status}\n` +
-                            `• Identiti LID: ${targetUser.lid || 'Belum Diselaraskan'}\n` +
-                            `• Baki Tempoh: ${daysLeft} hari (Luput: ${expStr})\n` +
+                            `• Baki Tempoh: ${daysLeft} hari (Luput: ${expDateStr})\n` +
                             `• Kod Referral: *${targetUser.refCode || 'Tiada'}*\n` +
-                            `• Kemajuan Referral: ${targetUser.paidReferrals || 0}/3 (Jumlah Terkumpul: ${targetUser.totalPaidReferrals || 0})\n` +
-                            `• Dijemput Oleh: ${targetUser.referredBy || 'Tiada'}`
+                            `• Dijemput Oleh: ${targetUser.referredBy || 'Tiada'}\n` +
+                            `• Bilangan Tajaan Semasa: ${targetUser.paidReferrals || 0}/3\n` +
+                            `• Jumlah Keseluruhan Tajaan: ${targetUser.totalPaidReferrals || 0} orang`
                     }, { quoted: msg });
                     continue;
                 }
 
                 if (['padam', 'buang', 'delete'].includes(cmd)) {
-                    const targetPhone = normalizeIdentifier(textParts[1]);
-                    const targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
-
-                    if (!targetUser) {
+                    const rawTarget = textParts[1];
+                    if (!rawTarget) {
                         await sock.sendMessage(remoteJid, {
-                            text: `Akaun ${targetPhone || 'tersebut'} tidak dijumpai.`
+                            text: "Sila masukkan nombor yang ingin dipadam. Contoh: padam 01113270914"
                         }, { quoted: msg });
                         continue;
                     }
 
-                    delete users[targetUser.phone];
-                    if (targetUser.lid) delete users[targetUser.lid];
-                    saveUsers(users);
-
-                    await sock.sendMessage(remoteJid, {
-                        text: `✅ PENGESAHAN: Akses bagi ${targetUser.name} (${targetUser.phone}) telah dipadamkan daripada sistem.`
-                    }, { quoted: msg });
+                    const targetPhone = normalizeIdentifier(rawTarget);
+                    if (users[targetPhone]) {
+                        delete users[targetPhone];
+                        for (const [k, v] of Object.entries(users)) {
+                            if (v.phone === targetPhone || v.lid === targetPhone) {
+                                delete users[k];
+                            }
+                        }
+                        saveUsers(users);
+                        await sock.sendMessage(remoteJid, {
+                            text: `Pengguna ${targetPhone} telah berjaya dipadamkan daripada pangkalan data.`
+                        }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(remoteJid, {
+                            text: `Nombor ${targetPhone} tidak dijumpai di dalam pangkalan data.`
+                        }, { quoted: msg });
+                    }
                     continue;
                 }
 
                 if (['senarai', 'ahli', 'list'].includes(cmd)) {
-                    const uniqueMap = new Map();
-                    for (const u of Object.values(users)) {
-                        if (u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now()) {
-                            uniqueMap.set(u.phone, u);
-                        }
-                    }
-                    const activeMembers = Array.from(uniqueMap.values());
-
-                    if (activeMembers.length === 0) {
+                    const activeUsers = Object.values(users).filter(u => u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now());
+                    if (activeUsers.length === 0) {
                         await sock.sendMessage(remoteJid, {
-                            text: "Tiada ahli berdaftar yang aktif pada masa ini."
+                            text: "Tiada ahli aktif di dalam sistem pada masa ini."
                         }, { quoted: msg });
                         continue;
                     }
 
-                    let resp = `👥 *SENARAI AHLI AKTIF (${activeMembers.length} Orang)*\n\n`;
-                    activeMembers.forEach((m, i) => {
-                        const daysLeft = Math.ceil((m.expiredAt - Date.now()) / (1000 * 60 * 60 * 24));
-                        const lidStatus = m.lid ? `[LID OK]` : `[LID Belum Sync]`;
-                        resp += `${i + 1}. *${m.name}* (${m.phone}) ${lidStatus}\n   └ Baki: ${daysLeft} hari (Luput: ${new Date(m.expiredAt).toLocaleDateString('ms-MY')})\n   └ Kod: ${m.refCode}\n\n`;
+                    let resp = `SENARAI AHLI AKTIF (${activeUsers.length} Orang)\n\n`;
+                    activeUsers.forEach((u, i) => {
+                        const daysLeft = Math.ceil((u.expiredAt - Date.now()) / (1000 * 60 * 60 * 24));
+                        const expDateStr = new Date(u.expiredAt).toLocaleDateString('ms-MY');
+                        resp += `${i + 1}. *${u.name}* (${u.phone})\n   └ Baki: ${daysLeft} hari (Luput: ${expDateStr}) | Ref: ${u.refCode || '-'}\n\n`;
                     });
+
                     await sock.sendMessage(remoteJid, { text: resp.trim() }, { quoted: msg });
                     continue;
                 }
 
                 if (['sync', 'selaras'].includes(cmd)) {
+                    await sock.sendMessage(remoteJid, { text: "Memulakan proses penyelarasan LID ahli aktif..." }, { quoted: msg });
+                    const count = await syncAllActiveLids(sock);
                     await sock.sendMessage(remoteJid, {
-                        text: "Memulakan penyelarasan identiti WhatsApp (LID) untuk semua ahli aktif..."
-                    }, { quoted: msg });
-
-                    const syncedCount = await syncAllActiveLids(sock);
-                    await sock.sendMessage(remoteJid, {
-                        text: `✅ Penyelarasan selesai! Sebanyak ${syncedCount} identiti ahli berjaya diselaraskan.`
+                        text: `Penyelarasan selesai. Sebanyak ${count} identiti LID ahli berjaya diperbaharui dan disimpan.`
                     }, { quoted: msg });
                     continue;
                 }
 
                 if (['fixsession', 'sesi'].includes(cmd)) {
                     const targetRaw = textParts[1];
-                    let targetPhone = targetRaw ? normalizeIdentifier(targetRaw) : '';
+                    let extraInfo = '';
 
-                    if (msgRetryCounterCache && typeof msgRetryCounterCache.flushAll === 'function') {
-                        msgRetryCounterCache.flushAll();
-                    }
+                    msgRetryCounterCache.flushAll();
                     recentMessages.clear();
 
-                    let extraInfo = '';
-                    if (targetPhone) {
+                    if (targetRaw) {
+                        const targetPhone = normalizeIdentifier(targetRaw);
                         try {
                             const checkJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
                             const [waUser] = await sock.onWhatsApp(checkJid);
@@ -1937,7 +1880,8 @@ async function startBot() {
             // ---------------------------------------------------------
             // 3. PENEBUSAN KOD REFERRAL OLEH PENGGUNA
             // ---------------------------------------------------------
-            const matchedReferrer = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === upperText);
+            const candidateCode = (cmd === 'ref' && textParts[1]) ? textParts[1].toUpperCase() : upperText;
+            const matchedReferrer = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === candidateCode);
             if (matchedReferrer) {
                 if (user && (user.phone === matchedReferrer.phone || user.refCode === matchedReferrer.refCode)) {
                     await sock.sendMessage(remoteJid, {
@@ -1965,6 +1909,23 @@ async function startBot() {
                     `${PACKAGE_TEMPLATE}`;
 
                 await sock.sendMessage(remoteJid, { text: confirmCaption }, { quoted: msg });
+
+                // Notifikasi Automatik ke Penaja bahawa kod telah ditebus oleh rakan
+                const refJid = matchedReferrer.jid || matchedReferrer.altJid || (matchedReferrer.phone.includes('@') ? matchedReferrer.phone : `${matchedReferrer.phone}@s.whatsapp.net`);
+                const friendName = msg.pushName || user.name || phone;
+                try {
+                    await sock.sendMessage(refJid, {
+                        text:
+                            `🔔 *KOD REFERRAL ANDA DIGUNAKAN!*\n\n` +
+                            `Hai *${matchedReferrer.name}*, rakan anda *${friendName}* (${phone}) baru sahaja memasukkan kod referral anda (*${matchedReferrer.refCode}*)!\n\n` +
+                            `📌 *Status:* Rakan anda kini sedang memilih pakej langganan.\n` +
+                            `⚡ Anda akan menerima notifikasi sebaik sahaja mereka selesai membuat pembayaran. Terima kasih!`
+                    });
+                    console.log(`[REFERRAL NOTI] Penaja ${matchedReferrer.phone} diberitahu tentang ${phone} menggunakan kod.`);
+                } catch (notiErr) {
+                    console.error(`[REFERRAL NOTI] Gagal hantar notifikasi ke penaja:`, notiErr.message);
+                }
+
                 continue;
             }
 
@@ -2075,44 +2036,33 @@ async function startBot() {
             const isDirectImage = !!inner.imageMessage;
             const docMsg = inner.documentMessage || inner.documentWithCaptionMessage?.message?.documentMessage;
             const docMime = (docMsg?.mimetype || '').toLowerCase();
-            const docFileName = (docMsg?.fileName || '').toLowerCase();
+            const isDocVideo = docMime.startsWith('video/');
+            const isDocImage = docMime.startsWith('image/');
 
-            const isDocImage = !!docMsg && (docMime.startsWith('image/') || /\.(jpe?g|png|webp|bmp|tiff|heic|heif)$/i.test(docFileName));
-            const isDocVideo = !!docMsg && (docMime.startsWith('video/') || /\.(mp4|mov|mkv|avi|3gp|webm|m4v)$/i.test(docFileName));
-
-            if (!isDirectImage && !isDocImage && !isDocVideo) {
-                if (textContent && !isAdmin) {
-                    await sock.sendMessage(remoteJid, {
-                        text:
-                            `Selamat kembali ke ${BOT_NAME}.\n\n` +
-                            `Sila hantar foto atau lampirkan video sebagai Dokumen untuk memulakan pengoptimuman WhatsApp Status.\n\n` +
-                            `Taip *START* untuk melihat panduan pakej atau *status* untuk menyemak baki keahlian anda.`
-                    }, { quoted: msg });
-                }
+            if (!isDirectImage && !isDocVideo && !isDocImage) {
                 continue;
             }
 
-            if (!isAdmin && !isActive) {
-                console.log(`[Media Ditolak] Penghantaran media oleh bukan ahli aktif: ${remoteJid} (Status: ${user?.status})`);
-                await sock.sendMessage(remoteJid, {
-                    text:
-                        `AKSES PEMPROSESAN DISEKAT\n\n` +
-                        `Fungsi pengoptimuman video 60 FPS & foto QHD+ dikhaskan untuk ahli aktif sahaja.\n\n` +
-                        `Sila taip *START* untuk melihat senarai pakej dan memulakan langganan.`
-                }, { quoted: msg });
+            if (!isActive) {
+                const isWaiting = user && user.status === 'WAITING';
+                const msgText = isWaiting
+                    ? `AKSES DITANGGUHKAN: MENUNGGU PEMBAYARAN\n\nAkaun anda sedang dalam proses pembayaran. Sila selesaikan pembayaran menggunakan pautan HitPay yang telah diberikan atau taip *START* untuk melihat semula pakej.`
+                    : `AKSES DISEKAT: LANGGANAN DIPERLUKAN\n\nFungsi pemprosesan video 60 FPS & foto QHD+ hanya tersedia untuk ahli aktif.\n\nTaip *START* untuk melihat pakej langganan rasmi.`;
+
+                await sock.sendMessage(remoteJid, { text: msgText }, { quoted: msg });
                 continue;
             }
 
             // ---------------------------------------------------------
-            // 7. CABANG A: PEMPROSESAN FOTO QHD+ 2560px CAS SHARPENING
+            // 7. CABANG A: PEMPROSESAN FOTO / IMEJ (Resolusi 2560px HD)
             // ---------------------------------------------------------
             if (isDirectImage || isDocImage) {
                 const enqueueResult = videoQueue.enqueue({
                     userId: remoteJid,
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-                        const inputPath = path.join(TEMP_DIR, `input_img_${fileId}.jpg`);
-                        const outputPath = path.join(TEMP_DIR, `status_clear_qhd_${fileId}.jpg`);
+                        const inputPath = path.join(TEMP_DIR, `input_${fileId}.jpg`);
+                        const outputPath = path.join(TEMP_DIR, `status_clear_photo_${fileId}.jpg`);
 
                         try {
                             try {
@@ -2122,30 +2072,23 @@ async function startBot() {
                             } catch {}
 
                             console.log(`\n[Pemprosesan Imej Bermula] Memuat turun foto dari ${remoteJid}...`);
-
                             const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
                             await pipeline(mediaStream, fs.createWriteStream(inputPath));
 
-                            console.log(`[FFmpeg Imej] Mengoptimumkan ke 2560px QHD+ dengan CAS Sharpening...`);
-                            const result = await processUltraSharpImage(inputPath, outputPath, ffmpegPath);
+                            console.log(`[FFmpeg Imej] Meningkatkan foto ke 2560px QHD+ dengan penapis Lanczos & CAS...`);
+                            const { sizeBytes, hasCas, usedQ } = await enhanceQhdPhoto(inputPath, outputPath, ffmpegPath);
 
-                            const sizeMB = (result.sizeBytes / (1024 * 1024)).toFixed(2);
-                            const sharpEngine = result.hasCas ? 'Contrast Adaptive Sharpening (CAS)' : 'Unsharp Masking';
-
-                            const imageCaption =
-                                `PENGOPTIMUMAN FOTO SELESAI (2560px QHD+)\n\n` +
-                                `Sila tekan Forward ➔ My Status (Status Saya) untuk memuat naik foto ini terus ke Status WhatsApp anda.\n\n` +
-                                `Peringatan Kualiti:\n` +
-                                `Jangan potong (crop) atau tambah pelekat/teks di dalam editor WhatsApp Status agar resolusi 2560px HD kekal tajam tanpa dimampatkan semula.\n\n` +
-                                `Spesifikasi Output:\n` +
-                                `• Resolusi: 2560px QHD+ (Lanczos Scaling)\n` +
-                                `• Penalaan: ${sharpEngine}\n` +
-                                `• Ruang Warna: sRGB / BT.709 (Metadata Stripped)\n` +
-                                `• Saiz Fail: ${sizeMB} MB (Anti-Compression Safe)`;
+                            const sizeKB = (sizeBytes / 1024).toFixed(1);
+                            const sharpNote = hasCas ? 'CAS 0.35 (Kontras Adaptif)' : 'Lanczos Sharp Resample';
 
                             await sock.sendMessage(remoteJid, {
                                 image: { stream: fs.createReadStream(outputPath) },
-                                caption: imageCaption
+                                caption:
+                                    `PENGOPTIMUMAN FOTO SELESAI\n\n` +
+                                    `Foto anda telah ditingkatkan ke resolusi 2560px (QHD+) dengan penalaan tajam ${sharpNote} & kawalan anti-mampatan WhatsApp Status.\n\n` +
+                                    `• Saiz Fail: ${sizeKB} KB (Zon Selamat)\n` +
+                                    `• Profil Kualiti: JPEG Q=${usedQ}\n\n` +
+                                    `Sila muat naik foto ini terus ke WhatsApp Status anda!`
                             }, { quoted: msg });
 
                             try {
@@ -2167,13 +2110,13 @@ async function startBot() {
                                 });
                             }
 
-                            console.log(`[Selesai] Foto 2560px QHD+ berjaya dihantar ke ${remoteJid}.`);
+                            console.log(`[Selesai] Foto HD (${sizeKB} KB) berjaya dihantar ke ${remoteJid}.`);
 
                         } catch (err) {
                             console.error('[Ralat Pemprosesan Imej]', err);
                             try {
                                 await sock.sendMessage(remoteJid, {
-                                    text: `Ralat: Proses pengoptimuman foto gagal dilaksanakan. (${err.message})`
+                                    text: `Ralat: Proses penambahbaikan foto gagal dilaksanakan. (${err.message})`
                                 }, { quoted: msg });
                             } catch {}
                         } finally {
@@ -2183,7 +2126,7 @@ async function startBot() {
                                 try {
                                     global.gc();
                                     const mem = process.memoryUsage();
-                                    console.log(`[GC Foto Selesai] RAM aktif: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
+                                    console.log(`[GC Imej Selesai] RAM aktif: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
                                 } catch {}
                             }
                         }
@@ -2193,7 +2136,7 @@ async function startBot() {
                 if (!enqueueResult.success) {
                     if (enqueueResult.reason === 'full') {
                         await sock.sendMessage(remoteJid, {
-                            text: `MAKLUMAN: Kapasiti antrian pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} media). Sila tunggu beberapa minit sebelum menghantar semula foto anda.`
+                            text: `MAKLUMAN: Kapasiti antrian pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} media). Sila tunggu beberapa minit sebelum menghantar semula.`
                         }, { quoted: msg });
                     } else if (enqueueResult.reason === 'duplicate') {
                         await sock.sendMessage(remoteJid, {
