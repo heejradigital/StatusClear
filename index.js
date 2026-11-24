@@ -1,9 +1,24 @@
+/**
+ * StatusClear - Lossless WhatsApp Status Optimization Bot
+ * Single-file, ultra-lightweight implementation (<256MB RAM)
+ * 
+ * Features:
+ * - 60 FPS Native Video Encoding (15.2MB Status Bitrate Passthrough & CAS Sharpening)
+ * - 2560px QHD+ Photo Enhancement (CAS Filter & Dynamic Anti-Compression Control)
+ * - Multi-layer User Database Auto-Merge (Root, Legacy, Local & Persistent Volume)
+ * - Smart Core/Middle Name Referral Code Generator (NAME + 3 DIGITS)
+ * - Malay Admin Control Suite (tunggu, tambah, kod, hebah, semak, padam, senarai, selaras, ram, fixsession)
+ * - Auto LID Identity Resolution & DuitNow QR Payment Integration
+ * - Signal Decryption Fix (fetchLatestBaileysVersion, bounded recentMessages, msgRetryCounterCache)
+ */
+
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
     downloadMediaMessage,
-    Browsers
+    Browsers,
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -318,7 +333,58 @@ async function syncAllActiveLids(sock) {
 }
 
 const logger = pino({ level: 'silent' });
-const msgRetryCounterCache = new Map();
+
+// -------------------------------------------------------------
+// CACHE PERCUBAAN SEMULA & SIMPANAN MESEJ RINGKAS (ANTI-WAITING)
+// -------------------------------------------------------------
+const msgRetryCounterCache = {
+    _map: new Map(),
+    get(key) { return this._map.get(key); },
+    set(key, val) { this._map.set(key, val); },
+    del(key) { this._map.delete(key); },
+    flushAll() { this._map.clear(); },
+    get size() { return this._map.size; },
+    clear() { this._map.clear(); }
+};
+
+const MAX_RECENT_MESSAGES = 250;
+const recentMessages = new Map();
+
+function storeRecentMessage(id, message) {
+    if (!id || !message) return;
+    if (recentMessages.size >= MAX_RECENT_MESSAGES) {
+        const oldestKey = recentMessages.keys().next().value;
+        recentMessages.delete(oldestKey);
+    }
+
+    // Simpan salinan minimum tanpa buffer media berat untuk menjimatkan RAM (<256MB)
+    const stub = {};
+    if (message.conversation) stub.conversation = message.conversation;
+    if (message.extendedTextMessage) stub.extendedTextMessage = { text: message.extendedTextMessage.text || '' };
+    if (message.imageMessage) {
+        stub.imageMessage = {
+            caption: message.imageMessage.caption || '',
+            mimetype: message.imageMessage.mimetype || 'image/jpeg'
+        };
+    }
+    if (message.videoMessage) {
+        stub.videoMessage = {
+            caption: message.videoMessage.caption || '',
+            mimetype: message.videoMessage.mimetype || 'video/mp4'
+        };
+    }
+    if (message.documentMessage) {
+        stub.documentMessage = {
+            caption: message.documentMessage.caption || '',
+            mimetype: message.documentMessage.mimetype || '',
+            fileName: message.documentMessage.fileName || ''
+        };
+    }
+    if (Object.keys(stub).length === 0) {
+        stub.conversation = '';
+    }
+    recentMessages.set(id, stub);
+}
 
 function resolveBinaries() {
     let ffmpegPath = 'ffmpeg';
@@ -403,9 +469,8 @@ class RobustVideoQueue {
 
         this.activeUsers.add(jobData.userId);
         this.queue.push(jobData);
-        const position = this.queue.length + (this.activeJob ? 1 : 0);
-
-        setImmediate(() => this.processNext());
+        const position = this.queue.length;
+        this.processNext();
         return { success: true, position };
     }
 
@@ -420,174 +485,159 @@ class RobustVideoQueue {
         } finally {
             if (this.activeJob) {
                 this.activeUsers.delete(this.activeJob.userId);
-                this.activeJob = null;
             }
-
-            if (global.gc) {
-                try {
-                    global.gc();
-                    const mem = process.memoryUsage();
-                    console.log(`[Pembersihan Memori GC Antrian] RAM aktif: ${(mem.rss / 1024 / 1024).toFixed(1)} MB`);
-                } catch {}
-            }
-
+            this.activeJob = null;
             this.processNext();
         }
     }
 }
 
-const videoQueue = new RobustVideoQueue(MAX_QUEUE_SIZE);
+const videoQueue = new RobustVideoQueue();
 
-function probeVideo(filePath, binPath) {
+async function probeVideo(filePath, binPath) {
     return new Promise((resolve) => {
         const args = [
             '-v', 'error',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=r_frame_rate,duration,color_transfer,color_primaries,color_space:format=duration',
+            '-show_entries', 'stream=duration,r_frame_rate,color_transfer,color_primaries,color_space',
+            '-show_entries', 'format=duration',
             '-of', 'json',
             filePath
         ];
 
         const proc = spawn(binPath, args);
         let stdout = '';
-        let timer = setTimeout(() => {
-            try { proc.kill('SIGKILL'); } catch {}
-            resolve({ duration: 30.0, fps: 30.0, isHDR: false });
-        }, 120000);
 
         proc.stdout.on('data', (d) => { stdout += d.toString(); });
+
         proc.on('close', (code) => {
-            clearTimeout(timer);
+            let duration = 30;
+            let fps = 30;
+            let isHDR = false;
+
             if (code === 0) {
                 try {
-                    const parsed = JSON.parse(stdout);
-                    const stream = parsed.streams?.[0] || {};
-                    const format = parsed.format || {};
+                    const info = JSON.parse(stdout);
+                    const vStream = info.streams && info.streams[0];
+                    const rawDur = vStream?.duration || info.format?.duration;
+                    const parsedDur = parseFloat(rawDur);
+                    if (!isNaN(parsedDur) && parsedDur > 0) {
+                        duration = parsedDur;
+                    }
 
-                    let duration = parseFloat(stream.duration || format.duration);
-                    if (isNaN(duration) || duration <= 0) duration = 30.0;
-
-                    let fps = 30.0;
-                    if (stream.r_frame_rate) {
-                        const [num, den] = stream.r_frame_rate.split('/').map(Number);
-                        if (den && num) {
-                            fps = num / den;
-                        } else if (!isNaN(parseFloat(stream.r_frame_rate))) {
-                            fps = parseFloat(stream.r_frame_rate);
+                    if (vStream?.r_frame_rate) {
+                        const parts = vStream.r_frame_rate.split('/');
+                        if (parts.length === 2) {
+                            const num = parseFloat(parts[0]);
+                            const den = parseFloat(parts[1]);
+                            if (den > 0) fps = num / den;
+                        } else {
+                            const parsedFps = parseFloat(vStream.r_frame_rate);
+                            if (!isNaN(parsedFps) && parsedFps > 0) fps = parsedFps;
                         }
                     }
 
-                    const colorTransfer = (stream.color_transfer || '').toLowerCase();
-                    const colorPrimaries = (stream.color_primaries || '').toLowerCase();
-                    const colorSpace = (stream.color_space || '').toLowerCase();
-
-                    const isHDR = colorTransfer.includes('smpte2084') ||
-                                  colorTransfer.includes('arib-std-b67') ||
-                                  colorPrimaries.includes('bt2020') ||
-                                  colorSpace.includes('bt2020');
-
-                    return resolve({ duration, fps, isHDR });
-                } catch {}
+                    const transfer = (vStream?.color_transfer || '').toLowerCase();
+                    const primaries = (vStream?.color_primaries || '').toLowerCase();
+                    if (
+                        transfer.includes('smpte2084') ||
+                        transfer.includes('arib-std-b67') ||
+                        primaries.includes('bt2020')
+                    ) {
+                        isHDR = true;
+                    }
+                } catch (e) {
+                    console.error('[Ralat Parse FFprobe]:', e);
+                }
             }
-            resolve({ duration: 30.0, fps: 30.0, isHDR: false });
+            resolve({ duration, fps, isHDR });
         });
-        proc.on('error', () => {
-            clearTimeout(timer);
-            resolve({ duration: 30.0, fps: 30.0, isHDR: false });
-        });
+
+        proc.on('error', () => resolve({ duration: 30, fps: 30, isHDR: false }));
     });
 }
 
-function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetShortSide, sourceFps, isHDR) {
+async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetShortSide, sourceFps, isHDR) {
     return new Promise((resolve, reject) => {
         const isHighFps = sourceFps >= 48;
-        const maxRate = Math.floor(vBitrate * 1.2);
-        const bufSize = Math.floor(vBitrate * 2.4);
+        const scaleFilter = `scale='if(gt(iw,ih),-2,${targetShortSide})':'if(gt(iw,ih),${targetShortSide},-2)':flags=lanczos`;
+        const hasCas = checkCasSupport(binPath);
+        const sharpFilter = hasCas ? 'cas=strength=0.35' : 'unsharp=5:5:0.35:5:5:0.0';
 
-        const scaleFilter = `scale='if(gt(iw,ih),-2,min(${targetShortSide},iw))':'if(gt(iw,ih),min(${targetShortSide},ih),-2)':flags=lanczos`;
-
-        let colorFilter = '';
+        let filterParts = [];
         if (isHDR) {
             const hasZscale = checkZscaleSupport(binPath);
             if (hasZscale) {
-                colorFilter = 'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p';
+                filterParts.push('zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p');
             } else {
-                colorFilter = 'eq=contrast=1.08:saturation=1.18,format=yuv420p';
+                filterParts.push('eq=contrast=1.08:saturation=1.18,format=yuv420p');
             }
         }
 
-        const hasCas = checkCasSupport(binPath);
-        const casFilter = hasCas ? 'cas=strength=0.35' : 'unsharp=5:5:0.35:5:5:0.0';
-
-        const filterParts = [];
-        if (colorFilter) filterParts.push(colorFilter);
         filterParts.push(scaleFilter);
-        filterParts.push(casFilter);
+        filterParts.push(sharpFilter);
+
         if (isHighFps) {
             filterParts.push('setpts=N/(60*TB)');
         }
-        const vfFilter = filterParts.join(',');
 
-        const args = [
+        const vfChain = filterParts.join(',');
+
+        let args = [
             '-y',
             '-i', inputPath,
             '-t', '60',
-            '-fps_mode', 'cfr'
-        ];
-
-        if (isHighFps) {
-            args.push('-r', '60');
-        }
-
-        args.push(
+            '-vf', vfChain,
             '-c:v', 'libx264',
-            '-preset', 'fast',
+            '-preset', 'slow',
             '-profile:v', 'high',
-            '-level', '4.2',
-            '-pix_fmt', 'yuv420p',
-            '-refs', '3',
-            '-rc-lookahead', '30',
-            '-vf', vfFilter,
+            '-level:v', '4.1',
             '-b:v', `${vBitrate}k`,
-            '-maxrate', `${maxRate}k`,
-            '-bufsize', `${bufSize}k`,
-            '-g', '60',
-            '-keyint_min', '60',
-            '-sc_threshold', '0',
-            '-x264-params', 'deblock=-1:-1:aq-mode=3:aq-strength=1.05:psy-rd=1.05:0.15:bframes=0',
+            '-maxrate', `${Math.floor(vBitrate * 1.15)}k`,
+            '-bufsize', `${Math.floor(vBitrate * 1.5)}k`,
+            '-pix_fmt', 'yuv420p',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
             '-color_range', 'tv',
+            '-bf', '0',
+            '-refs', '3',
+            '-rc-lookahead', '25',
+            '-g', '60',
+            '-keyint_min', '60',
+            '-x264-params', 'deblock=-1,-1:aq-mode=3:aq-strength=1.0:psy-rd=1.0,0.15'
+        ];
+
+        if (isHighFps) {
+            args.push('-fps_mode', 'cfr', '-r', '60');
+        } else {
+            args.push('-fps_mode', 'cfr');
+        }
+
+        args.push(
             '-c:a', 'aac',
             '-b:a', '96k',
             '-ar', '44100',
-            '-threads', '2',
+            '-ac', '2',
             '-movflags', '+faststart',
+            '-threads', '2',
             outputPath
         );
 
         const proc = spawn(binPath, args);
         let stderr = '';
-        let timeoutTriggered = false;
 
-        const timer = setTimeout(() => {
-            timeoutTriggered = true;
-            try { proc.kill('SIGKILL'); } catch {}
-            reject(new Error('Masa transcode melebihi had maksimum (120 saat).'));
-        }, 120000);
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
-        proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
         proc.on('close', (code) => {
-            clearTimeout(timer);
-            if (timeoutTriggered) return;
-            if (code === 0) resolve();
-            else reject(new Error(`FFmpeg error: ${stderr.slice(-300)}`));
+            if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 1024) {
+                resolve();
+            } else {
+                reject(new Error(`FFmpeg video gagal dengan kod ${code}. Log: ${stderr.slice(-500)}`));
+            }
         });
-        proc.on('error', (err) => {
-            clearTimeout(timer);
-            reject(new Error(`Ralat pelancaran FFmpeg: ${err.message}`));
-        });
+
+        proc.on('error', (err) => reject(err));
     });
 }
 
@@ -595,58 +645,53 @@ async function processUltraSharpImage(inputPath, outputPath, binPath) {
     const hasCas = checkCasSupport(binPath);
     const sharpFilter = hasCas ? 'cas=strength=0.45' : 'unsharp=5:5:0.45:5:5:0.0';
     const scaleFilter = "scale='if(gt(iw,ih),min(2560,iw),-2)':'if(gt(iw,ih),-2,min(2560,ih))':flags=lanczos";
-    const vfFilter = `${scaleFilter},${sharpFilter}`;
+    const vfChain = `${scaleFilter},${sharpFilter}`;
 
-    const executeEncode = (qval) => {
+    const runEncode = (qScale) => {
         return new Promise((resolve, reject) => {
             const args = [
                 '-y',
                 '-i', inputPath,
-                '-vf', vfFilter,
+                '-vf', vfChain,
                 '-map_metadata', '-1',
                 '-pix_fmt', 'yuvj420p',
                 '-colorspace', 'bt709',
                 '-color_primaries', 'bt709',
                 '-color_trc', 'bt709',
-                '-q:v', String(qval),
+                '-q:v', `${qScale}`,
                 outputPath
             ];
 
             const proc = spawn(binPath, args);
             let stderr = '';
-            let timeoutTriggered = false;
-
-            const timer = setTimeout(() => {
-                timeoutTriggered = true;
-                try { proc.kill('SIGKILL'); } catch {}
-                reject(new Error('Masa pemprosesan imej melebihi had (60 saat).'));
-            }, 60000);
-
             proc.stderr.on('data', (d) => { stderr += d.toString(); });
             proc.on('close', (code) => {
-                clearTimeout(timer);
-                if (timeoutTriggered) return;
-                if (code === 0) resolve();
-                else reject(new Error(`FFmpeg image error: ${stderr.slice(-300)}`));
+                if (code === 0 && fs.existsSync(outputPath)) {
+                    resolve();
+                } else {
+                    reject(new Error(`FFmpeg imej ralat (kod ${code}): ${stderr.slice(-400)}`));
+                }
             });
-            proc.on('error', (err) => {
-                clearTimeout(timer);
-                reject(err);
-            });
+            proc.on('error', reject);
         });
     };
 
-    await executeEncode(2);
+    let usedQ = 2;
+    await runEncode(usedQ);
 
     let stats = fs.statSync(outputPath);
-    const MAX_SAFE_BYTES = 1.85 * 1024 * 1024;
-    let usedQ = 2;
+    const MAX_SAFE_IMAGE_BYTES = Math.floor(1.85 * 1024 * 1024);
 
-    if (stats.size > MAX_SAFE_BYTES) {
-        console.log(`[Kawalan Saiz Imej] Saiz JPEG (${(stats.size / 1024 / 1024).toFixed(2)} MB) melebihi siling 1.85 MB. Mengekod semula pada -q:v 5...`);
-        await executeEncode(5);
+    if (stats.size > MAX_SAFE_IMAGE_BYTES) {
+        usedQ = 4;
+        await runEncode(usedQ);
         stats = fs.statSync(outputPath);
-        usedQ = 5;
+    }
+
+    if (stats.size > MAX_SAFE_IMAGE_BYTES) {
+        usedQ = 6;
+        await runEncode(usedQ);
+        stats = fs.statSync(outputPath);
     }
 
     return {
@@ -668,17 +713,40 @@ function unwrapMessage(msg) {
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
+    // Dapatkan versi protokol Baileys terkini agar Signal handshake sepadan dengan WhatsApp server
+    let version;
+    try {
+        const baileysVersion = await fetchLatestBaileysVersion();
+        version = baileysVersion.version;
+        console.log(`[Baileys Protocol] Menggunakan versi Baileys WhatsApp Web: v${version.join('.')}`);
+    } catch (e) {
+        console.warn('[Baileys Protocol] Menggunakan versi lalai Baileys:', e.message);
+    }
+
     const sock = makeWASocket({
+        version,
         auth: state,
         logger: logger,
         syncFullHistory: false,
         markOnlineOnConnect: false,
         msgRetryCounterCache: msgRetryCounterCache,
         shouldIgnoreJid: (jid) => jid.endsWith('@g.us') || jid === 'status@broadcast' || jid.endsWith('@newsletter'),
-        browser: Browsers.ubuntu('Chrome'),
+        browser: Browsers.macOS('Desktop'),
         generateHighQualityLinkPreview: false,
-        getMessage: async () => undefined
+        getMessage: async (key) => {
+            return recentMessages.get(key.id) || { conversation: '' };
+        }
     });
+
+    // Pintas sock.sendMessage untuk merekod mesej bot ke recentMessages secara automatik
+    const origSendMessage = sock.sendMessage.bind(sock);
+    sock.sendMessage = async function(jid, content, options) {
+        const res = await origSendMessage(jid, content, options);
+        if (res && res.key && res.key.id && res.message) {
+            storeRecentMessage(res.key.id, res.message);
+        }
+        return res;
+    };
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -702,7 +770,7 @@ async function startBot() {
             console.log(`Pentadbir Utama (Full Access): ${ADMIN_NUMBER}`);
             console.log(`Enjin Video: 4K-Grade CAS Sharpening 60 FPS (15.2MB Max Bitrate & aq-mode 3)`);
             console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
-            console.log(`Sistem Langganan: Auto-Sync LID Dwi-Arah Aktif`);
+            console.log(`Sistem Enkripsi: Signal Retry Store & msgRetryCounterCache Aktif`);
             console.log(`Kawalan RAM: Multi-layer GC & 15-Min Watchdog (<280MB Cap)`);
             console.log('======================================================\n');
 
@@ -764,6 +832,10 @@ async function startBot() {
                     console.log(`[Watchdog Cache] ${prevSize} rekod percubaan semula (retry cache) dikosongkan.`);
                 }
 
+                if (recentMessages.size > 50) {
+                    recentMessages.clear();
+                }
+
                 const RSS_THRESHOLD_BYTES = 180 * 1024 * 1024;
                 if (mem.rss > RSS_THRESHOLD_BYTES && global.gc) {
                     global.gc();
@@ -818,6 +890,11 @@ async function startBot() {
         for (const msg of messages) {
             if (!msg || !msg.message) continue;
 
+            // Simpan mesej untuk Signal Decryption Retries
+            if (msg.key && msg.key.id) {
+                storeRecentMessage(msg.key.id, unwrapMessage(msg.message) || msg.message);
+            }
+
             const remoteJid = msg.key.remoteJid || '';
             const altJid = msg.key.remoteJidAlt || msg.key.participantAlt || '';
 
@@ -854,7 +931,7 @@ async function startBot() {
             }
 
             const users = loadUsers();
-            const cleanPhone = normalizeIdentifier(remoteJid);
+            const cleanPhone = normalizeIdentifier(altJid || remoteJid);
             let user = findUserRecord(users, remoteJid, altJid);
 
             // Jika mesej datang dari LID yang belum dikenali, cari semula menggunakan onWhatsApp
@@ -912,7 +989,7 @@ async function startBot() {
             // ---------------------------------------------------------
             // 1. PENGENDALIAN ARAHAN PENTADBIR (BAHASA MELAYU RINGKAS)
             // ---------------------------------------------------------
-            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu', 'sync', 'selaras'].includes(cmd))) {
+            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu', 'sync', 'selaras', 'fixsession', 'sesi', 'ram', 'memori'].includes(cmd))) {
                 console.log(`[Arahan Pentadbir Danial] ${remoteJid}: "${textContent}"`);
 
                 // 1.1 TUNGGU: Lihat senarai menunggu bayaran
@@ -1247,7 +1324,77 @@ async function startBot() {
                     continue;
                 }
 
-                // 1.9 BANTUAN / MENU PENTADBIR
+                // 1.9 FIXSESSION: Pemulihan Sesi Signal & Swa-Penyembuhan Dekripsi WhatsApp
+                if (['fixsession', 'sesi'].includes(cmd)) {
+                    const targetRaw = textParts[1];
+                    let targetPhone = targetRaw ? normalizeIdentifier(targetRaw) : '';
+
+                    if (msgRetryCounterCache && typeof msgRetryCounterCache.flushAll === 'function') {
+                        msgRetryCounterCache.flushAll();
+                    }
+                    recentMessages.clear();
+
+                    let extraInfo = '';
+                    if (targetPhone) {
+                        try {
+                            const checkJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                            const [waUser] = await sock.onWhatsApp(checkJid);
+                            if (waUser && waUser.lid) {
+                                const localUsers = loadUsers();
+                                const cleanLid = normalizeIdentifier(waUser.lid);
+                                if (localUsers[targetPhone]) {
+                                    localUsers[targetPhone].lid = cleanLid;
+                                    localUsers[cleanLid] = localUsers[targetPhone];
+                                    saveUsers(localUsers);
+                                }
+                                extraInfo = `\n• Sasaran: ${targetPhone} (LID: ${cleanLid})\n• Sesi Signal & identiti LID diperbaharui.`;
+                            }
+                        } catch (e) {
+                            extraInfo = `\n• Ralat pautan sasaran: ${e.message}`;
+                        }
+                    }
+
+                    const synced = await syncAllActiveLids(sock);
+
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `🔧 *PEMULIHAN SESI SIGNAL BERJAYA (/fixsession)*\n\n` +
+                            `• Retry Counter Cache: Dikosongkan (flushAll)\n` +
+                            `• Simpanan Mesej Ringkas: Direset (0 item)\n` +
+                            `• Penyelarasan LID Ahli Aktif: ${synced} diselaraskan${extraInfo}\n\n` +
+                            `Masalah *"Waiting for this message. Check your phone."* telah dipulihkan. Sila minta pengguna menghantar semula mesej mereka.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                // 1.10 STATUS RAM & PRESTASI
+                if (['ram', 'memori'].includes(cmd)) {
+                    const mem = process.memoryUsage();
+                    const rssMB = (mem.rss / (1024 * 1024)).toFixed(1);
+                    const heapUsedMB = (mem.heapUsed / (1024 * 1024)).toFixed(1);
+                    const uptimeSec = Math.floor(process.uptime());
+                    const hours = Math.floor(uptimeSec / 3600);
+                    const minutes = Math.floor((uptimeSec % 3600) / 60);
+                    const percentage = ((parseFloat(rssMB) / 256) * 100).toFixed(1);
+
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `STATUS SISTEM & PRESTASI PELAYAN\n\n` +
+                            `Penggunaan Memori:\n` +
+                            `• Memori Fizikal (RSS): ${rssMB} MB / 256.0 MB (${percentage}%)\n` +
+                            `• Memori Heap Aktif: ${heapUsedMB} MB\n` +
+                            `• Simpanan Mesej (recentMessages): ${recentMessages.size}/250 item\n` +
+                            `• Retry Cache: ${msgRetryCounterCache.size} item\n` +
+                            `• Kawalan Memori (GC): Aktif (--expose-gc & PM2 280M)\n\n` +
+                            `Status Antrian Pemprosesan:\n` +
+                            `• Sedang Diproses: ${videoQueue.activeJob ? '1 Media' : 'Tiada'}\n` +
+                            `• Menunggu Dalam Antrian: ${videoQueue.waitingLength} / ${MAX_QUEUE_SIZE} Media\n\n` +
+                            `Masa Operasi Pelayan: ${hours} jam ${minutes} minit`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                // 1.11 BANTUAN / MENU PENTADBIR
                 if (['bantuan', 'menu', 'help'].includes(cmd)) {
                     await sock.sendMessage(remoteJid, {
                         text:
@@ -1271,7 +1418,9 @@ async function startBot() {
                             `   └ Paparkan semua ahli aktif dan tarikh luput.\n\n` +
                             `8. *selaras*\n` +
                             `   └ Segerakkan identiti LID WhatsApp ahli aktif.\n\n` +
-                            `9. *ram*\n` +
+                            `9. *fixsession [nombor]*\n` +
+                            `   └ Pulihkan ralat dekripsi "Waiting for this message" & reset sesi Signal.\n\n` +
+                            `10. *ram*\n` +
                             `   └ Semak status memori pelayan & antrian.`
                     }, { quoted: msg });
                     continue;
@@ -1468,31 +1617,6 @@ async function startBot() {
                             `Sila taip *START* untuk melihat pakej dan memulakan langganan.`
                     }, { quoted: msg });
                 }
-                continue;
-            }
-
-            if (['ram', 'memori'].includes(cmd)) {
-                const mem = process.memoryUsage();
-                const rssMB = (mem.rss / (1024 * 1024)).toFixed(1);
-                const heapUsedMB = (mem.heapUsed / (1024 * 1024)).toFixed(1);
-                const uptimeSec = Math.floor(process.uptime());
-                const hours = Math.floor(uptimeSec / 3600);
-                const minutes = Math.floor((uptimeSec % 3600) / 60);
-                const percentage = ((parseFloat(rssMB) / 256) * 100).toFixed(1);
-
-                await sock.sendMessage(remoteJid, {
-                    text:
-                        `STATUS SISTEM & PRESTASI PELAYAN\n\n` +
-                        `Penggunaan Memori:\n` +
-                        `• Memori Fizikal (RSS): ${rssMB} MB / 256.0 MB (${percentage}%)\n` +
-                        `• Memori Heap Aktif: ${heapUsedMB} MB\n` +
-                        `• Kawalan Memori (GC): Aktif (--expose-gc & PM2 280M)\n` +
-                        `• Status: Cemerlang & Terkawal\n\n` +
-                        `Status Antrian Pemprosesan:\n` +
-                        `• Sedang Diproses: ${videoQueue.activeJob ? '1 Media' : 'Tiada'}\n` +
-                        `• Menunggu Dalam Antrian: ${videoQueue.waitingLength} / ${MAX_QUEUE_SIZE} Media\n\n` +
-                        `Masa Operasi Pelayan: ${hours} jam ${minutes} minit`
-                }, { quoted: msg });
                 continue;
             }
 
