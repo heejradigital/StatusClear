@@ -1246,7 +1246,7 @@ const PWA_MANIFEST = {
 };
 
 const PWA_SW = `
-const CACHE_NAME = 'statusclear-telemetry-v1';
+const CACHE_NAME = 'statusclear-telemetry-v2';
 const ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -1714,6 +1714,9 @@ const PWA_HTML = `<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       cursor: pointer;
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-user-select: none;
       transition: background 0.1s ease, transform 0.1s ease;
     }
     .key-btn:active {
@@ -1748,18 +1751,18 @@ const PWA_HTML = `<!DOCTYPE html>
     </div>
 
     <div class="keypad">
-      <button class="key-btn" onclick="pressKey('1')">1</button>
-      <button class="key-btn" onclick="pressKey('2')">2</button>
-      <button class="key-btn" onclick="pressKey('3')">3</button>
-      <button class="key-btn" onclick="pressKey('4')">4</button>
-      <button class="key-btn" onclick="pressKey('5')">5</button>
-      <button class="key-btn" onclick="pressKey('6')">6</button>
-      <button class="key-btn" onclick="pressKey('7')">7</button>
-      <button class="key-btn" onclick="pressKey('8')">8</button>
-      <button class="key-btn" onclick="pressKey('9')">9</button>
-      <button class="key-btn" style="font-size: 12px; color: #8E9387;" onclick="clearPin()">RESET</button>
-      <button class="key-btn" onclick="pressKey('0')">0</button>
-      <button class="key-btn" onclick="deletePin()">
+      <button type="button" class="key-btn" onclick="pressKey('1')">1</button>
+      <button type="button" class="key-btn" onclick="pressKey('2')">2</button>
+      <button type="button" class="key-btn" onclick="pressKey('3')">3</button>
+      <button type="button" class="key-btn" onclick="pressKey('4')">4</button>
+      <button type="button" class="key-btn" onclick="pressKey('5')">5</button>
+      <button type="button" class="key-btn" onclick="pressKey('6')">6</button>
+      <button type="button" class="key-btn" onclick="pressKey('7')">7</button>
+      <button type="button" class="key-btn" onclick="pressKey('8')">8</button>
+      <button type="button" class="key-btn" onclick="pressKey('9')">9</button>
+      <button type="button" class="key-btn" style="font-size: 12px; color: #8E9387;" onclick="clearPin()">RESET</button>
+      <button type="button" class="key-btn" onclick="pressKey('0')">0</button>
+      <button type="button" class="key-btn" onclick="deletePin()">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"></path><line x1="18" y1="9" x2="12" y2="15"></line><line x1="12" y1="9" x2="18" y2="15"></line></svg>
       </button>
     </div>
@@ -2248,14 +2251,27 @@ const PWA_HTML = `<!DOCTYPE html>
               'Luput: <strong style="color: #FFFFFF;">' + escHtml(u.expiredAtFormatted) + '</strong> • Tajaan: <strong style="color: #C6FF00;">' + (u.paidReferrals || 0) + '/3</strong>' +
             '</div>' +
             '<div class="user-actions">' +
-              '<button class="btn-action lime" onclick="handleUserExtend(\'' + safePhone + '\', 30)">+30 Hari</button>' +
-              '<button class="btn-action lime" onclick="handleUserExtend(\'' + safePhone + '\', 90)">+90 Hari</button>' +
-              '<button class="btn-action danger" onclick="handleUserExpire(\'' + safePhone + '\')">Tamatkan</button>' +
+              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-days="30">+30 Hari</button>' +
+              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-days="90">+90 Hari</button>' +
+              '<button type="button" class="btn-action danger" data-action="expire" data-phone="' + safePhone + '">Tamatkan</button>' +
             '</div>' +
           '</div>';
       });
       container.innerHTML = html;
     }
+
+    document.getElementById('users-list-container').addEventListener('click', function (e) {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const act = btn.getAttribute('data-action');
+      const phone = btn.getAttribute('data-phone');
+      if (act === 'extend') {
+        const days = parseInt(btn.getAttribute('data-days'), 10) || 30;
+        handleUserExtend(phone, days);
+      } else if (act === 'expire') {
+        handleUserExpire(phone);
+      }
+    });
 
     function filterUsers() {
       if (currentData) renderUsers(currentData.users || []);
