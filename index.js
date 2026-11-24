@@ -1246,7 +1246,7 @@ const PWA_MANIFEST = {
 };
 
 const PWA_SW = `
-const CACHE_NAME = 'statusclear-telemetry-v2';
+const CACHE_NAME = 'statusclear-telemetry-v3';
 const ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -1291,12 +1291,12 @@ const PWA_HTML = `<!DOCTYPE html>
       font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif;
       min-height: 100vh;
       overflow-x: hidden;
-      padding-bottom: 110px;
+      padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 110px);
     }
     .app-container {
       max-width: 460px;
       margin: 0 auto;
-      padding: 24px 18px 20px;
+      padding: calc(env(safe-area-inset-top, 0px) + 24px) 18px 20px;
     }
 
     /* TYPOGRAPHY & HEADER */
@@ -1494,8 +1494,80 @@ const PWA_HTML = `<!DOCTYPE html>
       font-family: inherit;
       font-size: 13px;
       outline: none;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
       position: relative;
+    }
+    .pill-filter-bar {
+      display: flex;
+      gap: 8px;
+      background: #141612;
+      border: 1px solid rgba(198, 255, 0, 0.14);
+      border-radius: 999px;
+      padding: 5px;
+      margin-bottom: 16px;
+    }
+    .filter-pill {
+      flex: 1;
+      background: transparent;
+      border: none;
+      border-radius: 999px;
+      padding: 8px 10px;
+      color: #8E9387;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s ease;
+    }
+    .filter-pill.active {
+      background: #C6FF00;
+      color: #0A0B08;
+      box-shadow: 0 0 14px rgba(198, 255, 0, 0.35);
+    }
+    .broadcast-textarea {
+      width: 100%;
+      min-height: 130px;
+      background: #0F110D;
+      border: 1px solid rgba(198, 255, 0, 0.2);
+      border-radius: 16px;
+      padding: 14px;
+      color: #FFFFFF;
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.5;
+      resize: vertical;
+      outline: none;
+    }
+    .broadcast-textarea:focus {
+      border-color: #C6FF00;
+    }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 12px 0;
+    }
+    .template-chip {
+      background: rgba(198, 255, 0, 0.08);
+      border: 1px solid rgba(198, 255, 0, 0.22);
+      color: #C6FF00;
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .broadcast-status-box {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(198, 255, 0, 0.08);
+      border: 1px solid rgba(198, 255, 0, 0.22);
+      font-size: 12px;
+      color: #FFFFFF;
+      display: none;
     }
     .search-wrapper {
       position: relative;
@@ -1609,10 +1681,10 @@ const PWA_HTML = `<!DOCTYPE html>
     /* FLOATING PILL BOTTOM NAVIGATION BAR */
     .bottom-nav {
       position: fixed;
-      bottom: 20px;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
       left: 50%;
       transform: translateX(-50%);
-      width: calc(100% - 32px);
+      width: calc(100% - 28px);
       max-width: 428px;
       background: rgba(22, 24, 19, 0.88);
       backdrop-filter: blur(20px);
@@ -1634,8 +1706,8 @@ const PWA_HTML = `<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 42px;
-      height: 42px;
+      width: 38px;
+      height: 38px;
       border-radius: 50%;
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
       font-family: inherit;
@@ -1645,10 +1717,10 @@ const PWA_HTML = `<!DOCTYPE html>
       color: #0A0B08;
       width: auto;
       border-radius: 999px;
-      padding: 0 16px;
-      gap: 8px;
+      padding: 0 13px;
+      gap: 6px;
       font-weight: 800;
-      font-size: 13px;
+      font-size: 12px;
       box-shadow: 0 0 20px rgba(198, 255, 0, 0.4);
     }
     .nav-btn .nav-text {
@@ -1669,7 +1741,7 @@ const PWA_HTML = `<!DOCTYPE html>
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 24px;
+      padding: calc(env(safe-area-inset-top, 0px) + 24px) 24px calc(env(safe-area-inset-bottom, 0px) + 24px);
       transition: opacity 0.3s ease, visibility 0.3s ease;
     }
     .pin-overlay.hidden {
@@ -1890,6 +1962,11 @@ const PWA_HTML = `<!DOCTYPE html>
         <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         <input type="text" class="search-box" id="user-search" placeholder="Cari nama, nombor telefon, atau kod referral..." oninput="filterUsers()">
       </div>
+      <div class="pill-filter-bar" id="user-filter-bar">
+        <button type="button" class="filter-pill active" id="filter-all" onclick="setUserFilter('all')">Semua (0)</button>
+        <button type="button" class="filter-pill" id="filter-paid" onclick="setUserFilter('paid')">Sudah Bayar (0)</button>
+        <button type="button" class="filter-pill" id="filter-unpaid" onclick="setUserFilter('unpaid')">Belum Bayar (0)</button>
+      </div>
       <div id="users-list-container">
         <!-- Rendered dynamically -->
       </div>
@@ -1956,27 +2033,67 @@ const PWA_HTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- TAB 5: BROADCAST MESSAGE -->
+    <div id="tab-broadcast" class="tab-content">
+      <div class="bento-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <span style="font-size: 14px; font-weight: 700;">Sasaran Penerima</span>
+          <span style="font-size: 11px; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;" id="broadcast-count-pill">0 Pengguna</span>
+        </div>
+
+        <div class="pill-filter-bar" style="margin-bottom: 14px;">
+          <button type="button" class="filter-pill active" id="bcast-target-all" onclick="setBroadcastTarget('all')">Semua</button>
+          <button type="button" class="filter-pill" id="bcast-target-paid" onclick="setBroadcastTarget('paid')">Sudah Bayar</button>
+          <button type="button" class="filter-pill" id="bcast-target-unpaid" onclick="setBroadcastTarget('unpaid')">Belum Bayar</button>
+        </div>
+
+        <div style="font-size: 12px; color: #8E9387; margin-bottom: 8px;">Templat Pantas (Pilihan):</div>
+        <div class="chip-row">
+          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('promo')">Promo Langganan</button>
+          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('reminder')">Peringatan Sambung</button>
+          <button type="button" class="template-chip" onclick="applyBroadcastTemplate('info')">Info Kemaskini</button>
+        </div>
+
+        <textarea id="broadcast-message" class="broadcast-textarea" placeholder="Tulis mesej WhatsApp broadcast di sini... Gunakan {nama} untuk nama pelanggan."></textarea>
+        <div style="font-size: 11px; color: #8E9387; margin-top: 8px;">
+          Pembolehubah disokong: <strong style="color: #C6FF00;">{nama}</strong> • Format WhatsApp (*bold*, _italic_)
+        </div>
+
+        <button type="button" class="primary-pill-btn" id="broadcast-send-btn" onclick="sendBroadcastMessage()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          <span id="broadcast-btn-label">Hantar Broadcast Sekarang</span>
+        </button>
+
+        <div class="broadcast-status-box" id="broadcast-status-box"></div>
+      </div>
+    </div>
+
   </div>
 
   <!-- FLOATING PILL BOTTOM NAVIGATION BAR -->
   <nav class="bottom-nav">
-    <button class="nav-btn active" id="btn-overview" onclick="switchTab('overview')">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+    <button type="button" class="nav-btn active" id="btn-overview" onclick="switchTab('overview')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
       <span class="nav-text">Overview</span>
     </button>
 
-    <button class="nav-btn" id="btn-users" onclick="switchTab('users')">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+    <button type="button" class="nav-btn" id="btn-users" onclick="switchTab('users')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
       <span class="nav-text">Users</span>
     </button>
 
-    <button class="nav-btn" id="btn-hitpay" onclick="switchTab('hitpay')">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line></svg>
+    <button type="button" class="nav-btn" id="btn-hitpay" onclick="switchTab('hitpay')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line></svg>
       <span class="nav-text">HitPay</span>
     </button>
 
-    <button class="nav-btn" id="btn-system" onclick="switchTab('system')">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+    <button type="button" class="nav-btn" id="btn-broadcast" onclick="switchTab('broadcast')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+      <span class="nav-text">Broadcast</span>
+    </button>
+
+    <button type="button" class="nav-btn" id="btn-system" onclick="switchTab('system')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
       <span class="nav-text">System</span>
     </button>
   </nav>
@@ -2057,7 +2174,7 @@ const PWA_HTML = `<!DOCTYPE html>
 
     // TAB SWITCHING
     function switchTab(tabId) {
-      const tabs = ['overview', 'users', 'hitpay', 'system'];
+      const tabs = ['overview', 'users', 'hitpay', 'broadcast', 'system'];
       tabs.forEach(t => {
         document.getElementById('tab-' + t).classList.remove('active');
         document.getElementById('btn-' + t).classList.remove('active');
@@ -2069,6 +2186,7 @@ const PWA_HTML = `<!DOCTYPE html>
         overview: 'Dashboard',
         users: 'Ahli & Referral',
         hitpay: 'HitPay Gateway',
+        broadcast: 'Broadcast WhatsApp',
         system: 'Telemetri Sistem'
       };
       document.getElementById('page-heading').innerText = titles[tabId] || 'Dashboard';
@@ -2076,6 +2194,8 @@ const PWA_HTML = `<!DOCTYPE html>
 
     // TELEMETRY STATE & POLLING
     let currentData = null;
+    let currentUserFilter = 'all';
+    let broadcastTarget = 'all';
 
     async function fetchStats() {
       try {
@@ -2140,9 +2260,13 @@ const PWA_HTML = `<!DOCTYPE html>
       document.getElementById('sys-queue').innerText = (data.queue.waiting || 0) + ' / ' + data.queue.max;
       document.getElementById('sys-wa-num').innerText = '+' + (data.pairingNumber || data.adminNumber || '601157270564');
 
-      // Users List & HitPay Transactions
+      // Users List & HitPay Transactions & Broadcast State
       renderUsers(data.users || []);
       renderTransactions(data.transactions || []);
+      updateBroadcastTargetCount();
+      if (data.broadcastState && data.broadcastState.running) {
+        showBroadcastStatus('Sedang menghantar: ' + data.broadcastState.sent + ' berjaya, ' + data.broadcastState.failed + ' gagal (daripada ' + data.broadcastState.total + ')');
+      }
     }
 
     function render7DayChart(values) {
@@ -2219,11 +2343,34 @@ const PWA_HTML = `<!DOCTYPE html>
     }
 
     // USERS RENDERING & ACTIONS
+    function setUserFilter(filter) {
+      currentUserFilter = filter;
+      ['all', 'paid', 'unpaid'].forEach(f => {
+        const el = document.getElementById('filter-' + f);
+        if (el) el.classList.toggle('active', f === filter);
+      });
+      if (currentData) renderUsers(currentData.users || []);
+    }
+
     function renderUsers(users) {
       const container = document.getElementById('users-list-container');
       const query = (document.getElementById('user-search').value || '').toLowerCase().trim();
-      
+
+      const paidCount = users.filter(u => u.status === 'ACTIVE').length;
+      const unpaidCount = users.length - paidCount;
+      const allBtn = document.getElementById('filter-all');
+      const paidBtn = document.getElementById('filter-paid');
+      const unpaidBtn = document.getElementById('filter-unpaid');
+      if (allBtn) allBtn.innerText = 'Semua (' + users.length + ')';
+      if (paidBtn) paidBtn.innerText = 'Sudah Bayar (' + paidCount + ')';
+      if (unpaidBtn) unpaidBtn.innerText = 'Belum Bayar (' + unpaidCount + ')';
+
       const filtered = users.filter(u => {
+        const matchesCat =
+          currentUserFilter === 'all' ||
+          (currentUserFilter === 'paid' && u.status === 'ACTIVE') ||
+          (currentUserFilter === 'unpaid' && u.status !== 'ACTIVE');
+        if (!matchesCat) return false;
         return (u.name || '').toLowerCase().includes(query) ||
                (u.phone || '').includes(query) ||
                (u.refCode || '').toLowerCase().includes(query);
@@ -2237,6 +2384,7 @@ const PWA_HTML = `<!DOCTYPE html>
       let html = '';
       filtered.forEach(u => {
         const isAct = u.status === 'ACTIVE';
+        const badgeText = isAct ? 'AKTIF' : (u.rawStatus === 'WAITING' ? 'MENUNGGU' : (u.rawStatus === 'NEW' ? 'BELUM BAYAR' : 'LUPUT'));
         const safePhone = String(u.phone || '').replace(/[^0-9]/g, '');
         html +=
           '<div class="user-card">' +
@@ -2245,7 +2393,7 @@ const PWA_HTML = `<!DOCTYPE html>
                 '<div class="user-name">' + escHtml(u.name) + '</div>' +
                 '<div class="user-phone">' + escHtml(u.phone) + ' • Kod: <strong style="color: #C6FF00;">' + escHtml(u.refCode) + '</strong></div>' +
               '</div>' +
-              '<span class="user-badge ' + (isAct ? 'active' : 'expired') + '">' + (isAct ? 'AKTIF' : 'LUPUT') + '</span>' +
+              '<span class="user-badge ' + (isAct ? 'active' : 'expired') + '">' + badgeText + '</span>' +
             '</div>' +
             '<div style="font-size: 12px; color: #8E9387;">' +
               'Luput: <strong style="color: #FFFFFF;">' + escHtml(u.expiredAtFormatted) + '</strong> • Tajaan: <strong style="color: #C6FF00;">' + (u.paidReferrals || 0) + '/3</strong>' +
@@ -2258,6 +2406,92 @@ const PWA_HTML = `<!DOCTYPE html>
           '</div>';
       });
       container.innerHTML = html;
+    }
+
+    // BROADCAST FUNCTIONS
+    function setBroadcastTarget(target) {
+      broadcastTarget = target;
+      ['all', 'paid', 'unpaid'].forEach(t => {
+        const el = document.getElementById('bcast-target-' + t);
+        if (el) el.classList.toggle('active', t === target);
+      });
+      updateBroadcastTargetCount();
+    }
+
+    function getBroadcastRecipients() {
+      const users = (currentData && currentData.users) || [];
+      const adminNum = (currentData && currentData.adminNumber) || '';
+      return users.filter(u => {
+        if (!u.phone || u.phone === adminNum) return false;
+        if (broadcastTarget === 'paid') return u.status === 'ACTIVE';
+        if (broadcastTarget === 'unpaid') return u.status !== 'ACTIVE';
+        return true;
+      });
+    }
+
+    function updateBroadcastTargetCount() {
+      const pill = document.getElementById('broadcast-count-pill');
+      if (!pill) return;
+      const list = getBroadcastRecipients();
+      pill.innerText = list.length + ' Pengguna';
+    }
+
+    function applyBroadcastTemplate(type) {
+      const box = document.getElementById('broadcast-message');
+      if (!box) return;
+      if (type === 'promo') {
+        box.value = 'Hai {nama}, nikmati video & foto WhatsApp Status HD tanpa pecah dengan StatusClear! Balas *PAKEJ* untuk melanggan sekarang.';
+      } else if (type === 'reminder') {
+        box.value = 'Hai {nama}, langganan StatusClear anda hampir tamat atau telah luput. Balas *1* untuk sambung 30 hari (RM10) secara automatik!';
+      } else if (type === 'info') {
+        box.value = 'Makluman StatusClear: Sistem telah dikemaskini untuk kelajuan pemprosesan 60 FPS yang lebih lancar. Hantar media anda sebagai Document untuk mula!';
+      }
+      box.focus();
+    }
+
+    function showBroadcastStatus(msg, isError) {
+      const box = document.getElementById('broadcast-status-box');
+      if (!box) return;
+      box.style.display = 'block';
+      box.style.borderColor = isError ? 'rgba(255, 107, 107, 0.45)' : 'rgba(198, 255, 0, 0.28)';
+      box.style.background = isError ? 'rgba(255, 75, 75, 0.12)' : 'rgba(198, 255, 0, 0.08)';
+      box.style.color = isError ? '#FF6B6B' : '#FFFFFF';
+      box.innerText = msg;
+    }
+
+    async function sendBroadcastMessage() {
+      const msgEl = document.getElementById('broadcast-message');
+      const btn = document.getElementById('broadcast-send-btn');
+      const lbl = document.getElementById('broadcast-btn-label');
+      const text = (msgEl && msgEl.value || '').trim();
+      if (!text) {
+        showBroadcastStatus('Sila tulis mesej broadcast terlebih dahulu.', true);
+        return;
+      }
+      const recipients = getBroadcastRecipients();
+      if (recipients.length === 0) {
+        showBroadcastStatus('Tiada penerima dalam kategori sasaran ini.', true);
+        return;
+      }
+      const targetLabel = broadcastTarget === 'paid' ? 'Sudah Bayar' : (broadcastTarget === 'unpaid' ? 'Belum Bayar' : 'Semua');
+      if (!confirm('Hantar mesej broadcast kepada ' + recipients.length + ' pengguna (' + targetLabel + ')?')) {
+        return;
+      }
+
+      btn.disabled = true;
+      lbl.innerText = 'Sedang Menghantar...';
+      showBroadcastStatus('Memulakan penghantaran kepada ' + recipients.length + ' pengguna...', false);
+
+      const res = await postAction('sendBroadcast', { target: broadcastTarget, message: text });
+      btn.disabled = false;
+      lbl.innerText = 'Hantar Broadcast Sekarang';
+
+      if (res && res.success) {
+        showBroadcastStatus(res.message || 'Broadcast berjaya dihantar.', false);
+      } else {
+        showBroadcastStatus((res && res.message) || 'Gagal menghantar broadcast.', true);
+      }
+      fetchStats();
     }
 
     document.getElementById('users-list-container').addEventListener('click', function (e) {
@@ -2358,6 +2592,13 @@ const PWA_HTML = `<!DOCTYPE html>
 const PORT = process.env.PORT || process.env.WEBHOOK_PORT || 3000;
 let currentSock = null;
 let httpServer = null;
+let broadcastState = {
+    running: false,
+    sent: 0,
+    failed: 0,
+    total: 0,
+    lastCompletedAt: null
+};
 
 function ensureHttpServer() {
     if (httpServer) return httpServer;
@@ -2482,10 +2723,12 @@ function ensureHttpServer() {
                 },
                 weeklyActivity: weeklyData,
                 railwayRenewDate: cfg.railwayRenewDate || '',
+                broadcastState,
                 transactions: stats.transactions || [],
                 users: userList.map(u => ({
                     phone: u.phone,
                     name: u.name,
+                    rawStatus: u.status || 'NEW',
                     status: (u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now()) ? 'ACTIVE' : 'EXPIRED',
                     expiredAt: u.expiredAt,
                     expiredAtFormatted: u.expiredAt ? new Date(u.expiredAt).toLocaleDateString('ms-MY') : 'Tiada',
@@ -2566,6 +2809,92 @@ function ensureHttpServer() {
                         saveConfig(cfg);
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ success: true, message: 'Tarikh luput Railway dikemas kini.' }));
+                        return;
+                    }
+
+                    if (action === 'sendBroadcast') {
+                        const messageText = typeof body.message === 'string' ? body.message.trim() : '';
+                        const target = body.target || 'all';
+
+                        if (!messageText) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, message: 'Mesej broadcast tidak boleh kosong.' }));
+                            return;
+                        }
+                        if (!currentSock || !currentSock.user) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, message: 'Bot WhatsApp sedang OFFLINE. Sila sambungkan WhatsApp dahulu.' }));
+                            return;
+                        }
+                        if (broadcastState.running) {
+                            res.writeHead(409, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, message: 'Broadcast lain sedang berjalan. Sila tunggu sebentar.' }));
+                            return;
+                        }
+
+                        const users = loadUsers();
+                        const uniqueUsers = Object.values(users).filter((u, i, arr) => arr.findIndex(x => x.phone === u.phone) === i);
+                        const recipients = uniqueUsers.filter(u => {
+                            if (!u.phone || u.phone === ADMIN_NUMBER) return false;
+                            const isPaid = u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now();
+                            if (target === 'paid') return isPaid;
+                            if (target === 'unpaid') return !isPaid;
+                            return true;
+                        });
+
+                        if (recipients.length === 0) {
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: false, message: 'Tiada penerima dijumpai dalam kategori ini.' }));
+                            return;
+                        }
+
+                        const runBroadcast = async () => {
+                            broadcastState = {
+                                running: true,
+                                sent: 0,
+                                failed: 0,
+                                total: recipients.length,
+                                lastCompletedAt: null
+                            };
+                            for (const u of recipients) {
+                                try {
+                                    const targetJid = u.jid || u.altJid || (u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`);
+                                    const personalized = messageText.replace(/\{nama\}/gi, u.name || 'Ahli');
+                                    await currentSock.sendMessage(targetJid, { text: personalized });
+                                    broadcastState.sent++;
+                                } catch (sendErr) {
+                                    broadcastState.failed++;
+                                    console.error(`[PWA Broadcast] Gagal hantar ke ${u.phone}:`, sendErr.message);
+                                }
+                                await new Promise(r => setTimeout(r, 900));
+                            }
+                            broadcastState.running = false;
+                            broadcastState.lastCompletedAt = Date.now();
+                        };
+
+                        if (recipients.length <= 15) {
+                            await runBroadcast();
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({
+                                success: true,
+                                sent: broadcastState.sent,
+                                failed: broadcastState.failed,
+                                total: broadcastState.total,
+                                message: `Broadcast selesai! ${broadcastState.sent}/${broadcastState.total} mesej berjaya dihantar${broadcastState.failed > 0 ? `, ${broadcastState.failed} gagal` : ''}.`
+                            }));
+                        } else {
+                            runBroadcast().catch(err => {
+                                console.error('[PWA Broadcast Error]:', err);
+                                broadcastState.running = false;
+                            });
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({
+                                success: true,
+                                queued: true,
+                                total: recipients.length,
+                                message: `Broadcast dimulakan secara berperingkat kepada ${recipients.length} pengguna.`
+                            }));
+                        }
                         return;
                     }
 
