@@ -3,13 +3,14 @@
  * Single-file, ultra-lightweight implementation (<384MB RAM)
  * 
  * Features:
- * - Automated HitPay Payment Request API (FPX, DuitNow QR, eWallets, Cards)
+ * - Direct Automated HitPay Payment Request API (FPX, DuitNow QR, eWallets, Cards)
  * - HMAC-SHA256 Verified Webhook Endpoint (POST /webhook/hitpay)
  * - Railway Ready (process.env.PORT, persistent Volumes, native Linux FFmpeg)
  * - 60 FPS Native Video Encoding (15.2MB Bitrate Passthrough & CAS Sharpening)
  * - 2560px QHD+ Photo Enhancement (CAS Filter & Dynamic Anti-Compression Safe)
  * - Core/Middle Name + 3 Unique Digits Referral System
- * - Malay Admin Commands & Signal Decryption Anti-Waiting Fix
+ * - Consistent Sender JID Normalization (@lid & @s.whatsapp.net)
+ * - Zero Static QR Fallbacks: 100% Direct HitPay Links
  */
 
 const {
@@ -49,9 +50,6 @@ const ADMIN_IDENTIFIERS = [
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const AUTH_DIR = path.resolve(process.env.AUTH_DIR || path.join(__dirname, 'auth_info'));
 const TEMP_DIR = path.join(__dirname, 'temp');
-const ASSETS_DIR = path.join(__dirname, 'assets');
-const QR_PAYMENT_PATH = path.join(ASSETS_DIR, 'qr-payment.jpg');
-const GITKEEP_PATH = path.join(ASSETS_DIR, '.gitkeep');
 
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const PERSISTENT_USERS_FILE = path.join(AUTH_DIR, 'users.json');
@@ -78,21 +76,17 @@ if (fs.existsSync(TEMP_DIR)) {
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(ASSETS_DIR)) fs.mkdirSync(ASSETS_DIR, { recursive: true });
-if (!fs.existsSync(QR_PAYMENT_PATH) && !fs.existsSync(GITKEEP_PATH)) {
-    try { fs.writeFileSync(GITKEEP_PATH, ''); } catch {}
-}
 
 // -------------------------------------------------------------
 // KONFIGURASI HITPAY PAYMENT GATEWAY
 // -------------------------------------------------------------
-const HITPAY_API_KEY = process.env.HITPAY_API_KEY || '';
-const HITPAY_SALT = process.env.HITPAY_SALT || '';
-const HITPAY_ENV = (process.env.HITPAY_ENV || 'live').toLowerCase();
+const HITPAY_API_KEY = (process.env.HITPAY_API_KEY || '').trim();
+const HITPAY_SALT = (process.env.HITPAY_SALT || '').trim();
+const HITPAY_ENV = (process.env.HITPAY_ENV || 'live').toLowerCase().trim();
 const HITPAY_API_URL = HITPAY_ENV === 'sandbox'
     ? 'https://api.sandbox.hit-pay.com/v1/payment-requests'
     : 'https://api.hit-pay.com/v1/payment-requests';
-const WEBHOOK_PUBLIC_URL = process.env.WEBHOOK_PUBLIC_URL || '';
+const WEBHOOK_PUBLIC_URL = (process.env.WEBHOOK_PUBLIC_URL || '').trim();
 
 // -------------------------------------------------------------
 // TEMPLAT PAKEJ LANGGANAN RASMI
@@ -103,32 +97,28 @@ const PACKAGES = {
         title: '1 Bulan (Asas)',
         price: 'RM10',
         amount: '10.00',
-        days: 30,
-        badge: 'Asas'
+        days: 30
     },
     '2': {
         key: '2',
         title: '3 Bulan (Popular)',
         price: 'RM25',
         amount: '25.00',
-        days: 90,
-        badge: 'Jimat RM5'
+        days: 90
     },
     '3': {
         key: '3',
         title: '6 Bulan (Pro)',
         price: 'RM48',
         amount: '48.00',
-        days: 180,
-        badge: 'Jimat RM12'
+        days: 180
     },
     '4': {
         key: '4',
         title: '1 Tahun (VIP)',
         price: 'RM90',
         amount: '90.00',
-        days: 365,
-        badge: 'Jimat RM30 • Percuma 3 Bulan'
+        days: 365
     }
 };
 
@@ -147,7 +137,7 @@ const PACKAGE_TEMPLATE =
 4️⃣ *1 Tahun (VIP)* — *RM90* _(Jimat RM30 • Percuma 3 Bulan)_
    └ Tempoh Aktif: +365 Hari
 
-👉 *Balas nombor 1, 2, 3, atau 4* untuk mendapatkan pautan pembayaran selamat (FPX, DuitNow QR, eWallet & Kad).`;
+👉 *Balas nombor 1, 2, 3, atau 4* untuk menjana pautan pembayaran selamat (FPX, DuitNow QR, eWallet & Kad).`;
 
 // -------------------------------------------------------------
 // SISTEM PENJANAAN KOD REFERRAL PINTAR (CORE NAME + 3 DIGITS)
@@ -795,72 +785,49 @@ function unwrapMessage(msg) {
 }
 
 // -------------------------------------------------------------
-// PANGGILAN HITPAY PAYMENT REQUEST API
+// PANGGILAN HITPAY PAYMENT REQUEST API (TERUS TANPA QR STATIK)
 // -------------------------------------------------------------
-async function createHitPayPaymentRequest({ phone, name, packageInfo, days, pushName }) {
-    if (!HITPAY_API_KEY) {
-        throw new Error('HITPAY_API_KEY tidak dikonfigurasikan.');
+async function createHitPayPaymentRequest({ phone, pushName, days, amount }) {
+    const apiKey = (process.env.HITPAY_API_KEY || '').trim();
+    if (!apiKey) {
+        throw new Error('HITPAY_API_KEY tidak dikonfigurasikan dalam Environment Variables');
     }
 
-    const payload = new URLSearchParams({
-        amount: packageInfo.amount,
+    const hitpayUrl = (process.env.HITPAY_ENV || '').toLowerCase() === 'sandbox'
+        ? 'https://api.sandbox.hit-pay.com/v1/payment-requests'
+        : 'https://api.hit-pay.com/v1/payment-requests';
+
+    console.log(`[HITPAY] Creating payment request for ${phone} (${days} days)...`);
+
+    const bodyData = {
+        amount: amount,
         currency: 'MYR',
-        payment_methods: JSON.stringify(['fpx', 'duitnow', 'grabpay', 'card', 'shopeepay']),
-        name: pushName || name || 'Ahli StatusClear',
-        purpose: `WhatsApp Status HD (${days} Hari)`,
+        name: pushName || phone,
+        purpose: `StatusClear (${days} Hari)`,
         reference_number: `${phone}|${days}`,
-        channel: 'api_payment_request'
-    });
+        webhook: (process.env.WEBHOOK_PUBLIC_URL || '').trim()
+    };
 
-    if (WEBHOOK_PUBLIC_URL) {
-        payload.append('webhook', WEBHOOK_PUBLIC_URL);
-    }
-
-    const res = await fetch(HITPAY_API_URL, {
+    const res = await fetch(hitpayUrl, {
         method: 'POST',
         headers: {
-            'X-BUSINESS-API-KEY': HITPAY_API_KEY,
-            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-BUSINESS-API-KEY': apiKey,
+            'Content-Type': 'application/json',
             'X-Requested-With': 'XMLHttpRequest'
         },
-        body: payload.toString()
+        body: JSON.stringify(bodyData)
     });
 
-    const data = await res.json();
-    if (!res.ok || !data.url) {
-        const errMsg = data.message || JSON.stringify(data);
+    console.log(`[HITPAY] Response status: ${res.status} ${res.statusText}`);
+
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || !data.url) {
+        const errMsg = data?.message || (data ? JSON.stringify(data) : 'Tiada respon sah');
+        console.error(`[HITPAY] Gagal menjana pautan HitPay (${res.status}):`, errMsg);
         throw new Error(`HitPay API Error (${res.status}): ${errMsg}`);
     }
 
     return data;
-}
-
-async function sendQrFallback(sock, remoteJid, msg, user, selectedPkg) {
-    user.status = 'WAITING';
-    const users = loadUsers();
-    users[user.phone] = user;
-    saveUsers(users);
-
-    const payCaption =
-        `MAKLUMAT PEMBAYARAN MANUAL (${BOT_NAME})\n\n` +
-        (selectedPkg ? `Pakej Dipilih: *${selectedPkg.title}* (${selectedPkg.price})\n\n` : `${PACKAGE_TEMPLATE}\n\n`) +
-        `💳 *Nama Penerima:* MUHAMMAD DANIAL BIN MOHAMMAD NASIR\n` +
-        `📌 *Cara Pembayaran:*\n` +
-        `1. Imbas kod QR DuitNow di atas menggunakan mana-mana aplikasi Bank atau eWallet anda.\n` +
-        `2. Masukkan jumlah bayaran (${selectedPkg ? selectedPkg.price : 'mengikut pakej'}).\n` +
-        `3. Hantarkan resit pembayaran di sini.\n\n` +
-        `Anda telah dimasukkan ke dalam Senarai Menunggu (*Waiting List*). Akaun anda akan diaktifkan oleh pentadbir sebaik sahaja resit disahkan.`;
-
-    if (fs.existsSync(QR_PAYMENT_PATH)) {
-        await sock.sendMessage(remoteJid, {
-            image: fs.readFileSync(QR_PAYMENT_PATH),
-            caption: payCaption
-        }, { quoted: msg });
-    } else {
-        await sock.sendMessage(remoteJid, {
-            text: payCaption
-        }, { quoted: msg });
-    }
 }
 
 // -------------------------------------------------------------
@@ -880,7 +847,6 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
         return true;
     }
 
-    // 1. Semakan mod payload parameter sorting (URL-encoded / JSON dengan field hmac)
     const hmacInPayload = parsedBody?.hmac;
     if (hmacInPayload) {
         const dataToSign = { ...parsedBody };
@@ -899,7 +865,6 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
         }
     }
 
-    // 2. Semakan mod header (Hitpay-Signature / X-Signature)
     const headerSig = headers['hitpay-signature'] || headers['x-signature'];
     if (headerSig) {
         const computedHeaderHmac = crypto
@@ -929,7 +894,6 @@ function ensureHttpServer() {
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
         const pathname = parsedUrl.pathname;
 
-        // Health Check Endpoints (Railway requirement)
         if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
@@ -942,7 +906,6 @@ function ensureHttpServer() {
             return;
         }
 
-        // Webhook Penerimaan Bayaran HitPay
         if (req.method === 'POST' && pathname === '/webhook/hitpay') {
             let chunks = [];
             req.on('data', chunk => chunks.push(chunk));
@@ -969,7 +932,6 @@ function ensureHttpServer() {
 
                 console.log(`[HitPay Webhook] Menerima event: payment_id=${paymentId}, status=${status}, ref=${referenceNumber}`);
 
-                // Pengesahan HMAC Signature
                 const isSignatureValid = verifyHitPaySignature(rawBuffer, req.headers, parsedBody);
                 if (!isSignatureValid) {
                     console.error('[HitPay Webhook] Ralat Keselamatan: Tandatangan HMAC tidak sah!');
@@ -978,7 +940,6 @@ function ensureHttpServer() {
                     return;
                 }
 
-                // Semakan Idempotensi (Elak kredit berganda)
                 const processed = loadProcessedPayments();
                 if (paymentId && processed.has(paymentId)) {
                     console.log(`[HitPay Webhook] Idempotensi: Transaksi ${paymentId} sudah diproses.`);
@@ -1039,7 +1000,6 @@ function ensureHttpServer() {
                                 }
                             }
 
-                            // Segerakkan LID WhatsApp
                             if (currentSock) {
                                 try {
                                     const checkJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
@@ -1052,7 +1012,6 @@ function ensureHttpServer() {
                                 } catch {}
                             }
 
-                            // Ganjaran Penaja (Referral Reward)
                             let referralRewardMsg = '';
                             if (targetUser.referredBy && !targetUser.referralCredited) {
                                 targetUser.referralCredited = true;
@@ -1092,7 +1051,6 @@ function ensureHttpServer() {
                                 day: '2-digit', month: '2-digit', year: 'numeric'
                             });
 
-                            // Notifikasi WhatsApp kepada Pengguna
                             const userJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
                             if (currentSock) {
                                 try {
@@ -1105,14 +1063,13 @@ function ensureHttpServer() {
                                             `• Tarikh Luput: *${expDateStr}*\n` +
                                             `• Kod Referral Peribadi Anda: *${targetUser.refCode}*\n\n` +
                                             `🎁 *Ganjaran Referral Peribadi:*\n` +
-                                            `Ajak 3 rakan anda melanggan menggunakan kod anda (*${targetUser.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik!\n\n` +
+                                            `Ajak 3 rakan anda melanggan menggunakan kod anda (*${targetUser.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik!\n\n` +
                                             `Sila hantar video anda sebagai fail Dokumen (atau terus hantar foto) untuk menikmati pengoptimuman 60 FPS & 2560px HD tanpa mampatan!`
                                     });
                                 } catch (e) {
                                     console.error('[HitPay Webhook] Gagal maklumkan pengguna di WhatsApp:', e);
                                 }
 
-                                // Notifikasi kepada Pentadbir Utama
                                 const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
                                 try {
                                     await currentSock.sendMessage(adminJid, {
@@ -1184,7 +1141,6 @@ async function startBot() {
     currentSock = sock;
     ensureHttpServer();
 
-    // Pintas sock.sendMessage untuk merekod mesej bot ke recentMessages
     const origSendMessage = sock.sendMessage.bind(sock);
     sock.sendMessage = async function(jid, content, options) {
         const res = await origSendMessage(jid, content, options);
@@ -1214,7 +1170,7 @@ async function startBot() {
             console.log('\n======================================================');
             console.log(`Pelayan ${BOT_NAME} telah beroperasi.`);
             console.log(`Pentadbir Utama (Full Access): ${ADMIN_NUMBER}`);
-            console.log(`HitPay Gateway: ${HITPAY_API_KEY ? 'Aktif (' + HITPAY_ENV + ')' : 'Manual DuitNow QR'}`);
+            console.log(`HitPay Gateway: ${HITPAY_API_KEY ? 'Aktif (' + HITPAY_ENV + ')' : 'HITPAY_API_KEY Tiada'}`);
             console.log(`Webhook URL: ${WEBHOOK_PUBLIC_URL || 'Belum Ditetapkan'}`);
             console.log(`Enjin Video: 4K-Grade CAS Sharpening 60 FPS (15.2MB Max Bitrate & aq-mode 3)`);
             console.log(`Enjin Foto: 2560px QHD+ CAS Sharpening (Anti-Compression Safe)`);
@@ -1375,9 +1331,12 @@ async function startBot() {
                 }
             }
 
+            // Normalisasi Konsisten Identiti Pengirim (@lid & @s.whatsapp.net)
+            const rawJid = msg.key.remoteJidAlt || msg.key.remoteJid || '';
+            const phone = rawJid.split('@')[0].replace(/\D/g, '');
+
             const users = loadUsers();
-            const cleanPhone = normalizeIdentifier(altJid || remoteJid);
-            let user = findUserRecord(users, remoteJid, altJid);
+            let user = users[phone] || findUserRecord(users, remoteJid, altJid);
 
             // Jika mesej datang dari LID yang belum dikenali
             if ((!user || user.status !== 'ACTIVE') && remoteJid.endsWith('@lid')) {
@@ -1390,10 +1349,10 @@ async function startBot() {
                                 const cleanLid = normalizeIdentifier(waUser.lid);
                                 u.lid = cleanLid;
                                 users[cleanLid] = u;
-                                if (cleanLid === cleanPhone) {
+                                if (cleanLid === phone || cleanLid === normalizeIdentifier(remoteJid)) {
                                     user = u;
                                     saveUsers(users);
-                                    console.log(`[LID Dikenalpasti On-The-Fly] ${cleanPhone} -> ${u.phone} (${u.name})`);
+                                    console.log(`[LID Dikenalpasti On-The-Fly] ${remoteJid} -> ${u.phone} (${u.name})`);
                                     break;
                                 }
                             }
@@ -1402,11 +1361,11 @@ async function startBot() {
                 }
             }
 
-            if (!user && cleanPhone) {
+            if (!user && phone) {
                 const pushName = msg.pushName || 'Pengguna';
                 const refCode = generateReferralCode(pushName, users);
                 user = {
-                    phone: cleanPhone,
+                    phone: phone,
                     name: pushName,
                     status: 'NEW',
                     expiredAt: null,
@@ -1417,12 +1376,19 @@ async function startBot() {
                     refSentToExisting: false,
                     reminded3Days: false
                 };
-                users[cleanPhone] = user;
+                users[phone] = user;
+                if (remoteJid.endsWith('@lid')) {
+                    const cleanLid = normalizeIdentifier(remoteJid);
+                    if (cleanLid) {
+                        user.lid = cleanLid;
+                        users[cleanLid] = user;
+                    }
+                }
                 saveUsers(users);
             }
 
             const fromMe = msg.key.fromMe;
-            const isAdmin = fromMe || ADMIN_IDENTIFIERS.some(id => remoteJid.includes(id) || cleanPhone === id) || cleanPhone === ADMIN_NUMBER;
+            const isAdmin = fromMe || ADMIN_IDENTIFIERS.some(id => remoteJid.includes(id) || phone === id) || phone === ADMIN_NUMBER;
             const isActive = user && user.status === 'ACTIVE' && user.expiredAt && user.expiredAt > Date.now();
 
             const textContent = (inner.conversation || inner.extendedTextMessage?.text || '').trim();
@@ -1816,7 +1782,7 @@ async function startBot() {
                             `• Memori Fizikal (RSS): ${rssMB} MB / 384.0 MB (${percentage}%)\n` +
                             `• Memori Heap Aktif: ${heapUsedMB} MB\n` +
                             `• Simpanan Mesej (recentMessages): ${recentMessages.size}/250 item\n` +
-                            `• HitPay Status: ${HITPAY_API_KEY ? 'Aktif (' + HITPAY_ENV + ')' : 'Tidak Dikonfigurasikan'}\n` +
+                            `• HitPay Status: ${HITPAY_API_KEY ? 'Aktif (' + HITPAY_ENV + ')' : 'HITPAY_API_KEY Tiada'}\n` +
                             `• Kawalan Memori (GC): Aktif (--expose-gc & 384M Cap)\n\n` +
                             `Status Antrian Pemprosesan:\n` +
                             `• Sedang Diproses: ${videoQueue.activeJob ? '1 Media' : 'Tiada'}\n` +
@@ -1859,60 +1825,58 @@ async function startBot() {
             }
 
             // ---------------------------------------------------------
-            // 2. PEMILIHAN PAKEJ INTERAKTIF (1, 2, 3, 4) ➔ HITPAY GATEWAY
+            // 2. PEMILIHAN PAKEJ INTERAKTIF (1, 2, 3, 4) ➔ HITPAY TERUS
             // ---------------------------------------------------------
-            const selectedPkg = PACKAGES[textContent.trim()];
-            if (selectedPkg) {
-                if (HITPAY_API_KEY) {
+            const cleanText = textContent.trim();
+            const selectedPkg = PACKAGES[cleanText];
+            if (selectedPkg && (!isActive || (user && user.status !== 'ACTIVE') || (user && user.expiredAt && user.expiredAt <= Date.now()))) {
+                try {
+                    await sock.sendMessage(remoteJid, {
+                        react: { text: '⏳', key: msg.key }
+                    });
+                } catch {}
+
+                try {
+                    const hitpayRes = await createHitPayPaymentRequest({
+                        phone: phone,
+                        pushName: msg.pushName || user?.name || phone,
+                        days: selectedPkg.days,
+                        amount: selectedPkg.amount
+                    });
+
+                    await sock.sendMessage(remoteJid, {
+                        text:
+                            `💳 *PAUTAN PEMBAYARAN RASMI HITPAY*\n\n` +
+                            `Pakej: *${selectedPkg.title}* (${selectedPkg.price} - ${selectedPkg.days} Hari)\n\n` +
+                            `Sila tekan pautan selamat di bawah untuk membuat bayaran:\n` +
+                            `🔗 ${hitpayRes.url}\n\n` +
+                            `📌 *Kaedah Pembayaran Disokong:*\n` +
+                            `• DuitNow QR (Semua Bank & eWallet)\n` +
+                            `• FPX Online Banking (Maybank2u, CIMB Clicks, Bank Islam, dsb.)\n` +
+                            `• Touch 'n Go eWallet, GrabPay, ShopeePay\n` +
+                            `• Kad Debit / Kredit (Visa & Mastercard)\n\n` +
+                            `⚡ *Pengesahan Automatik:*\n` +
+                            `Akaun anda akan diaktifkan secara serta-merta sebaik sahaja transaksi selesai tanpa perlu hantar sebarang resit!`
+                    }, { quoted: msg });
+
+                    if (user) {
+                        user.status = 'WAITING';
+                        saveUsers(users);
+                    }
+
                     try {
                         await sock.sendMessage(remoteJid, {
-                            react: { text: '⏳', key: msg.key }
+                            react: { text: '🔗', key: msg.key }
                         });
                     } catch {}
 
-                    try {
-                        const hitpayRes = await createHitPayPaymentRequest({
-                            phone: user.phone,
-                            name: user.name,
-                            pushName: msg.pushName || user.name,
-                            packageInfo: selectedPkg,
-                            days: selectedPkg.days
-                        });
-
-                        await sock.sendMessage(remoteJid, {
-                            text:
-                                `💳 *PAUTAN PEMBAYARAN RASMI (${selectedPkg.title})*\n\n` +
-                                `Jumlah: *${selectedPkg.price}* (+${selectedPkg.days} Hari)\n\n` +
-                                `Sila tekan pautan selamat di bawah untuk membuat bayaran:\n` +
-                                `🔗 ${hitpayRes.url}\n\n` +
-                                `📌 *Kaedah Pembayaran Disokong:*\n` +
-                                `• DuitNow QR (Semua Bank & eWallet)\n` +
-                                `• FPX Online Banking (Maybank2u, CIMB, Bank Islam, dsb.)\n` +
-                                `• Touch 'n Go, GrabPay, ShopeePay\n` +
-                                `• Kad Debit / Kredit (Visa & Mastercard)\n\n` +
-                                `⚡ *Pengesahan Automatik:*\n` +
-                                `Akaun anda akan diaktifkan secara automatik sebaik sahaja bayaran selesai tanpa perlu menghantar sebarang resit!`
-                        }, { quoted: msg });
-
-                        user.status = 'WAITING';
-                        saveUsers(users);
-
-                        try {
-                            await sock.sendMessage(remoteJid, {
-                                react: { text: '🔗', key: msg.key }
-                            });
-                        } catch {}
-                        continue;
-
-                    } catch (apiErr) {
-                        console.error('[HitPay Ralat]', apiErr);
-                        await sendQrFallback(sock, remoteJid, msg, user, selectedPkg);
-                        continue;
-                    }
-                } else {
-                    await sendQrFallback(sock, remoteJid, msg, user, selectedPkg);
-                    continue;
+                } catch (err) {
+                    console.error(`[HITPAY] Ralat semasa memproses pembayaran untuk ${phone}:`, err.message);
+                    await sock.sendMessage(remoteJid, {
+                        text: `❌ *Ralat Pembayaran HitPay:*\n${err.message}\n\nSila hubungi pentadbir jika masalah berterusan.`
+                    }, { quoted: msg });
                 }
+                continue;
             }
 
             // ---------------------------------------------------------
