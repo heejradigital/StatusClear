@@ -27,7 +27,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
@@ -952,17 +952,12 @@ async function probeVideo(filePath, binPath) {
             filePath
         ];
 
-        const proc = spawn(binPath, args);
-        let stdout = '';
-
-        proc.stdout.on('data', (d) => { stdout += d.toString(); });
-
-        proc.on('close', (code) => {
+        execFile(binPath, args, { timeout: 120000, maxBuffer: 1024 * 1024 * 10 }, (err, stdout) => {
             let duration = 30;
             let fps = 30;
             let isHDR = false;
 
-            if (code === 0) {
+            if (!err && stdout) {
                 try {
                     const info = JSON.parse(stdout);
                     const vStream = info.streams && info.streams[0];
@@ -989,6 +984,7 @@ async function probeVideo(filePath, binPath) {
                     if (
                         transfer.includes('smpte2084') ||
                         transfer.includes('arib-std-b67') ||
+                        transfer.includes('bt2020') ||
                         primaries.includes('bt2020')
                     ) {
                         isHDR = true;
@@ -999,20 +995,22 @@ async function probeVideo(filePath, binPath) {
             }
             resolve({ duration, fps, isHDR });
         });
-
-        proc.on('error', () => resolve({ duration: 30, fps: 30, isHDR: false }));
     });
 }
 
 function computeWaTargetBitrate(clipDuration) {
-    return Math.min(10000, Math.max(2100, Math.floor(((15.8 * 8192) / Math.max(1, clipDuration)) - 140)));
+    const effectiveDuration = Math.min(Math.max(1, clipDuration || 30), 60);
+    return Math.max(3500, Math.min(11500, Math.floor(((15.2 * 8192) / effectiveDuration) - 96)));
 }
 
 async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sourceFps, isHDR, startSec = 0, clipDuration = 60) {
     return new Promise((resolve, reject) => {
         const segDuration = Math.min(60, Math.max(1, clipDuration));
+        const targetShortSide = vBitrate >= 4600 ? 1080 : 720;
+        const isHighFps = sourceFps >= 48;
         const hasCas = checkCasSupport(binPath);
-        const scaleFilter = "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'";
+        const scaleFilter = `scale='if(gt(iw,ih),-2,min(${targetShortSide},iw))':'if(gt(iw,ih),min(${targetShortSide},ih),-2)'`;
+        const sharpFilter = hasCas ? 'cas=strength=0.35' : 'unsharp=5:5:0.35:5:5:0.0';
 
         const filterParts = [];
         if (isHDR) {
@@ -1024,11 +1022,10 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sou
             }
         }
 
-        filterParts.push(scaleFilter);
-        if (hasCas) {
-            filterParts.push('cas=0.45');
+        filterParts.push(scaleFilter, sharpFilter);
+        if (isHighFps) {
+            filterParts.push('setpts=N/(60*TB)');
         }
-        filterParts.push('fps=60');
 
         const vfChain = filterParts.join(',');
         const args = ['-y'];
@@ -1040,25 +1037,49 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sou
             '-t', String(segDuration),
             '-vf', vfChain,
             '-c:v', 'libx264',
+            '-preset', 'fast',
             '-profile:v', 'high',
-            '-preset', 'veryfast',
-            '-crf', '18',
-            '-maxrate', '8M',
-            '-bufsize', '16M',
-            '-pix_fmt', 'yuv420p',
-            '-colorspace', 'bt709',
-            '-color_primaries', 'bt709',
-            '-color_trc', 'bt709',
-            '-movflags', '+faststart',
+            '-level:v', '4.2',
+            '-pix_fmt', 'yuv420p'
+        );
+
+        if (!isHDR) {
+            args.push(
+                '-colorspace', 'bt709',
+                '-color_primaries', 'bt709',
+                '-color_trc', 'bt709',
+                '-color_range', 'tv'
+            );
+        }
+
+        args.push(
+            '-refs', '3',
+            '-rc-lookahead', '30',
+            '-g', '60',
+            '-keyint_min', '60',
+            '-x264-params', 'deblock=-1:-1:aq-mode=3:aq-strength=1.05:psy-rd=1.05:0.15:bframes=0',
+            '-b:v', `${vBitrate}k`,
+            '-maxrate', `${Math.floor(vBitrate * 1.2)}k`,
+            '-bufsize', `${Math.floor(vBitrate * 2.4)}k`
+        );
+
+        if (isHighFps) {
+            args.push('-fps_mode', 'cfr', '-r', '60');
+        } else {
+            args.push('-fps_mode', 'cfr');
+        }
+
+        args.push(
             '-c:a', 'aac',
-            '-b:a', '128k',
-            '-ar', '48000',
+            '-b:a', '96k',
+            '-ar', '44100',
             '-ac', '2',
             '-threads', '2',
+            '-movflags', '+faststart',
             outputPath
         );
 
-        const proc = spawn(binPath, args);
+        const proc = spawn(binPath, args, { timeout: 120000 });
         let stderr = '';
 
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
@@ -5957,11 +5978,12 @@ async function startBot() {
                                     const partOutputPath = path.join(TEMP_DIR, `${fileId}_${partFileName}`);
 
                                     try {
-                                        console.log(`[FFmpeg Transcode WA] Bahagian ${partIdx + 1}/${totalParts} | 1080p60 CRF 18 (8M maxrate) | CAS 0.45 | Durasi: ${clipDuration.toFixed(1)}s | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR' : 'SDR'})`);
+                                        const targetShortSide = targetVideoKbps >= 4600 ? 1080 : 720;
+                                        console.log(`[FFmpeg Transcode WA] Bahagian ${partIdx + 1}/${totalParts} | ${targetShortSide}p @ ${targetVideoKbps} kbps (15.2MB Cap) | CAS 0.35 | aq-mode 3 | Durasi: ${clipDuration.toFixed(1)}s | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR'})`);
                                         await transcode60fpsVideo(inputPath, partOutputPath, ffmpegPath, targetVideoKbps, sourceFps, isHDR, startSec, clipDuration);
 
                                         const waSent = await safeSendMessage(sock, remoteJid, {
-                                            video: fs.readFileSync(partOutputPath),
+                                            video: { stream: fs.createReadStream(partOutputPath) },
                                             mimetype: 'video/mp4',
                                             hd: true
                                         }, { quoted: msg });
@@ -6579,9 +6601,10 @@ async function handleTelegramMessage(tgMsg) {
                             const partOutputPath = path.join(TEMP_DIR, `${fileId}_${partFileName}`);
                             try {
                                 await transcode60fpsVideo(inputPath, partOutputPath, ffmpegPath, targetVideoKbps, sourceFps, isHDR, startSec, clipDuration);
+                                const targetShortSide = targetVideoKbps >= 4600 ? 1080 : 720;
                                 const tgWaCaption = totalParts === 1
-                                    ? `✓ VIDEO WHATSAPP STATUS HD SIAP\nSimpan file ini terus ke galeri dan muat naik ke WhatsApp Status tanpa trim/edit.\n• Profil: 1080p60 | CRF 18 (8M maxrate) | Audio 128k`
-                                    : `✓ VIDEO WHATSAPP STATUS HD — Bahagian ${partIdx + 1}/${totalParts}\nSimpan file ini dan muat naik mengikut turutan ke WhatsApp Status.\n• Profil: 1080p60 | CRF 18 (8M maxrate)`;
+                                    ? `✓ VIDEO WHATSAPP STATUS HD SIAP\nSimpan file ini terus ke galeri dan muat naik ke WhatsApp Status tanpa trim/edit.\n• Profil: ${targetShortSide}p | ${sourceFps >= 48 ? '60fps' : sourceFps.toFixed(1) + 'fps'} | ${targetVideoKbps} kbps (15.2MB Cap) | Audio 96k`
+                                    : `✓ VIDEO WHATSAPP STATUS HD — Bahagian ${partIdx + 1}/${totalParts}\nSimpan file ini dan muat naik mengikut turutan ke WhatsApp Status.\n• Profil: ${targetShortSide}p | ${targetVideoKbps} kbps (15.2MB Cap)`;
                                 await sendTelegramMedia(chatId, 'document', partOutputPath, tgWaCaption, msgId);
                             } finally {
                                 if (fs.existsSync(partOutputPath)) { try { fs.unlinkSync(partOutputPath); } catch {} }
