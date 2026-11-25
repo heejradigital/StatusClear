@@ -125,6 +125,43 @@ if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // -------------------------------------------------------------
+// PENORMALAN NAMA (TITLE CASE) & PENGIRAAN YURAN HITPAY
+// -------------------------------------------------------------
+function formatTitleCaseName(rawName, fallbackPhone = '') {
+    const cleaned = String(rawName || '')
+        .replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
+        .replace(/[^\p{L}\p{N}\s'.-]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!cleaned || /^(undefined|null|none|-)$/i.test(cleaned)) {
+        const digits = String(fallbackPhone || '0000').replace(/\D/g, '');
+        return 'User ' + (digits.slice(-4) || '0000');
+    }
+    return cleaned
+        .split(' ')
+        .filter(Boolean)
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(' ');
+}
+
+function computeHitPayFeeAndNet(grossAmount, explicitFee = null) {
+    const gross = Number((parseFloat(grossAmount) || 0).toFixed(2));
+    const feePercent = parseFloat(process.env.HITPAY_FEE_PERCENT || '1.5');
+    const fee = (explicitFee != null && explicitFee !== '' && !isNaN(parseFloat(explicitFee)))
+        ? Number(parseFloat(explicitFee).toFixed(2))
+        : Number(((gross * feePercent) / 100).toFixed(2));
+    const net = Number(Math.max(0, gross - fee).toFixed(2));
+    return {
+        gross: gross.toFixed(2),
+        fee: fee.toFixed(2),
+        net: net.toFixed(2),
+        grossNum: gross,
+        feeNum: fee,
+        netNum: net
+    };
+}
+
+// -------------------------------------------------------------
 // PENGURUSAN STATISTIK & KONFIGURASI TELEMETRI (PWA)
 // -------------------------------------------------------------
 function loadStats() {
@@ -159,7 +196,15 @@ function recordTransaction(tx) {
         const stats = loadStats();
         if (!stats.transactions) stats.transactions = [];
         if (tx.paymentId && stats.transactions.some(t => t.paymentId === tx.paymentId)) return;
-        stats.transactions.unshift(tx);
+        const fin = computeHitPayFeeAndNet(tx.amount, tx.feeAmount ?? tx.fees);
+        const normalizedTx = {
+            ...tx,
+            buyerName: formatTitleCaseName(tx.buyerName, tx.buyerPhone),
+            amount: fin.gross,
+            feeAmount: fin.fee,
+            netAmount: fin.net
+        };
+        stats.transactions.unshift(normalizedTx);
         if (stats.transactions.length > 100) stats.transactions = stats.transactions.slice(0, 100);
         saveStats(stats);
     } catch (e) {}
@@ -342,7 +387,57 @@ function normalizeUserTiers(u) {
     u.expiredAt = maxExp > 0 ? maxExp : (u.expiredAt || null);
     u.preferredMode = (u.preferredMode === 'TT') ? 'TT' : 'WA';
     u.telegramChatId = u.telegramChatId || null;
+    u.name = formatTitleCaseName(u.name, u.phone);
+    if (!u.createdAt || typeof u.createdAt !== 'number' || isNaN(u.createdAt)) {
+        const regParsed = u.registeredAt ? new Date(u.registeredAt).getTime() : NaN;
+        u.createdAt = !isNaN(regParsed) ? regParsed : Date.now();
+    }
     return u;
+}
+
+function migrateNamesAndFinancialsOnStartup() {
+    try {
+        const users = loadUsers();
+        let usersChanged = false;
+        for (const u of Object.values(users)) {
+            if (!u || typeof u !== 'object') continue;
+            const prevName = u.name;
+            const prevCreatedAt = u.createdAt;
+            normalizeUserTiers(u);
+            if (u.name !== prevName || u.createdAt !== prevCreatedAt) {
+                usersChanged = true;
+            }
+        }
+        if (usersChanged) {
+            saveUsers(users);
+            console.log('[Startup Migration] Nama pengguna (Title Case) & createdAt dikemaskini dalam users.json.');
+        }
+
+        const stats = loadStats();
+        let statsChanged = false;
+        if (Array.isArray(stats.transactions)) {
+            stats.transactions = stats.transactions.map(tx => {
+                const fin = computeHitPayFeeAndNet(tx.amount, tx.feeAmount ?? tx.fees);
+                const formattedBuyer = formatTitleCaseName(tx.buyerName, tx.buyerPhone);
+                if (tx.buyerName !== formattedBuyer || tx.feeAmount == null || tx.netAmount == null || String(tx.amount) !== fin.gross) {
+                    statsChanged = true;
+                }
+                return {
+                    ...tx,
+                    buyerName: formattedBuyer,
+                    amount: fin.gross,
+                    feeAmount: fin.fee,
+                    netAmount: fin.net
+                };
+            });
+            if (statsChanged) {
+                saveStats(stats);
+                console.log('[Startup Migration] Rekod transaksi HitPay (Title Case & Net/Fee) dikemaskini dalam stats.json.');
+            }
+        }
+    } catch (err) {
+        console.error('[Startup Migration Error]:', err.message);
+    }
 }
 
 function hasWaAccess(user, isSuperAdmin = false) {
@@ -1092,7 +1187,7 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
 // -------------------------------------------------------------
 // FUNGSI PUSAT PENGAKTIFAN BAYARAN BERJAYA (WEBHOOK & AUTO-SYNC)
 // -------------------------------------------------------------
-async function processCompletedPayment({ paymentId, referenceNumber, customerName, paymentType, amountPaid }) {
+async function processCompletedPayment({ paymentId, referenceNumber, customerName, paymentType, amountPaid, feeAmount = null }) {
     if (!referenceNumber || !referenceNumber.includes('|')) {
         return { success: false, reason: 'invalid_reference' };
     }
@@ -1131,7 +1226,8 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             }
         }
 
-        const finalName = customerName || targetUser?.name || 'Ahli';
+        const rawCandidateName = customerName || targetUser?.name || '';
+        const finalName = formatTitleCaseName(rawCandidateName, targetKey);
         const now = Date.now();
         const addMs = days * 24 * 60 * 60 * 1000;
         const addedMonths = Math.max(1, Math.round(days / 30));
@@ -1141,6 +1237,7 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
                 phone: targetKey,
                 name: finalName,
                 status: 'ACTIVE',
+                createdAt: now,
                 registeredAt: new Date().toISOString(),
                 subscribedMonths: addedMonths,
                 waExpiredAt: (planCode === 'WA' || planCode === 'COMBO') ? (now + addMs) : null,
@@ -1159,8 +1256,8 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             users[targetKey] = targetUser;
         } else {
             normalizeUserTiers(targetUser);
-            if (finalName && (!targetUser.name || targetUser.name === 'Ahli' || targetUser.name === 'Pengguna')) {
-                targetUser.name = finalName;
+            if (customerName && (!targetUser.name || /^(ahli|pengguna|member|user\s*\d*)$/i.test(targetUser.name))) {
+                targetUser.name = formatTitleCaseName(customerName, targetKey);
             }
             targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
             if (planCode !== 'UPGRADE_TT') {
@@ -1295,13 +1392,16 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             ? parseFloat(amountPaid).toFixed(2)
             : (planPrices[planCode] || pkgPrices[days] || '11.99');
 
+        const fin = computeHitPayFeeAndNet(txAmount, feeAmount);
         recordTransaction({
             paymentId: paymentId || `HITPAY_${Date.now()}`,
-            buyerName: targetUser.name || finalName,
+            buyerName: formatTitleCaseName(targetUser.name || finalName, targetUser.phone),
             buyerPhone: targetUser.phone,
             planCode,
             packageDays: days,
-            amount: txAmount,
+            amount: fin.gross,
+            feeAmount: fin.fee,
+            netAmount: fin.net,
             timestamp: Date.now(),
             method: paymentType || 'HitPay Online Gateway'
         });
@@ -1762,7 +1862,7 @@ const PWA_MANIFEST = {
 };
 
 const PWA_SW = `
-const CACHE_NAME = 'statusclear-telemetry-v5';
+const CACHE_NAME = 'statusclear-telemetry-v6';
 const ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -1976,6 +2076,7 @@ const PWA_HTML = `<!DOCTYPE html>
       color: #FFFFFF;
       margin: 8px 0 6px;
       letter-spacing: -0.3px;
+      font-variant-numeric: tabular-nums;
     }
     .sparkline-svg {
       width: 100%;
@@ -2450,8 +2551,9 @@ const PWA_HTML = `<!DOCTYPE html>
       <!-- 3-COLUMN BENTO GRID -->
       <div class="grid-3">
         <div class="mini-card">
-          <span class="mini-label">Revenue</span>
-          <span class="mini-val" id="stat-revenue">RM 0.00</span>
+          <span class="mini-label">Revenue (All)</span>
+          <span class="mini-val" id="stat-revenue" style="margin-bottom: 2px;">RM 0.00</span>
+          <span id="stat-revenue-net" style="font-size: 10.5px; color: #C6FF00; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 4px;">Net RM 0.00</span>
           <svg viewBox="0 0 80 24" class="sparkline-svg">
             <rect x="4" y="12" width="8" height="12" rx="2" fill="rgba(198,255,0,0.3)"/>
             <rect x="20" y="8" width="8" height="16" rx="2" fill="rgba(198,255,0,0.5)"/>
@@ -2591,6 +2693,13 @@ const PWA_HTML = `<!DOCTYPE html>
         <button type="button" class="filter-pill" id="filter-tt" onclick="setUserFilter('tt')">Subs TT (0)</button>
         <button type="button" class="filter-pill" id="filter-combo" onclick="setUserFilter('combo')">Subs WA + TT (0)</button>
       </div>
+      <div class="pill-filter-bar" id="user-pay-sort-bar" style="margin-top: -8px;">
+        <button type="button" class="filter-pill active" id="pay-filter-all" onclick="setPayFilter('all')">All</button>
+        <button type="button" class="filter-pill" id="pay-filter-paid" onclick="setPayFilter('paid')">Paid</button>
+        <button type="button" class="filter-pill" id="pay-filter-unpaid" onclick="setPayFilter('unpaid')">Unpaid</button>
+        <button type="button" class="filter-pill active" id="sort-newest" onclick="setUserSort('newest')">Newest</button>
+        <button type="button" class="filter-pill" id="sort-oldest" onclick="setUserSort('oldest')">Oldest</button>
+      </div>
       <div id="users-list-container">
         <!-- Rendered dynamically -->
       </div>
@@ -2610,6 +2719,24 @@ const PWA_HTML = `<!DOCTYPE html>
           </div>
         </div>
         <div class="broadcast-status-box" id="hitpay-sync-status" style="margin-top: 10px;"></div>
+      </div>
+
+      <div class="grid-3">
+        <div class="mini-card">
+          <span class="mini-label">Gross (All)</span>
+          <span class="mini-val" id="hitpay-gross-rev" style="font-size: 15px;">RM 0.00</span>
+          <span style="font-size: 10px; color: #8E9387;">Total Collected</span>
+        </div>
+        <div class="mini-card">
+          <span class="mini-label">Net (Bersih)</span>
+          <span class="mini-val" id="hitpay-net-rev" style="font-size: 15px; color: #C6FF00;">RM 0.00</span>
+          <span style="font-size: 10px; color: #8E9387;">After HitPay Fee</span>
+        </div>
+        <div class="mini-card">
+          <span class="mini-label">HitPay Fees</span>
+          <span class="mini-val" id="hitpay-total-fees" style="font-size: 15px; color: #FF9F43;">RM 0.00</span>
+          <span style="font-size: 10px; color: #8E9387;">Gateway Fee</span>
+        </div>
       </div>
 
       <div class="grid-2">
@@ -2848,6 +2975,8 @@ const PWA_HTML = `<!DOCTYPE html>
     // TELEMETRY STATE & POLLING
     let currentData = null;
     let currentUserFilter = 'all';
+    let currentPayFilter = 'all';
+    let currentUserSort = 'newest';
     let broadcastTarget = 'all';
     let hitpayView = 'payments';
 
@@ -2889,9 +3018,14 @@ const PWA_HTML = `<!DOCTYPE html>
       document.getElementById('gauge-arc').style.strokeDashoffset = offset;
 
       // 3-Column Bento Stats
-      document.getElementById('stat-revenue').innerText = 'RM ' + (data.metrics.revenueRM || '0.00');
-      document.getElementById('stat-users').innerText = data.metrics.activeUsersCount || '0';
-      document.getElementById('stat-media').innerText = data.metrics.totalMediaProcessed || '0';
+      const metricsObj = data.metrics || {};
+      const grossRevStr = data.grossRevenue || metricsObj.grossRevenue || metricsObj.revenueRM || '0.00';
+      const netRevStr = data.netRevenue || metricsObj.netRevenue || '0.00';
+      document.getElementById('stat-revenue').innerText = 'RM ' + grossRevStr;
+      const netRevEl = document.getElementById('stat-revenue-net');
+      if (netRevEl) netRevEl.innerText = 'Net RM ' + netRevStr;
+      document.getElementById('stat-users').innerText = metricsObj.activeUsersCount || '0';
+      document.getElementById('stat-media').innerText = metricsObj.totalMediaProcessed || '0';
 
       // 7-Day Chart
       render7DayChart(data.weeklyActivity || [0,0,0,0,0,0,0]);
@@ -3082,6 +3216,24 @@ const PWA_HTML = `<!DOCTYPE html>
       if (currentData) renderUsers(currentData.users || []);
     }
 
+    function setPayFilter(mode) {
+      currentPayFilter = mode;
+      ['all', 'paid', 'unpaid'].forEach(m => {
+        const el = document.getElementById('pay-filter-' + m);
+        if (el) el.classList.toggle('active', m === mode);
+      });
+      if (currentData) renderUsers(currentData.users || []);
+    }
+
+    function setUserSort(dir) {
+      currentUserSort = dir;
+      ['newest', 'oldest'].forEach(d => {
+        const el = document.getElementById('sort-' + d);
+        if (el) el.classList.toggle('active', d === dir);
+      });
+      if (currentData) renderUsers(currentData.users || []);
+    }
+
     function renderUsers(users) {
       const container = document.getElementById('users-list-container');
       const query = (document.getElementById('user-search').value || '').toLowerCase().trim();
@@ -3107,9 +3259,20 @@ const PWA_HTML = `<!DOCTYPE html>
           (currentUserFilter === 'tt' && hasTt) ||
           (currentUserFilter === 'combo' && hasWa && hasTt);
         if (!matchesCat) return false;
+
+        const isPaidUser = (u.totalPaid || 0) > 0 || hasWa || hasTt;
+        if (currentPayFilter === 'paid' && !isPaidUser) return false;
+        if (currentPayFilter === 'unpaid' && isPaidUser) return false;
+
         return (u.name || '').toLowerCase().includes(query) ||
                (u.phone || '').includes(query) ||
                (u.refCode || '').toLowerCase().includes(query);
+      });
+
+      filtered.sort((a, b) => {
+        const ta = a.createdAt || 0;
+        const tb = b.createdAt || 0;
+        return currentUserSort === 'oldest' ? (ta - tb) : (tb - ta);
       });
 
       if (filtered.length === 0) {
@@ -3307,13 +3470,22 @@ const PWA_HTML = `<!DOCTYPE html>
         : (data.transactions || []);
       const payoutsList = Array.isArray(hp.payouts) ? hp.payouts : [];
 
-      const collectedStr = hp.totalCollectedRM != null ? hp.totalCollectedRM : (data.metrics.revenueRM || '0.00');
+      const collectedStr = data.grossRevenue || (hp.totalCollectedRM != null ? hp.totalCollectedRM : (data.metrics.revenueRM || '0.00'));
+      const netStr = data.netRevenue || (hp.totalNetRM != null ? hp.totalNetRM : '0.00');
+      const feesStr = data.totalFees || '0.00';
+
+      const grossHeaderEl = document.getElementById('hitpay-gross-rev');
+      const netHeaderEl = document.getElementById('hitpay-net-rev');
+      const feesHeaderEl = document.getElementById('hitpay-total-fees');
+      if (grossHeaderEl) grossHeaderEl.innerText = 'RM ' + collectedStr;
+      if (netHeaderEl) netHeaderEl.innerText = 'RM ' + netStr;
+      if (feesHeaderEl) feesHeaderEl.innerText = 'RM ' + feesStr;
+
       const collectedEl = document.getElementById('hitpay-total-collected');
       const collectedMetaEl = document.getElementById('hitpay-collected-meta');
       if (collectedEl) collectedEl.innerText = 'RM ' + collectedStr;
       if (collectedMetaEl) {
-        const netPart = hp.totalNetRM != null ? (' • Net RM ' + hp.totalNetRM) : '';
-        collectedMetaEl.innerText = (hp.paymentsCount || paymentsList.length) + ' payments' + netPart;
+        collectedMetaEl.innerText = (hp.paymentsCount || paymentsList.length) + ' payments • Net RM ' + netStr;
       }
 
       const payoutEl = document.getElementById('hitpay-total-payout');
@@ -3546,18 +3718,62 @@ function ensureHttpServer() {
             const cfg = loadConfig();
             const hitpayData = await fetchHitPayDashboardData(false);
 
-            const hitpayPayments = (hitpayData.configured && hitpayData.payments && hitpayData.payments.length > 0)
+            const rawHitpayPayments = (hitpayData.configured && hitpayData.payments && hitpayData.payments.length > 0)
                 ? hitpayData.payments
                 : (stats.transactions || []);
 
-            let totalRevenue = 0;
+            const hitpayPayments = rawHitpayPayments.map(tx => {
+                const fin = computeHitPayFeeAndNet(tx.amount, tx.feeAmount ?? tx.fees);
+                return {
+                    ...tx,
+                    buyerName: formatTitleCaseName(tx.buyerName, tx.buyerPhone),
+                    amount: fin.gross,
+                    feeAmount: fin.fee,
+                    netAmount: fin.net
+                };
+            });
+
+            let grossRevenue = 0;
+            let totalFees = 0;
+            let netRevenue = 0;
+            let todayRevenue = 0;
+            const todayIso = new Date().toLocaleDateString('en-CA');
+
+            hitpayPayments.forEach(tx => {
+                const amt = parseFloat(tx.amount) || 0;
+                const fee = parseFloat(tx.feeAmount) || 0;
+                const net = parseFloat(tx.netAmount) || 0;
+                if (tx.timestamp && new Date(tx.timestamp).toLocaleDateString('en-CA') === todayIso) {
+                    todayRevenue += amt;
+                }
+                if (!(hitpayData.configured && hitpayData.totalCollectedRM != null)) {
+                    grossRevenue += amt;
+                    totalFees += fee;
+                    netRevenue += net;
+                }
+            });
+
             if (hitpayData.configured && hitpayData.totalCollectedRM != null) {
-                totalRevenue = parseFloat(hitpayData.totalCollectedRM) || 0;
-            } else if (stats.transactions && stats.transactions.length > 0) {
-                totalRevenue = stats.transactions.reduce((sum, tx) => sum + (parseFloat(tx.amount) || 0), 0);
-            } else {
-                totalRevenue = activeUsers.length * 10;
+                grossRevenue = parseFloat(hitpayData.totalCollectedRM) || 0;
+                if (hitpayData.totalNetRM != null && !isNaN(parseFloat(hitpayData.totalNetRM))) {
+                    netRevenue = parseFloat(hitpayData.totalNetRM) || 0;
+                    totalFees = Math.max(0, Number((grossRevenue - netRevenue).toFixed(2)));
+                } else if (hitpayPayments.length > 0) {
+                    const summedFees = hitpayPayments.reduce((s, t) => s + (parseFloat(t.feeAmount) || 0), 0);
+                    totalFees = Number(summedFees.toFixed(2));
+                    netRevenue = Math.max(0, Number((grossRevenue - totalFees).toFixed(2)));
+                } else {
+                    const est = computeHitPayFeeAndNet(grossRevenue);
+                    totalFees = est.feeNum;
+                    netRevenue = est.netNum;
+                }
+            } else if (hitpayPayments.length === 0) {
+                grossRevenue = activeUsers.length * 11.99;
+                const est = computeHitPayFeeAndNet(grossRevenue);
+                totalFees = est.feeNum;
+                netRevenue = est.netNum;
             }
+            const totalRevenue = grossRevenue;
 
             const now = new Date();
             const dayOfWeek = (now.getDay() + 6) % 7;
@@ -3589,10 +3805,16 @@ function ensureHttpServer() {
             readinessScore = Math.max(10, Math.min(100, readinessScore));
 
             const txDaysByPhone = {};
-            (stats.transactions || []).forEach(tx => {
+            const txPaidByPhone = {};
+            const seenTxIds = new Set();
+            [...(hitpayPayments || []), ...(stats.transactions || [])].forEach(tx => {
+                const txKey = tx.paymentId || `${tx.buyerPhone}_${tx.timestamp}_${tx.amount}`;
+                if (seenTxIds.has(txKey)) return;
+                seenTxIds.add(txKey);
                 if (tx.buyerPhone) {
                     const p = normalizeIdentifier(tx.buyerPhone);
                     txDaysByPhone[p] = (txDaysByPhone[p] || 0) + (parseInt(tx.packageDays, 10) || 30);
+                    txPaidByPhone[p] = (txPaidByPhone[p] || 0) + (parseFloat(tx.amount) || 0);
                 }
             });
 
@@ -3606,6 +3828,10 @@ function ensureHttpServer() {
                 readinessScore,
                 uptime,
                 uptimeFormatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
+                grossRevenue: grossRevenue.toFixed(2),
+                netRevenue: netRevenue.toFixed(2),
+                totalFees: totalFees.toFixed(2),
+                todayRevenue: todayRevenue.toFixed(2),
                 ram: {
                     rssMB: parseFloat(rssMB.toFixed(1)),
                     heapUsedMB: parseFloat((mem.heapUsed / (1024 * 1024)).toFixed(1)),
@@ -3624,6 +3850,10 @@ function ensureHttpServer() {
                 },
                 metrics: {
                     revenueRM: totalRevenue.toFixed(2),
+                    grossRevenue: grossRevenue.toFixed(2),
+                    netRevenue: netRevenue.toFixed(2),
+                    totalFees: totalFees.toFixed(2),
+                    todayRevenue: todayRevenue.toFixed(2),
                     activeUsersCount: activeUsers.length,
                     totalUsersCount: userList.length,
                     videosProcessed: stats.videosProcessed || 0,
@@ -3665,6 +3895,8 @@ function ensureHttpServer() {
                     return {
                         phone: u.phone,
                         name: u.name,
+                        createdAt: u.createdAt || Date.now(),
+                        totalPaid: Number((txPaidByPhone[u.phone] || 0).toFixed(2)),
                         rawStatus: u.status || 'NEW',
                         status: isAct ? 'ACTIVE' : 'EXPIRED',
                         tier: (waActive && ttActive) ? 'COMBO' : (waActive ? 'WA' : (ttActive ? 'TT' : 'NONE')),
@@ -3706,7 +3938,7 @@ function ensureHttpServer() {
                     if (action === 'registerUser') {
                         const rawPhone = String(body.phone || '').trim();
                         const targetPhone = rawPhone.startsWith('tg_') ? rawPhone : normalizeIdentifier(rawPhone);
-                        const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'Member';
+                        const name = formatTitleCaseName(body.name, targetPhone);
                         const tier = ['WA', 'TT', 'COMBO'].includes(String(body.tier || '').toUpperCase())
                             ? String(body.tier).toUpperCase()
                             : 'WA';
@@ -4063,7 +4295,8 @@ function ensureHttpServer() {
                         referenceNumber,
                         customerName: data.name || parsedBody.name || '',
                         paymentType: data.payment_type || parsedBody.payment_type || (data.payment_methods && data.payment_methods[0]) || 'HitPay Online Gateway',
-                        amountPaid: data.amount || parsedBody.amount
+                        amountPaid: data.amount || parsedBody.amount,
+                        feeAmount: data.fees ?? data.fee ?? parsedBody.fees ?? parsedBody.fee ?? null
                     });
                 }
 
@@ -4243,12 +4476,13 @@ async function startBot() {
             }
 
             if (!user && phone) {
-                const pushName = msg.pushName || 'Pengguna';
+                const pushName = formatTitleCaseName(msg.pushName, phone);
                 const refCode = generateReferralCode(pushName, users);
-                user = {
+                user = normalizeUserTiers({
                     phone: phone,
                     name: pushName,
                     status: 'NEW',
+                    createdAt: Date.now(),
                     expiredAt: null,
                     refCode: refCode,
                     referredBy: null,
@@ -4258,7 +4492,7 @@ async function startBot() {
                     reminded3Days: false,
                     jid: remoteJid,
                     altJid: altJid || null
-                };
+                });
                 users[phone] = user;
                 if (remoteJid.endsWith('@lid')) {
                     const cleanLid = normalizeIdentifier(remoteJid);
@@ -4269,6 +4503,11 @@ async function startBot() {
                 }
                 saveUsers(users);
             } else if (user) {
+                normalizeUserTiers(user);
+                if (msg.pushName && (!user.name || /^(ahli|pengguna|member|user\s*\d*)$/i.test(user.name))) {
+                    user.name = formatTitleCaseName(msg.pushName, phone);
+                    saveUsers(users);
+                }
                 user.jid = remoteJid;
                 if (altJid) user.altJid = altJid;
             }
@@ -4379,11 +4618,12 @@ async function startBot() {
                     const addMonths = Math.max(1, Math.round(days / 30));
 
                     if (!targetUser) {
-                        const fallbackName = optName || 'Ahli';
+                        const fallbackName = formatTitleCaseName(optName, targetPhone);
                         targetUser = normalizeUserTiers({
                             phone: targetPhone,
                             name: fallbackName,
                             status: 'ACTIVE',
+                            createdAt: now,
                             registeredAt: new Date().toISOString(),
                             subscribedMonths: addMonths,
                             waExpiredAt: (grantTier === 'wa' || grantTier === 'combo') ? (now + addMs) : null,
@@ -4401,7 +4641,7 @@ async function startBot() {
                         users[targetPhone] = targetUser;
                     } else {
                         normalizeUserTiers(targetUser);
-                        if (optName) targetUser.name = optName;
+                        if (optName) targetUser.name = formatTitleCaseName(optName, targetPhone);
                         targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
                         targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + addMonths;
                         if (grantTier === 'wa' || grantTier === 'combo') {
@@ -5607,13 +5847,15 @@ async function downloadTelegramFile(fileId, maxBytes = 20 * 1024 * 1024, destPat
 
 function getOrCreateTelegramUser(users, chatId, displayName) {
     const tgKey = `tg_${chatId}`;
+    const cleanDisplayName = formatTitleCaseName(displayName, chatId);
     let user = users[tgKey] || Object.values(users).find(u => String(u.telegramChatId || '') === String(chatId));
     if (!user) {
         user = normalizeUserTiers({
             phone: tgKey,
             telegramChatId: String(chatId),
-            name: displayName || `TG_${chatId}`,
+            name: cleanDisplayName,
             status: 'NEW',
+            createdAt: Date.now(),
             waExpiredAt: null,
             ttExpiredAt: null,
             preferredMode: 'WA',
@@ -5630,10 +5872,13 @@ function getOrCreateTelegramUser(users, chatId, displayName) {
         saveUsers(users);
     } else {
         normalizeUserTiers(user);
+        if (cleanDisplayName && /^user\s*\d*$/i.test(user.name)) {
+            user.name = cleanDisplayName;
+        }
         if (!user.telegramChatId) {
             user.telegramChatId = String(chatId);
-            saveUsers(users);
         }
+        saveUsers(users);
     }
     return { tgKey, user };
 }
@@ -5642,7 +5887,8 @@ async function handleTelegramMessage(tgMsg) {
     if (!tgMsg || !tgMsg.chat) return;
     const chatId = String(tgMsg.chat.id);
     const msgId = tgMsg.message_id;
-    const fromName = [tgMsg.from?.first_name, tgMsg.from?.last_name].filter(Boolean).join(' ') || tgMsg.from?.username || `User ${chatId}`;
+    const rawFromName = [tgMsg.from?.first_name, tgMsg.from?.last_name].filter(Boolean).join(' ') || tgMsg.from?.username || '';
+    const fromName = formatTitleCaseName(rawFromName, chatId);
     const textContent = (tgMsg.text || tgMsg.caption || '').trim();
     const textParts = textContent.split(/\s+/);
     const cmdRaw = (textParts[0] || '').toLowerCase();
@@ -6086,6 +6332,7 @@ async function startTelegramBot() {
     }
 }
 
+migrateNamesAndFinancialsOnStartup();
 startBot();
 if (TELEGRAM_BOT_TOKEN) {
     startTelegramBot();
