@@ -22,7 +22,8 @@ const {
     downloadMediaMessage,
     Browsers,
     fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore
+    makeCacheableSignalKeyStore,
+    proto
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -660,25 +661,162 @@ const msgRetryCounterCache = {
     clear() { this._map.clear(); }
 };
 
-const MAX_CACHED_MESSAGES = 500;
+const MSG_CACHE_FILE = path.join(DATA_DIR, 'msg_cache.json');
+const MAX_CACHED_MESSAGES = 300;
 const cachedMessages = new Map();
+let msgCacheSaveTimer = null;
+let isShuttingDown = false;
+
+function loadMsgCache() {
+    try {
+        if (!fs.existsSync(MSG_CACHE_FILE)) return;
+        const raw = JSON.parse(fs.readFileSync(MSG_CACHE_FILE, 'utf8'));
+        if (!raw || typeof raw !== 'object') return;
+        const entries = Object.entries(raw).slice(-MAX_CACHED_MESSAGES);
+        for (const [id, msgObj] of entries) {
+            if (!id || !msgObj) continue;
+            try {
+                const hydrated = (proto && proto.Message && typeof proto.Message.fromObject === 'function')
+                    ? proto.Message.fromObject(msgObj)
+                    : msgObj;
+                cachedMessages.set(id, hydrated);
+            } catch {
+                cachedMessages.set(id, msgObj);
+            }
+        }
+        console.log(`[MsgCache] Loaded ${cachedMessages.size} cached messages from disk.`);
+    } catch (err) {
+        console.error('[MsgCache Load Error]:', err.message);
+    }
+}
+
+function flushMsgCache() {
+    if (msgCacheSaveTimer) {
+        clearTimeout(msgCacheSaveTimer);
+        msgCacheSaveTimer = null;
+    }
+    try {
+        const obj = {};
+        for (const [k, v] of cachedMessages.entries()) {
+            obj[k] = v;
+        }
+        fs.writeFileSync(MSG_CACHE_FILE, JSON.stringify(obj));
+    } catch (err) {
+        console.error('[MsgCache Flush Error]:', err.message);
+    }
+}
+
+function scheduleMsgCacheSave() {
+    if (msgCacheSaveTimer) return;
+    msgCacheSaveTimer = setTimeout(() => {
+        msgCacheSaveTimer = null;
+        flushMsgCache();
+    }, 3000);
+    if (msgCacheSaveTimer.unref) msgCacheSaveTimer.unref();
+}
+
+loadMsgCache();
 
 function storeCachedMessage(id, message) {
     if (!id || !message) return;
-    if (cachedMessages.size >= MAX_CACHED_MESSAGES) {
+    if (cachedMessages.has(id)) cachedMessages.delete(id);
+    while (cachedMessages.size >= MAX_CACHED_MESSAGES) {
         const oldestKey = cachedMessages.keys().next().value;
         cachedMessages.delete(oldestKey);
     }
     cachedMessages.set(id, message);
+    scheduleMsgCacheSave();
+}
+
+function getCachedProtoMessage(id) {
+    if (!id || !cachedMessages.has(id)) return undefined;
+    return cachedMessages.get(id);
+}
+
+function isSignalSessionError(err) {
+    const msg = String(err?.message || err || '');
+    return /bad mac|messagecountererror|no matching sessions|sessionerror|invalid mac|failed to decrypt/i.test(msg);
+}
+
+function purgeUserSignalSessions(targetIdentifier) {
+    if (!AUTH_DIR || !fs.existsSync(AUTH_DIR)) return 0;
+    const raw = String(targetIdentifier || '').split('@')[0].split(':')[0].trim();
+    const cleanPhone = normalizeIdentifier(raw) || raw.replace(/\D/g, '');
+    if (!cleanPhone) return 0;
+
+    const prefixes = new Set([cleanPhone]);
+    try {
+        const users = loadUsers();
+        const u = users[cleanPhone] || Object.values(users).find(x => x.phone === cleanPhone || x.lid === cleanPhone);
+        if (u) {
+            if (u.phone) prefixes.add(String(u.phone).replace(/\D/g, ''));
+            if (u.lid) prefixes.add(String(u.lid).replace(/\D/g, ''));
+        }
+    } catch {}
+
+    let deleted = 0;
+    try {
+        const files = fs.readdirSync(AUTH_DIR);
+        for (const f of files) {
+            if (!/^session-.*\.json$/i.test(f)) continue;
+            const matchesTarget = Array.from(prefixes).some(p => p && f.includes(`session-${p}`));
+            if (matchesTarget) {
+                try {
+                    fs.unlinkSync(path.join(AUTH_DIR, f));
+                    deleted++;
+                } catch {}
+            }
+        }
+    } catch (err) {
+        console.error('[Purge Signal Session Error]:', err.message);
+    }
+    if (deleted > 0) {
+        console.log(`[Signal Recovery] Purged ${deleted} corrupted session file(s) for ${cleanPhone}.`);
+    }
+    return deleted;
+}
+
+async function safeSendMessage(sock, jid, content, options = {}) {
+    try {
+        return await sock.sendMessage(jid, content, options);
+    } catch (err) {
+        if (isSignalSessionError(err)) {
+            console.warn(`[Signal Send Error] ${jid}: ${err.message} — purging session and retrying once...`);
+            purgeUserSignalSessions(jid);
+            try { msgRetryCounterCache.del(jid); } catch {}
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            return await sock.sendMessage(jid, content, options);
+        }
+        throw err;
+    }
 }
 
 async function sendCachedMessage(sock, jid, content, options = {}) {
-    const sent = await sock.sendMessage(jid, content, options);
+    const sent = await safeSendMessage(sock, jid, content, options);
     if (sent && sent.key && sent.key.id && sent.message) {
         storeCachedMessage(sent.key.id, sent.message);
     }
     return sent;
 }
+
+function gracefulShutdown(signal) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`[Shutdown] Received ${signal}. Flushing msg_cache.json and closing WhatsApp socket...`);
+    flushMsgCache();
+    try {
+        if (currentSock) currentSock.end(undefined);
+    } catch {}
+    try {
+        if (httpServer) httpServer.close();
+    } catch {}
+    const forceExit = setTimeout(() => process.exit(0), 1500);
+    if (forceExit.unref) forceExit.unref();
+    process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 async function sendHumanReply(sock, targetJid, content, options = {}) {
     if (!sock || !targetJid) return null;
@@ -4445,7 +4583,7 @@ async function startBot() {
         msgRetryCounterCache,
         retryRequestDelayMs: 500,
         getMessage: async (key) => {
-            return (key && key.id && cachedMessages.has(key.id)) ? cachedMessages.get(key.id) : undefined;
+            return (key && key.id) ? getCachedProtoMessage(key.id) : undefined;
         }
     });
 
@@ -4482,6 +4620,10 @@ async function startBot() {
         }
 
         if (connection === 'close') {
+            if (isShuttingDown) {
+                console.log('[Sambungan Ditutup] Penutupan kemas (SIGTERM/SIGINT). Tidak menyambung semula.');
+                return;
+            }
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             console.log(`[Sambungan Terputus] Kod status: ${statusCode}. Memulakan semula: ${shouldReconnect}`);
@@ -4511,6 +4653,18 @@ async function startBot() {
         for (const msg of m.messages) {
             if (msg.key && msg.key.id) {
                 storeCachedMessage(msg.key.id, unwrapMessage(msg.message) || msg.message);
+            }
+
+            if (msg.messageStubType || (Array.isArray(msg.messageStubParameters) && msg.messageStubParameters.length > 0)) {
+                const stubJoined = (msg.messageStubParameters || []).join(' ');
+                if (/bad mac|messagecountererror|no matching sessions|sessionerror|ciphertext/i.test(stubJoined) || msg.messageStubType === 2) {
+                    const stubJid = msg.key?.remoteJid || '';
+                    if (stubJid && !stubJid.endsWith('@g.us')) {
+                        console.warn(`[Signal Decrypt Stub] ${stubJid}: ${stubJoined || 'CIPHERTEXT'} — auto-purging corrupted session...`);
+                        purgeUserSignalSessions(stubJid);
+                        if (msg.key?.remoteJidAlt) purgeUserSignalSessions(msg.key.remoteJidAlt);
+                    }
+                }
             }
 
             const remoteJid = msg.key.remoteJid || '';
@@ -4631,7 +4785,7 @@ async function startBot() {
             // ---------------------------------------------------------
             // 1. PENGENDALIAN ARAHAN PENTADBIR
             // ---------------------------------------------------------
-            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu', 'help', 'sync', 'selaras', 'fixsession', 'sesi', 'ram', 'memori', 'syncbayar', 'cekbayar', 'checkhitpay'].includes(cmd))) {
+            if (isAdmin && (['tunggu', 'waiting', 'tambah', 'add', 'daftar', 'kod', 'setref', 'hebah', 'broadcast', 'broadcastref', 'semak', 'check', 'padam', 'buang', 'delete', 'senarai', 'ahli', 'list', 'bantuan', 'menu', 'help', 'sync', 'selaras', 'fixsession', 'resetsession', 'sesi', 'ram', 'memori', 'syncbayar', 'cekbayar', 'checkhitpay'].includes(cmd))) {
                 console.log(`[Arahan Pentadbir] ${remoteJid}: "${textContent}"`);
 
                 if (['syncbayar', 'cekbayar', 'checkhitpay'].includes(cmd)) {
@@ -5048,6 +5202,41 @@ async function startBot() {
                     continue;
                 }
 
+                if (cmd === 'resetsession') {
+                    if (!isSuperAdmin) {
+                        await sendCachedMessage(sock, remoteJid, {
+                            text: 'Arahan /resetsession hanya dibenarkan untuk Primary Admin (60194066718).'
+                        }, { quoted: msg });
+                        continue;
+                    }
+                    const targetRaw = textParts[1];
+                    if (!targetRaw) {
+                        await sendCachedMessage(sock, remoteJid, {
+                            text: 'Format: */resetsession <nombor>*\nContoh: */resetsession 60123456789*'
+                        }, { quoted: msg });
+                        continue;
+                    }
+                    const targetPhone = normalizeIdentifier(targetRaw);
+                    const purgedCount = purgeUserSignalSessions(targetPhone);
+                    const targetJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                    try { msgRetryCounterCache.del(targetJid); } catch {}
+
+                    let testSentInfo = 'Berjaya dihantar';
+                    try {
+                        await safeSendMessage(sock, targetJid, { text: 'Sesi sambungan dikemas kini.' });
+                    } catch (sendErr) {
+                        testSentInfo = `Gagal (${sendErr.message})`;
+                    }
+
+                    await sendCachedMessage(sock, remoteJid, {
+                        text:
+                            `✓ *Reset Sesi Signal (${targetPhone})*\n\n` +
+                            `• Fail Sesi Dipadam: *${purgedCount}*\n` +
+                            `• Mesej Ujian: *${testSentInfo}*`
+                    }, { quoted: msg });
+                    continue;
+                }
+
                 if (['fixsession', 'sesi'].includes(cmd)) {
                     const targetRaw = textParts[1];
                     let extraInfo = '';
@@ -5127,6 +5316,7 @@ async function startBot() {
                             `• *senarai* — Senarai ahli active.\n` +
                             `• *selaras* — Selaras LID ahli.\n` +
                             `• *fixsession [nombor]* — Pulihkan sesi Signal.\n` +
+                            `• */resetsession <nombor>* — Padam sesi Signal pengguna & hantar mesej ujian.\n` +
                             `• *ram* — Semak memori & queue pelayan.`
                     }, { quoted: msg });
                     continue;
