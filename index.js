@@ -203,6 +203,8 @@ const WEBHOOK_PUBLIC_URL = (
 // -------------------------------------------------------------
 // TEMPLAT PAKEJ LANGGANAN RASMI (WA, TT, COMBO & UPGRADE)
 // -------------------------------------------------------------
+const START_BANNER_PATH = path.join(__dirname, 'assets', 'start-banner.jpg');
+
 const PACKAGES = {
     '1': { key: '1', planCode: 'WA', title: 'WhatsApp Status HD Sahaja', price: 'RM11.99', amount: '11.99', days: 30 },
     '2': { key: '2', planCode: 'TT', title: 'TikTok 1080p 60fps HD Sahaja', price: 'RM15.99', amount: '15.99', days: 30 },
@@ -5096,18 +5098,31 @@ async function startBot() {
                     saveUsers(users);
                     const lastExp = Math.max(user?.waExpiredAt || 0, user?.ttExpiredAt || 0, user?.expiredAt || 0);
                     const isExpired = lastExp > 0 && lastExp <= Date.now();
-                    const introText = isExpired
-                        ? `STATUS: LANGGANAN TELAH TAMAT\n\nTempoh keahlian anda bagi ${BOT_NAME} telah tamat pada ${new Date(lastExp).toLocaleDateString('ms-MY')}.`
-                        : `STATUS: TIADA LANGGANAN ACTIVE\n\nSelamat datang ke ${BOT_NAME}. Akaun anda belum mempunyai langganan active untuk memproses video 60fps & foto QHD+.`;
+                    const headerLine = isExpired
+                        ? `*LANGGANAN ANDA TELAH TAMAT (${new Date(lastExp).toLocaleDateString('ms-MY')})*`
+                        : `*SELAMAT DATANG KE ${BOT_NAME.toUpperCase()}*`;
 
                     const welcomeCaption =
-                        `${introText}\n\n` +
-                        `${PACKAGE_TEMPLATE}\n\n` +
-                        `Cara Mendaftar:\n` +
-                        `1. Balas nombor *1, 2, 3, atau 4* untuk menjana link bayaran HitPay automatik (DuitNow QR, FPX, eWallet & Kad).\n` +
-                        `2. Atau hantarkan kod referral rakan anda jika ada (contoh: *FIEYANINA482*).`;
+                        `${headerLine}\n\n` +
+                        `Naik taraf kualiti video *60fps* & gambar *QHD+* anda untuk WhatsApp Status dan TikTok tanpa pecah.\n\n` +
+                        `*Pilih Pelan Anda (30 Hari):*\n` +
+                        `*1.* *WhatsApp Status HD* — *RM11.99*\n` +
+                        `*2.* *TikTok 1080p 60fps HD* — *RM15.99*\n` +
+                        `*3.* *Combo WhatsApp + TikTok HD* — *RM20.99* _(Pilihan Terbaik)_\n` +
+                        `*4.* *Upgrade TikTok HD* — *RM12.99* _(Prorata ikut baki hari WA)_\n\n` +
+                        `*Cara Langgan:*\n` +
+                        `• Balas nombor *1, 2, 3, atau 4* untuk jana link bayaran *HitPay* automatik (DuitNow QR, FPX, eWallet & Kad).\n` +
+                        `• Ada *kod referral* rakan? Hantar kod tersebut terus di sini.\n` +
+                        `• Akses diaktifkan *serta-merta* selepas bayaran selesai.`;
 
-                    await sendHumanReply(sock, remoteJid, { text: welcomeCaption }, { quoted: msg });
+                    if (fs.existsSync(START_BANNER_PATH)) {
+                        await sendHumanReply(sock, remoteJid, {
+                            image: fs.readFileSync(START_BANNER_PATH),
+                            caption: welcomeCaption
+                        }, { quoted: msg });
+                    } else {
+                        await sendHumanReply(sock, remoteJid, { text: welcomeCaption }, { quoted: msg });
+                    }
                 }
                 continue;
             }
@@ -5827,13 +5842,34 @@ async function handleTelegramMessage(tgMsg) {
                 msgId
             );
         } else {
-            await sendTelegramMessage(chatId,
-                `Selamat datang ke ${BOT_NAME} (Telegram).\n\n${cleanPkgTemplate}\n\n` +
-                `Cara Mendaftar:\n` +
-                `1. Balas nombor 1, 2, 3, atau 4 untuk menjana link bayaran HitPay automatik.\n` +
-                `2. Atau jika anda sudah melanggan di WhatsApp, hantar /link <KOD_REFERRAL_ANDA>.`,
-                msgId
-            );
+            const lastExp = Math.max(user?.waExpiredAt || 0, user?.ttExpiredAt || 0, user?.expiredAt || 0);
+            const isExpired = lastExp > 0 && lastExp <= Date.now();
+            const tgHeader = isExpired
+                ? `LANGGANAN ANDA TELAH TAMAT (${new Date(lastExp).toLocaleDateString('ms-MY')})`
+                : `SELAMAT DATANG KE ${BOT_NAME.toUpperCase()}`;
+
+            const tgWelcomeCaption =
+                `${tgHeader}\n\n` +
+                `Naik taraf kualiti video 60fps & gambar QHD+ anda untuk WhatsApp Status dan TikTok tanpa pecah.\n\n` +
+                `Pilih Pelan Anda (30 Hari):\n` +
+                `1. WhatsApp Status HD — RM11.99\n` +
+                `2. TikTok 1080p 60fps HD — RM15.99\n` +
+                `3. Combo WhatsApp + TikTok HD — RM20.99 (Pilihan Terbaik)\n` +
+                `4. Upgrade TikTok HD — RM12.99 (Prorata ikut baki hari WA)\n\n` +
+                `Cara Langgan:\n` +
+                `• Balas nombor 1, 2, 3, atau 4 untuk jana link bayaran HitPay automatik.\n` +
+                `• Sudah melanggan di WhatsApp? Hantar /link <KOD_REFERRAL_ANDA>.\n` +
+                `• Akses diaktifkan serta-merta selepas bayaran selesai.`;
+
+            if (fs.existsSync(START_BANNER_PATH)) {
+                try {
+                    await sendTelegramMedia(chatId, 'photo', START_BANNER_PATH, tgWelcomeCaption, msgId);
+                } catch {
+                    await sendTelegramMessage(chatId, tgWelcomeCaption, msgId);
+                }
+            } else {
+                await sendTelegramMessage(chatId, tgWelcomeCaption, msgId);
+            }
         }
         return;
     }
