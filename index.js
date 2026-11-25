@@ -953,10 +953,11 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, tar
 
 async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, isHDR) {
     return new Promise((resolve, reject) => {
-        const isHighFps = sourceFps >= 48;
-        const scaleFilter = "scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)':flags=lanczos";
         const hasCas = checkCasSupport(binPath);
-        const sharpFilter = hasCas ? 'cas=strength=0.55' : 'unsharp=5:5:0.55:5:5:0.0';
+        const scaleFilter = "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)':flags=lanczos";
+        const sharpStage = hasCas
+            ? 'unsharp=3:3:0.35:3:3:0.0,cas=0.55'
+            : 'unsharp=3:3:0.35:3:3:0.0';
 
         const filterParts = [];
         if (isHDR) {
@@ -968,11 +969,14 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             }
         }
 
-        filterParts.push(scaleFilter);
-        filterParts.push(sharpFilter);
-        if (isHighFps) {
-            filterParts.push('setpts=N/(60*TB)');
-        }
+        filterParts.push(
+            scaleFilter,
+            'setsar=1',
+            'hqdn3d=1.2:1.2:3:3',
+            sharpStage,
+            'eq=contrast=1.04:saturation=1.07:brightness=0.01',
+            'fps=60'
+        );
 
         const vfChain = filterParts.join(',');
         const args = [
@@ -981,25 +985,27 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-t', '90',
             '-vf', vfChain,
             '-c:v', 'libx264',
-            '-preset', 'slow',
             '-profile:v', 'high',
-            '-level:v', '4.2',
-            '-crf', '18',
-            '-maxrate', '10M',
-            '-bufsize', '20M',
+            '-level', '4.2',
+            '-preset', 'veryfast',
+            '-crf', '17',
+            '-maxrate', '15M',
+            '-bufsize', '30M',
+            '-g', '60',
+            '-keyint_min', '60',
+            '-sc_threshold', '0',
             '-pix_fmt', 'yuv420p',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
             '-color_range', 'tv',
-            '-fps_mode', 'cfr',
-            '-r', '60',
+            '-movflags', '+faststart',
+            '-af', 'highpass=f=75,dynaudnorm=f=150:g=15',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-ar', '48000',
             '-ac', '2',
             '-threads', '2',
-            '-movflags', '+faststart',
             outputPath
         ];
 
@@ -5715,7 +5721,7 @@ async function startBot() {
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                         const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
-                        const outputPath = path.join(TEMP_DIR, `${targetMode === 'TT' ? 'tiktok_hd' : 'status_clear'}_60fps_${fileId}.mp4`);
+                        const outputPath = path.join(TEMP_DIR, targetMode === 'TT' ? `TikTok_HD_${fileId}.mp4` : `status_clear_60fps_${fileId}.mp4`);
 
                         try {
                             try {
@@ -5733,15 +5739,22 @@ async function startBot() {
 
                             if (targetMode === 'TT') {
                                 const isTrimmedTT = durationSec > 90;
-                                const isHighFpsTT = sourceFps >= 48;
-                                const fpsStatusTT = isHighFpsTT ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
-
-                                console.log(`[FFmpeg TikTok] 1080p CRF 18 (10M maxrate) | CAS: 0.55 | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Durasi: ${durationSec.toFixed(1)}s`);
+                                console.log(`[FFmpeg TikTok] 1080p60 CRF 17 (15M maxrate) | Dual Sharpen + hqdn3d + Audio Norm | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Durasi: ${durationSec.toFixed(1)}s`);
                                 await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR);
 
+                                const trimNoteTT = isTrimmedTT ? '\n• Catatan: Video dipotong ke 90 saat pertama.' : '';
+                                const colorNoteTT = isHDR ? 'BT.709 (HDR Tone-Mapped)' : 'BT.709 Vivid';
+
                                 await sendCachedMessage(sock, remoteJid, {
-                                    video: { stream: fs.createReadStream(outputPath) },
-                                    mimetype: 'video/mp4'
+                                    document: { stream: fs.createReadStream(outputPath) },
+                                    mimetype: 'video/mp4',
+                                    fileName: path.basename(outputPath),
+                                    caption:
+                                        `✓ *VIDEO TIKTOK 1080P 60FPS SIAP*\n\n` +
+                                        `Simpan *file* ini terus ke galeri anda (dihantar sebagai document supaya kualiti 1080p60 kekal tanpa mampatan).\n\n` +
+                                        `• Profil: 1080p 60fps | CRF 17 (15 Mbps) | ${colorNoteTT}\n` +
+                                        `• Audio: Highpass + Dynamic Normalized (192kbps)${trimNoteTT}\n\n` +
+                                        `*Tip Upload:* Sebelum post di TikTok, pastikan tetapan *Allow high-quality uploads* diaktifkan.`
                                 }, { quoted: msg });
 
                                 try {
@@ -5749,23 +5762,6 @@ async function startBot() {
                                         react: { text: '✅', key: msg.key }
                                     });
                                 } catch {}
-
-                                const hasCasTT = checkCasSupport(ffmpegPath);
-                                const casNoteTT = hasCasTT ? 'CAS 0.55 (Ketajaman Tinggi)' : 'Unsharp Adaptive';
-                                const trimNoteTT = isTrimmedTT ? '\n• Catatan: Video telah dipotong kepada 90 saat pertama mengikut had profil TikTok HD.' : '';
-                                const colorNoteTT = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
-
-                                await sendHumanReply(sock, remoteJid, {
-                                    text:
-                                        `✓ *PENGOPTIMUMAN VIDEO TIKTOK SELESAI*\n\n` +
-                                        `Video anda siap diproses menggunakan profil *TikTok 1080p 60fps High Bitrate*. Simpan dan muat naik terus ke TikTok untuk ketajaman maksimum.\n\n` +
-                                        `Spesifikasi Output:\n` +
-                                        `• Resolusi: 1080p Full HD (High Profile)\n` +
-                                        `• Kadar Bingkai: ${fpsStatusTT}\n` +
-                                        `• Kualiti: CRF 18 | Maxrate 10 Mbps | Audio 192k\n` +
-                                        `• Penalaan: ${casNoteTT}\n` +
-                                        `• Profil Warna: ${colorNoteTT}${trimNoteTT}`
-                                });
                             } else {
                                 const effectiveDuration = Math.min(durationSec, 60);
                                 const rawBitrate = Math.floor(((15.2 * 8192) / effectiveDuration) - 96);
@@ -5913,6 +5909,15 @@ async function sendTelegramMedia(chatId, mediaType, filePath, caption, replyToMe
         });
         const data = await res.json();
         if (!data.ok) throw new Error(data.description || 'Telegram sendPhoto failed');
+        return data.result;
+    } else if (mediaType === 'document') {
+        form.append('document', new Blob([buf], { type: 'video/mp4' }), fileName);
+        const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, {
+            method: 'POST',
+            body: form
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.description || 'Telegram sendDocument failed');
         return data.result;
     } else {
         form.append('supports_streaming', 'true');
@@ -6366,14 +6371,14 @@ async function handleTelegramMessage(tgMsg) {
             run: async () => {
                 const fileId = `tg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                 const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
-                const outputPath = path.join(TEMP_DIR, `${targetMode === 'TT' ? 'tiktok_hd' : 'status_clear'}_60fps_${fileId}.mp4`);
+                const outputPath = path.join(TEMP_DIR, targetMode === 'TT' ? `TikTok_HD_${fileId}.mp4` : `status_clear_60fps_${fileId}.mp4`);
                 try {
                     await downloadTelegramFile(fileObj.file_id, MAX_TG_BYTES, inputPath);
                     const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
                     if (targetMode === 'TT') {
                         await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR);
-                        await sendTelegramMedia(chatId, 'video', outputPath,
-                            `✓ VIDEO TIKTOK 1080P 60FPS SELESAI\nProfil: 1080p Full HD | ${sourceFps >= 48 ? '60fps' : sourceFps.toFixed(1) + 'fps'} | CRF 18 (10M maxrate) | CAS 0.55`,
+                        await sendTelegramMedia(chatId, 'document', outputPath,
+                            `✓ VIDEO TIKTOK 1080P 60FPS SIAP\nSimpan file ini terus ke galeri anda (tanpa mampatan).\n• Profil: 1080p60 | CRF 17 (15 Mbps) | Audio 192k Normalized\nTip: Aktifkan "Allow high-quality uploads" sebelum post di TikTok.`,
                             msgId
                         );
                     } else {
