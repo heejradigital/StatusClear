@@ -204,26 +204,40 @@ const WEBHOOK_PUBLIC_URL = (
 // TEMPLAT PAKEJ LANGGANAN RASMI (WA, TT, COMBO & UPGRADE)
 // -------------------------------------------------------------
 const PACKAGES = {
-    '1': { key: '1', planCode: 'WA', title: 'WhatsApp Status HD Sahaja', price: 'RM10', amount: '10.00', days: 30 },
-    '2': { key: '2', planCode: 'TT', title: 'TikTok 1080p 60fps HD Sahaja', price: 'RM10', amount: '10.00', days: 30 },
-    '3': { key: '3', planCode: 'COMBO', title: 'Combo WhatsApp + TikTok HD', price: 'RM20', amount: '20.00', days: 30 },
-    '4': { key: '4', planCode: 'UPGRADE_TT', title: 'Upgrade Tambah TikTok HD (Ahli WA Aktif)', price: 'RM10', amount: '10.00', days: 30 }
+    '1': { key: '1', planCode: 'WA', title: 'WhatsApp Status HD Sahaja', price: 'RM11.99', amount: '11.99', days: 30 },
+    '2': { key: '2', planCode: 'TT', title: 'TikTok 1080p 60fps HD Sahaja', price: 'RM15.99', amount: '15.99', days: 30 },
+    '3': { key: '3', planCode: 'COMBO', title: 'Combo WhatsApp + TikTok HD', price: 'RM20.99', amount: '20.99', days: 30 },
+    '4': { key: '4', planCode: 'UPGRADE_TT', title: 'Upgrade Tambah TikTok HD (Ahli WA Aktif)', price: 'RM12.99', amount: '12.99', days: 30, requiresWa: true }
 };
+
+function calculateProratedUpgrade(waExpiredAt) {
+    const now = Date.now();
+    const remainingDays = (waExpiredAt && waExpiredAt > now)
+        ? Math.max(1, Math.ceil((waExpiredAt - now) / 86400000))
+        : 30;
+    const proratedNum = Math.max(3.00, Number(((remainingDays / 30) * 12.99).toFixed(2)));
+    return {
+        remainingDays,
+        amount: proratedNum.toFixed(2),
+        priceLabel: `RM${proratedNum.toFixed(2)}`,
+        isShortRemaining: remainingDays < 5
+    };
+}
 
 const PACKAGE_TEMPLATE =
 `*SENARAI PELAN LANGGANAN (${BOT_NAME}):*
 
-*1. WhatsApp Status HD Sahaja* — *RM10 / 30 Hari*
+*1. WhatsApp Status HD Sahaja* — *RM11.99 / 30 Hari*
    └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status.
 
-*2. TikTok 1080p 60fps HD Sahaja* — *RM10 / 30 Hari*
+*2. TikTok 1080p 60fps HD Sahaja* — *RM15.99 / 30 Hari*
    └ Video 1080p 60fps CRF 18 tajam untuk muat naik TikTok.
 
-*3. Combo WhatsApp + TikTok HD* — *RM20 / 30 Hari*
+*3. Combo WhatsApp + TikTok HD* — *RM20.99 / 30 Hari*
    └ Akses penuh untuk kedua-dua mod WhatsApp & TikTok HD.
 
-*4. Upgrade Tambah TikTok HD* — *RM10 / 30 Hari*
-   └ Khas untuk ahli WhatsApp HD yang sudah active.
+*4. Upgrade Tambah TikTok HD* — *RM12.99 / 30 Hari (Prorata ikut baki hari WA)*
+   └ Khas untuk ahli WhatsApp HD active; caj dikira ikut baki hari WA anda (min RM3.00) supaya tamat serentak.
 
 Balas nombor *1, 2, 3, atau 4* untuk jana link pembayaran HitPay (FPX, DuitNow QR, eWallet & Kad).`;
 
@@ -967,7 +981,7 @@ function unwrapMessage(msg) {
 // -------------------------------------------------------------
 // PANGGILAN HITPAY PAYMENT REQUEST API (ASLI FETCH)
 // -------------------------------------------------------------
-async function createHitPayPaymentRequest({ userKey, phone, pushName, planCode = 'WA', days = 30, amount = '10.00', purpose, redirectUrl }) {
+async function createHitPayPaymentRequest({ userKey, phone, pushName, planCode = 'WA', days = 30, amount = '11.99', purpose, redirectUrl }) {
     if (!HITPAY_API_KEY) {
         throw new Error('HITPAY_API_KEY belum dikonfigurasikan di persekitaran (Environment Variables).');
     }
@@ -1147,13 +1161,19 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
                 targetUser.name = finalName;
             }
             targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
-            targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + addedMonths;
+            if (planCode !== 'UPGRADE_TT') {
+                targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + addedMonths;
+            }
 
             if (planCode === 'WA' || planCode === 'COMBO') {
                 const waBase = (targetUser.waExpiredAt && targetUser.waExpiredAt > now) ? targetUser.waExpiredAt : now;
                 targetUser.waExpiredAt = waBase + addMs;
             }
-            if (planCode === 'TT' || planCode === 'UPGRADE_TT' || planCode === 'COMBO') {
+            if (planCode === 'UPGRADE_TT') {
+                targetUser.ttExpiredAt = (targetUser.waExpiredAt && targetUser.waExpiredAt > now)
+                    ? targetUser.waExpiredAt
+                    : (now + addMs);
+            } else if (planCode === 'TT' || planCode === 'COMBO') {
                 const ttBase = (targetUser.ttExpiredAt && targetUser.ttExpiredAt > now) ? targetUser.ttExpiredAt : now;
                 targetUser.ttExpiredAt = ttBase + addMs;
             }
@@ -1267,11 +1287,11 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
         saveUsers(users);
 
         // Rekod transaksi untuk paparan PWA Monitor
-        const planPrices = { WA: '10.00', TT: '10.00', UPGRADE_TT: '10.00', COMBO: '20.00' };
-        const pkgPrices = { 30: '10.00', 90: '25.00', 180: '48.00', 365: '90.00' };
+        const planPrices = { WA: '11.99', TT: '15.99', UPGRADE_TT: '12.99', COMBO: '20.99' };
+        const pkgPrices = { 30: '11.99', 90: '32.00', 180: '60.00', 365: '110.00' };
         const txAmount = amountPaid != null && !isNaN(parseFloat(amountPaid))
             ? parseFloat(amountPaid).toFixed(2)
-            : (planPrices[planCode] || pkgPrices[days] || '10.00');
+            : (planPrices[planCode] || pkgPrices[days] || '11.99');
 
         recordTransaction({
             paymentId: paymentId || `HITPAY_${Date.now()}`,
@@ -1292,7 +1312,9 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
         });
         const planLabel = planCode === 'COMBO'
             ? 'Combo WhatsApp + TikTok HD'
-            : ((planCode === 'TT' || planCode === 'UPGRADE_TT') ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD');
+            : (planCode === 'UPGRADE_TT'
+                ? 'TikTok 1080p 60fps HD (Upgrade Selari WA)'
+                : (planCode === 'TT' ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD'));
 
         const welcomeTutorialMessage =
 `✓ *Pembayaran berjaya & akaun anda kini active.*
@@ -3175,7 +3197,7 @@ const PWA_HTML = `<!DOCTYPE html>
       if (type === 'promo') {
         box.value = 'Hai {name}, nikmati video & foto WhatsApp Status HD tanpa pecah dengan StatusClear! Balas *PAKEJ* untuk melanggan sekarang.';
       } else if (type === 'reminder') {
-        box.value = 'Hai {name}, langganan StatusClear anda hampir tamat atau telah luput. Balas *1* untuk sambung 30 hari (RM10) secara automatik!';
+        box.value = 'Hai {name}, langganan StatusClear anda hampir tamat atau telah luput. Balas *1* untuk sambung 30 hari (RM11.99) secara automatik!';
       } else if (type === 'info') {
         box.value = 'Makluman StatusClear: Sistem telah dikemaskini untuk kelajuan pemprosesan 60 FPS yang lebih lancar. Hantar media anda sebagai Document untuk mula!';
       }
@@ -4787,14 +4809,14 @@ async function startBot() {
                 } else if (waActive) {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditukar ke *TikTok 1080p 60fps*, namun akaun anda buat masa ini hanya mempunyai langganan *WhatsApp Status HD* yang aktif.\n\n` +
-                            `Balas *4* untuk upgrade tambah akses *TikTok HD (RM10/bulan)*, atau balas *WA* untuk kembali ke mod WhatsApp Status.`
+                            `Mod pilihan anda ditukar ke *TikTok 1080p 60fps*, namun akaun anda buat masa ini hanya mempunyai langganan *WhatsApp Status HD* yang active.\n\n` +
+                            `Balas *4* untuk upgrade tambah akses *TikTok HD (RM12.99/bulan prorata ikut baki hari WA)*, atau balas *WA* untuk kembali ke mod WhatsApp Status.`
                     }, { quoted: msg });
                 } else {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditetapkan ke *TikTok 1080p 60fps*, namun anda belum mempunyai langganan aktif.\n\n` +
-                            `Balas *2* untuk langgan *TikTok HD (RM10/bulan)* atau *3* untuk *Combo WA + TT (RM20/bulan)*.`
+                            `Mod pilihan anda ditetapkan ke *TikTok 1080p 60fps*, namun anda belum mempunyai langganan active.\n\n` +
+                            `Balas *2* untuk langgan *TikTok HD (RM15.99/bulan)* atau *3* untuk *Combo WA + TT (RM20.99/bulan)*.`
                     }, { quoted: msg });
                 }
                 continue;
@@ -4818,14 +4840,14 @@ async function startBot() {
                 } else if (ttActive) {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditukar ke *WhatsApp Status HD*, namun akaun anda buat masa ini hanya mempunyai langganan *TikTok HD* yang aktif.\n\n` +
-                            `Balas *1* untuk langgan *WhatsApp Status HD (RM10/bulan)*, atau balas *TT* untuk kembali ke mod TikTok HD.`
+                            `Mod pilihan anda ditukar ke *WhatsApp Status HD*, namun akaun anda buat masa ini hanya mempunyai langganan *TikTok HD* yang active.\n\n` +
+                            `Balas *1* untuk langgan *WhatsApp Status HD (RM11.99/bulan)*, atau balas *TT* untuk kembali ke mod TikTok HD.`
                     }, { quoted: msg });
                 } else {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditetapkan ke *WhatsApp Status HD*, namun anda belum mempunyai langganan aktif.\n\n` +
-                            `Balas *1* untuk langgan *WhatsApp Status HD (RM10/bulan)* atau *3* untuk *Combo WA + TT (RM20/bulan)*.`
+                            `Mod pilihan anda ditetapkan ke *WhatsApp Status HD*, namun anda belum mempunyai langganan active.\n\n` +
+                            `Balas *1* untuk langgan *WhatsApp Status HD (RM11.99/bulan)* atau *3* untuk *Combo WA + TT (RM20.99/bulan)*.`
                     }, { quoted: msg });
                 }
                 continue;
@@ -4899,10 +4921,10 @@ async function startBot() {
                 if (selectedPkg.requiresWa && !waActive) {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Pakej *4 (Upgrade TikTok HD RM10)* khas untuk ahli yang sudah mempunyai langganan *WhatsApp Status HD* aktif.\n\n` +
+                            `Pakej *4 (Upgrade TikTok HD RM12.99 prorata)* khas untuk ahli yang sudah mempunyai langganan *WhatsApp Status HD* active.\n\n` +
                             `Sila pilih salah satu pakej berikut:\n` +
-                            `• Balas *2* untuk *TikTok 1080p 60fps HD Sahaja (RM10/bulan)*\n` +
-                            `• Balas *3* untuk *Combo WhatsApp + TikTok HD (RM20/bulan)*`
+                            `• Balas *2* untuk *TikTok 1080p 60fps HD Sahaja (RM15.99/bulan)*\n` +
+                            `• Balas *3* untuk *Combo WhatsApp + TikTok HD (RM20.99/bulan)*`
                     }, { quoted: msg });
                     continue;
                 }
@@ -4914,21 +4936,36 @@ async function startBot() {
                 } catch {}
 
                 try {
+                    const isUpgradePlan = selectedPkg.planCode === 'UPGRADE_TT';
+                    const prorate = isUpgradePlan ? calculateProratedUpgrade(user?.waExpiredAt) : null;
+                    const reqDays = isUpgradePlan ? prorate.remainingDays : selectedPkg.days;
+                    const reqAmount = isUpgradePlan ? prorate.amount : selectedPkg.amount;
+                    const reqPurpose = isUpgradePlan
+                        ? `${BOT_NAME} - Upgrade TikTok HD (${prorate.remainingDays} Hari Prorata)`
+                        : `${BOT_NAME} - ${selectedPkg.title}`;
+
                     const hitpayRes = await createHitPayPaymentRequest({
                         userKey: phone,
                         phone: phone,
                         pushName: msg.pushName || user?.name || phone,
                         planCode: selectedPkg.planCode,
-                        days: selectedPkg.days,
-                        amount: selectedPkg.amount,
-                        purpose: `${BOT_NAME} - ${selectedPkg.title}`
+                        days: reqDays,
+                        amount: reqAmount,
+                        purpose: reqPurpose
                     });
+
+                    const shortNote = (isUpgradePlan && prorate.isShortRemaining)
+                        ? `\nNota: Baki WA anda kurang daripada 5 hari — anda juga boleh balas *3* untuk *Combo (RM20.99)* bagi mendapatkan 30 hari penuh untuk kedua-dua mod.\n`
+                        : '';
+                    const pkgSummaryLine = isUpgradePlan
+                        ? `Pakej: *${selectedPkg.title}*\nBaki Tempoh WA: *${prorate.remainingDays} hari* | Harga Prorata: *${prorate.priceLabel}* (Tamat serentak dengan WA anda)${shortNote}`
+                        : `Pakej: *${selectedPkg.title}* (${selectedPkg.price} / ${selectedPkg.days} Hari)`;
 
                     await sendHumanReply(sock, remoteJid, {
                         text:
                             `✓ *PAUTAN PEMBAYARAN RASMI HITPAY*\n\n` +
-                            `Pakej: *${selectedPkg.title}* (${selectedPkg.price} / ${selectedPkg.days} Hari)\n\n` +
-                            `Sila tekan pautan selamat di bawah untuk membuat bayaran:\n` +
+                            `${pkgSummaryLine}\n\n` +
+                            `Sila tekan link selamat di bawah untuk membuat bayaran:\n` +
                             `${hitpayRes.url}\n\n` +
                             `Kaedah bayaran disokong: DuitNow QR, FPX Online Banking, eWallet (TNG / GrabPay / ShopeePay), serta Kad Debit & Kredit.\n\n` +
                             `Akses anda akan diaktifkan secara automatik sebaik sahaja pembayaran selesai tanpa perlu menghantar resit.`
@@ -5038,8 +5075,8 @@ async function startBot() {
                     user.refSentToExisting = true;
                     saveUsers(users);
 
-                    const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 untuk langgan)');
-                    const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : (waActive ? 'Tidak Active (Balas 4 untuk upgrade RM10)' : 'Tidak Active (Balas 2 untuk langgan)'));
+                    const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 untuk langgan RM11.99)');
+                    const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : (waActive ? 'Tidak Active (Balas 4 untuk upgrade prorata RM12.99/30h)' : 'Tidak Active (Balas 2 untuk langgan RM15.99)'));
                     const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
 
                     await sendHumanReply(sock, remoteJid, {
@@ -5178,7 +5215,7 @@ async function startBot() {
                 await sendHumanReply(sock, remoteJid, {
                     text:
                         `AKSES TIKTOK HD DIPERLUKAN\n\n` +
-                        `Pelan anda buat masa ini hanya meliputi *WhatsApp Status HD*. Untuk memproses video dalam mod *TikTok 1080p 60fps HD*, sila balas *4* untuk upgrade tambah akses TikTok HD (*RM10/bulan*).\n\n` +
+                        `Pelan anda buat masa ini hanya meliputi *WhatsApp Status HD*. Untuk memproses video dalam mod *TikTok 1080p 60fps HD*, sila balas *4* untuk upgrade tambah akses TikTok HD (*kadar asas RM12.99/bulan, prorata ikut baki hari WA anda*).\n\n` +
                         `Jika anda mahu memproses untuk WhatsApp Status, balas *WA* dan hantar semula file anda.`
                 }, { quoted: msg });
                 continue;
@@ -5188,7 +5225,7 @@ async function startBot() {
                 await sendHumanReply(sock, remoteJid, {
                     text:
                         `AKSES WHATSAPP STATUS HD DIPERLUKAN\n\n` +
-                        `Pelan anda buat masa ini hanya meliputi *TikTok 1080p 60fps HD*. Untuk memproses media bagi *WhatsApp Status HD*, sila balas *1* (*RM10/bulan*) atau *3* untuk *Combo WA + TT (RM20/bulan)*.\n\n` +
+                        `Pelan anda buat masa ini hanya meliputi *TikTok 1080p 60fps HD*. Untuk memproses media bagi *WhatsApp Status HD*, sila balas *1* (*RM11.99/bulan*) atau *3* untuk *Combo WA + TT (RM20.99/bulan)*.\n\n` +
                         `Jika anda mahu memproses video untuk TikTok, balas *TT* atau sertakan caption *TT* pada document anda.`
                 }, { quoted: msg });
                 continue;
@@ -5619,12 +5656,12 @@ async function handleTelegramMessage(tgMsg) {
             );
         } else if (waActive) {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditukar ke TikTok 1080p 60fps, namun pelan aktif anda kini hanya WhatsApp Status HD.\n\nBalas 4 untuk upgrade tambah TikTok HD (RM10/bulan), atau /wa untuk kembali ke mod WhatsApp.`,
+                `Mod pilihan ditukar ke TikTok 1080p 60fps, namun pelan active anda kini hanya WhatsApp Status HD.\n\nBalas 4 untuk upgrade tambah TikTok HD (RM12.99/bulan prorata ikut baki hari WA), atau /wa untuk kembali ke mod WhatsApp.`,
                 msgId
             );
         } else {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditetapkan ke TikTok 1080p 60fps, namun anda belum mempunyai langganan aktif.\n\nBalas 2 untuk TikTok HD (RM10/bulan) atau 3 untuk Combo WA + TT (RM20/bulan).`,
+                `Mod pilihan ditetapkan ke TikTok 1080p 60fps, namun anda belum mempunyai langganan active.\n\nBalas 2 untuk TikTok HD (RM15.99/bulan) atau 3 untuk Combo WA + TT (RM20.99/bulan).`,
                 msgId
             );
         }
@@ -5645,12 +5682,12 @@ async function handleTelegramMessage(tgMsg) {
             );
         } else if (ttActive) {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditukar ke WhatsApp Status HD, namun pelan aktif anda kini hanya TikTok HD.\n\nBalas 1 untuk WhatsApp Status HD (RM10/bulan), atau /tt untuk kembali ke mod TikTok.`,
+                `Mod pilihan ditukar ke WhatsApp Status HD, namun pelan active anda kini hanya TikTok HD.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99/bulan), atau /tt untuk kembali ke mod TikTok.`,
                 msgId
             );
         } else {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditetapkan ke WhatsApp Status HD, namun anda belum mempunyai langganan aktif.\n\nBalas 1 untuk WhatsApp Status HD (RM10/bulan) atau 3 untuk Combo WA + TT (RM20/bulan).`,
+                `Mod pilihan ditetapkan ke WhatsApp Status HD, namun anda belum mempunyai langganan active.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99/bulan) atau 3 untuk Combo WA + TT (RM20.99/bulan).`,
                 msgId
             );
         }
@@ -5712,28 +5749,43 @@ async function handleTelegramMessage(tgMsg) {
     if (selectedPkg && !tgMsg.document && !tgMsg.video && !tgMsg.photo) {
         if (selectedPkg.requiresWa && !waActive) {
             await sendTelegramMessage(chatId,
-                `Pakej 4 (Upgrade TikTok HD RM10) khas untuk ahli yang sudah mempunyai langganan WhatsApp Status HD aktif.\n\n` +
-                `Sila pilih:\n• Balas 2 untuk TikTok 1080p 60fps HD Sahaja (RM10/bulan)\n• Balas 3 untuk Combo WhatsApp + TikTok HD (RM20/bulan)`,
+                `Pakej 4 (Upgrade TikTok HD RM12.99 prorata) khas untuk ahli yang sudah mempunyai langganan WhatsApp Status HD active.\n\n` +
+                `Sila pilih:\n• Balas 2 untuk TikTok 1080p 60fps HD Sahaja (RM15.99/bulan)\n• Balas 3 untuk Combo WhatsApp + TikTok HD (RM20.99/bulan)`,
                 msgId
             );
             return;
         }
         try {
+            const isUpgradePlan = selectedPkg.planCode === 'UPGRADE_TT';
+            const prorate = isUpgradePlan ? calculateProratedUpgrade(user?.waExpiredAt) : null;
+            const reqDays = isUpgradePlan ? prorate.remainingDays : selectedPkg.days;
+            const reqAmount = isUpgradePlan ? prorate.amount : selectedPkg.amount;
+            const reqPurpose = isUpgradePlan
+                ? `${BOT_NAME} (Telegram) - Upgrade TikTok HD (${prorate.remainingDays} Hari Prorata)`
+                : `${BOT_NAME} (Telegram) - ${selectedPkg.title}`;
+
             const hitpayRes = await createHitPayPaymentRequest({
                 userKey: tgKey,
                 phone: tgKey,
                 pushName: fromName,
                 planCode: selectedPkg.planCode,
-                days: selectedPkg.days,
-                amount: selectedPkg.amount,
-                purpose: `${BOT_NAME} (Telegram) - ${selectedPkg.title}`
+                days: reqDays,
+                amount: reqAmount,
+                purpose: reqPurpose
             });
             if (!isActive) user.status = 'WAITING';
             saveUsers(users);
 
+            const shortNote = (isUpgradePlan && prorate.isShortRemaining)
+                ? `\nNota: Baki WA anda kurang daripada 5 hari — anda juga boleh balas 3 untuk Combo (RM20.99) bagi mendapatkan 30 hari penuh untuk kedua-dua mod.\n`
+                : '';
+            const pkgSummaryLine = isUpgradePlan
+                ? `Pakej: ${selectedPkg.title}\nBaki Tempoh WA: ${prorate.remainingDays} hari | Harga Prorata: ${prorate.priceLabel} (Tamat serentak dengan WA anda)${shortNote}`
+                : `Pakej: ${selectedPkg.title} (${selectedPkg.price} / ${selectedPkg.days} Hari)`;
+
             await sendTelegramMessage(chatId,
                 `✓ PAUTAN PEMBAYARAN RASMI HITPAY\n\n` +
-                `Pakej: ${selectedPkg.title} (${selectedPkg.price} / ${selectedPkg.days} Hari)\n\n` +
+                `${pkgSummaryLine}\n\n` +
                 `Sila klik link di bawah untuk membuat bayaran (DuitNow QR, FPX, eWallet & Kad):\n` +
                 `${hitpayRes.url}\n\n` +
                 `Akses anda akan diaktifkan secara automatik sebaik sahaja transaksi selesai.`,
@@ -5758,8 +5810,8 @@ async function handleTelegramMessage(tgMsg) {
             user.refSentToExisting = true;
             saveUsers(users);
 
-            const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1)');
-            const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : (waActive ? 'Tidak Active (Balas 4 untuk upgrade RM10)' : 'Tidak Active (Balas 2)'));
+            const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 - RM11.99)');
+            const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : (waActive ? 'Tidak Active (Balas 4 untuk upgrade prorata RM12.99/30h)' : 'Tidak Active (Balas 2 - RM15.99)'));
             const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
 
             await sendTelegramMessage(chatId,
@@ -5858,14 +5910,14 @@ async function handleTelegramMessage(tgMsg) {
 
     if (effectiveMode === 'TT' && !ttActive) {
         await sendTelegramMessage(chatId,
-            `Pelan anda kini hanya meliputi WhatsApp Status HD. Balas 4 untuk upgrade TikTok HD (RM10/bulan), atau hantar /wa untuk proses mod WhatsApp.`,
+            `Pelan anda kini hanya meliputi WhatsApp Status HD. Balas 4 untuk upgrade TikTok HD (kadar asas RM12.99/bulan prorata ikut baki hari WA), atau hantar /wa untuk proses mod WhatsApp.`,
             msgId
         );
         return;
     }
     if (effectiveMode === 'WA' && !waActive) {
         await sendTelegramMessage(chatId,
-            `Pelan anda kini hanya meliputi TikTok HD. Balas 1 untuk WhatsApp Status HD (RM10/bulan) atau 3 untuk Combo (RM20/bulan), atau hantar /tt untuk proses mod TikTok.`,
+            `Pelan anda kini hanya meliputi TikTok HD. Balas 1 untuk WhatsApp Status HD (RM11.99/bulan) atau 3 untuk Combo (RM20.99/bulan), atau hantar /tt untuk proses mod TikTok.`,
             msgId
         );
         return;
