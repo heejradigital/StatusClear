@@ -866,14 +866,19 @@ async function probeVideo(filePath, binPath) {
     });
 }
 
-async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, targetShortSide, sourceFps, isHDR) {
-    return new Promise((resolve, reject) => {
-        const isHighFps = sourceFps >= 48;
-        const scaleFilter = `scale='if(gt(iw,ih),-2,${targetShortSide})':'if(gt(iw,ih),${targetShortSide},-2)':flags=lanczos`;
-        const hasCas = checkCasSupport(binPath);
-        const sharpFilter = hasCas ? 'cas=strength=0.35' : 'unsharp=5:5:0.35:5:5:0.0';
+function computeWaTargetBitrate(clipDuration) {
+    return Math.min(8000, Math.max(2200, Math.floor(((16.5 * 8192) / Math.max(1, clipDuration)) - 160)));
+}
 
-        let filterParts = [];
+async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sourceFps, isHDR, startSec = 0, clipDuration = 60) {
+    return new Promise((resolve, reject) => {
+        const hasCas = checkCasSupport(binPath);
+        const scaleFilter = "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)':flags=lanczos";
+        const sharpStage = hasCas
+            ? 'unsharp=3:3:0.35:3:3:0.0,cas=0.55'
+            : 'unsharp=3:3:0.35:3:3:0.0';
+
+        const filterParts = [];
         if (isHDR) {
             const hasZscale = checkZscaleSupport(binPath);
             if (hasZscale) {
@@ -883,53 +888,47 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, tar
             }
         }
 
-        filterParts.push(scaleFilter);
-        filterParts.push(sharpFilter);
-
-        if (isHighFps) {
-            filterParts.push('setpts=N/(60*TB)');
-        }
+        filterParts.push(
+            scaleFilter,
+            'setsar=1',
+            'hqdn3d=1.2:1.2:3:3',
+            sharpStage,
+            'eq=contrast=1.03:saturation=1.06',
+            'fps=60'
+        );
 
         const vfChain = filterParts.join(',');
-
-        let args = [
-            '-y',
+        const segDuration = Math.min(60, Math.max(1, clipDuration));
+        const args = ['-y'];
+        if (startSec > 0) {
+            args.push('-ss', String(startSec));
+        }
+        args.push(
             '-i', inputPath,
-            '-t', '60',
+            '-t', String(segDuration),
             '-vf', vfChain,
             '-c:v', 'libx264',
-            '-preset', 'slow',
             '-profile:v', 'high',
-            '-level:v', '4.1',
-            '-b:v', `${vBitrate}k`,
-            '-maxrate', `${Math.floor(vBitrate * 1.15)}k`,
-            '-bufsize', `${Math.floor(vBitrate * 1.5)}k`,
+            '-level', '4.1',
+            '-preset', 'faster',
+            '-crf', '19',
+            '-maxrate', `${vBitrate}k`,
+            '-bufsize', `${vBitrate * 2}k`,
+            '-g', '60',
+            '-keyint_min', '60',
+            '-sc_threshold', '0',
             '-pix_fmt', 'yuv420p',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
             '-color_range', 'tv',
-            '-bf', '0',
-            '-refs', '3',
-            '-rc-lookahead', '25',
-            '-g', '60',
-            '-keyint_min', '60',
-            '-x264-params', 'deblock=-1,-1:aq-mode=3:aq-strength=1.0:psy-rd=1.0,0.15'
-        ];
-
-        if (isHighFps) {
-            args.push('-fps_mode', 'cfr', '-r', '60');
-        } else {
-            args.push('-fps_mode', 'cfr');
-        }
-
-        args.push(
+            '-movflags', '+faststart',
+            '-af', 'highpass=f=75,dynaudnorm=f=150:g=15',
             '-c:a', 'aac',
-            '-b:a', '96k',
-            '-ar', '44100',
+            '-b:a', '160k',
+            '-ar', '48000',
             '-ac', '2',
             '-threads', '2',
-            '-movflags', '+faststart',
             outputPath
         );
 
@@ -5763,47 +5762,50 @@ async function startBot() {
                                     });
                                 } catch {}
                             } else {
-                                const effectiveDuration = Math.min(durationSec, 60);
-                                const rawBitrate = Math.floor(((15.2 * 8192) / effectiveDuration) - 96);
-                                const vBitrate = Math.max(3500, Math.min(11500, rawBitrate));
-                                const targetShortSide = vBitrate >= 4600 ? 1080 : 720;
-                                const isTrimmed = durationSec > 60;
-                                const isHighFps = sourceFps >= 48;
+                                if (durationSec > 180) {
+                                    await sendHumanReply(sock, remoteJid, {
+                                        text:
+                                            `HAD DURASI WHATSAPP STATUS HD (MAKS 180 SAAT)\n\n` +
+                                            `Durasi video anda ialah *${Math.round(durationSec)} saat*. Mod WhatsApp Status HD menyokong video sehingga *180 saat (3 minit)* dengan pemecahan automatik setiap 60 saat.\n\n` +
+                                            `Sila potong video kepada 3 minit ke bawah atau tukar ke mod TikTok (*TT*) jika diperlukan.`
+                                    }, { quoted: msg });
+                                    return;
+                                }
 
-                                const resLabel = targetShortSide === 1080 ? (isHighFps ? '1080p (60 FPS)' : '1080p (HD)') : (isHighFps ? '720p (60 FPS)' : '720p (HD)');
-                                const fpsStatus = isHighFps ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
+                                const totalParts = durationSec <= 60 ? 1 : Math.ceil(durationSec / 60);
+                                const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped)' : 'BT.709 Vivid';
 
-                                console.log(`[FFmpeg Transcode WA] ${resLabel} @ ${vBitrate} kbps | CAS: 0.35 | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
-                                await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
+                                for (let partIdx = 0; partIdx < totalParts; partIdx++) {
+                                    const startSec = partIdx * 60;
+                                    const clipDuration = Math.min(60, Math.max(1, durationSec - startSec));
+                                    const targetVideoKbps = computeWaTargetBitrate(clipDuration);
+                                    const partFileName = totalParts === 1 ? 'Status_HD.mp4' : `Status_HD_Part${partIdx + 1}.mp4`;
+                                    const partOutputPath = path.join(TEMP_DIR, `${fileId}_${partFileName}`);
 
-                                await sendCachedMessage(sock, remoteJid, {
-                                    video: { stream: fs.createReadStream(outputPath) },
-                                    mimetype: 'video/mp4'
-                                }, { quoted: msg });
+                                    try {
+                                        console.log(`[FFmpeg Transcode WA] Bahagian ${partIdx + 1}/${totalParts} | 1080p60 @ ${targetVideoKbps} kbps (<16.5MB) | Durasi: ${clipDuration.toFixed(1)}s | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR' : 'SDR'})`);
+                                        await transcode60fpsVideo(inputPath, partOutputPath, ffmpegPath, targetVideoKbps, sourceFps, isHDR, startSec, clipDuration);
+
+                                        const partCaption = totalParts === 1
+                                            ? `✓ *VIDEO WHATSAPP STATUS HD SIAP*\n\nSimpan *file* ini terus ke galeri dan muat naik ke WhatsApp Status tanpa trim/edit supaya kualiti 1080p60 kekal tajam.\n\n• Profil: 1080p 60fps | ${targetVideoKbps} kbps (<16.5MB Bypass) | ${colorNote}\n• Audio: Highpass + Dynamic Normalized (160kbps)`
+                                            : `✓ *VIDEO WHATSAPP STATUS HD — Bahagian ${partIdx + 1}/${totalParts}*\n\nSimpan *file* ini terus ke galeri dan muat naik mengikut turutan ke WhatsApp Status.\n\n• Profil: 1080p 60fps | ${targetVideoKbps} kbps (<16.5MB Bypass)`;
+
+                                        await sendCachedMessage(sock, remoteJid, {
+                                            document: { stream: fs.createReadStream(partOutputPath) },
+                                            mimetype: 'video/mp4',
+                                            fileName: partFileName,
+                                            caption: partCaption
+                                        }, { quoted: msg });
+                                    } finally {
+                                        if (fs.existsSync(partOutputPath)) { try { fs.unlinkSync(partOutputPath); } catch {} }
+                                    }
+                                }
 
                                 try {
                                     await sock.sendMessage(remoteJid, {
                                         react: { text: '✅', key: msg.key }
                                     });
                                 } catch {}
-
-                                const hasCas = checkCasSupport(ffmpegPath);
-                                const casNote = hasCas ? 'CAS 0.35 (Gred 4K)' : 'Unsharp Adaptive';
-                                const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
-                                const motionNote = isHighFps ? ' (True 60fps Native)' : ' (True Native CFR)';
-                                const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
-
-                                await sendHumanReply(sock, remoteJid, {
-                                    text:
-                                        `✓ *PENGOPTIMUMAN VIDEO SELESAI*\n\n` +
-                                        `Sila majukan (forward) video di atas terus ke WhatsApp Status anda tanpa sebarang suntingan atau trim bagi mengekalkan kualiti asal.\n\n` +
-                                        `Spesifikasi Output:\n` +
-                                        `• Resolusi: ${resLabel}${motionNote}\n` +
-                                        `• Kadar Bingkai: ${fpsStatus}\n` +
-                                        `• Bitrate: ${vBitrate} kbps (Sasaran ~15.2 MB Passthrough)\n` +
-                                        `• Penalaan: ${casNote} | aq-mode 3 | Audio 96k\n` +
-                                        `• Profil Warna: ${colorNote}${trimNote}`
-                                });
                             }
 
                             if (user && user.status === 'ACTIVE' && (!user.refSentToExisting || !user.refCode)) {
@@ -6382,15 +6384,30 @@ async function handleTelegramMessage(tgMsg) {
                             msgId
                         );
                     } else {
-                        const effectiveDuration = Math.min(durationSec, 60);
-                        const rawBitrate = Math.floor(((15.2 * 8192) / effectiveDuration) - 96);
-                        const vBitrate = Math.max(3500, Math.min(11500, rawBitrate));
-                        const targetShortSide = vBitrate >= 4600 ? 1080 : 720;
-                        await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
-                        await sendTelegramMedia(chatId, 'video', outputPath,
-                            `✓ VIDEO WHATSAPP STATUS HD SELESAI\nProfil: ${targetShortSide}p | ${sourceFps >= 48 ? '60fps' : sourceFps.toFixed(1) + 'fps'} | ${vBitrate} kbps`,
-                            msgId
-                        );
+                        if (durationSec > 180) {
+                            await sendTelegramMessage(chatId,
+                                `HAD DURASI WHATSAPP STATUS HD (MAKS 180 SAAT)\n\nDurasi video anda ialah ${Math.round(durationSec)} saat. Mod WhatsApp Status HD menyokong video sehingga 180 saat (3 minit) dengan pemecahan automatik 60 saat.`,
+                                msgId
+                            );
+                            return;
+                        }
+                        const totalParts = durationSec <= 60 ? 1 : Math.ceil(durationSec / 60);
+                        for (let partIdx = 0; partIdx < totalParts; partIdx++) {
+                            const startSec = partIdx * 60;
+                            const clipDuration = Math.min(60, Math.max(1, durationSec - startSec));
+                            const targetVideoKbps = computeWaTargetBitrate(clipDuration);
+                            const partFileName = totalParts === 1 ? 'Status_HD.mp4' : `Status_HD_Part${partIdx + 1}.mp4`;
+                            const partOutputPath = path.join(TEMP_DIR, `${fileId}_${partFileName}`);
+                            try {
+                                await transcode60fpsVideo(inputPath, partOutputPath, ffmpegPath, targetVideoKbps, sourceFps, isHDR, startSec, clipDuration);
+                                const tgWaCaption = totalParts === 1
+                                    ? `✓ VIDEO WHATSAPP STATUS HD SIAP\nSimpan file ini terus ke galeri dan muat naik ke WhatsApp Status tanpa trim/edit.\n• Profil: 1080p60 | ${targetVideoKbps} kbps (<16.5MB Bypass) | Audio 160k Normalized`
+                                    : `✓ VIDEO WHATSAPP STATUS HD — Bahagian ${partIdx + 1}/${totalParts}\nSimpan file ini dan muat naik mengikut turutan ke WhatsApp Status.\n• Profil: 1080p60 | ${targetVideoKbps} kbps (<16.5MB Bypass)`;
+                                await sendTelegramMedia(chatId, 'document', partOutputPath, tgWaCaption, msgId);
+                            } finally {
+                                if (fs.existsSync(partOutputPath)) { try { fs.unlinkSync(partOutputPath); } catch {} }
+                            }
+                        }
                     }
                 } catch (err) {
                     await sendTelegramMessage(chatId, `Ralat pemprosesan video: ${err.message}`, msgId);
