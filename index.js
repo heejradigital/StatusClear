@@ -376,6 +376,12 @@ function recordProcessedPayment(paymentId) {
     }
 }
 
+function isGenericDisplayName(rawName) {
+    const cleaned = String(rawName || '').trim();
+    if (!cleaned) return true;
+    return /^(ahli|pengguna|member|customer|hitpay payment|user\s*\d*)$/i.test(cleaned);
+}
+
 function normalizeUserTiers(u) {
     if (!u || typeof u !== 'object') return u;
     if (u.waExpiredAt === undefined && u.expiredAt) {
@@ -387,7 +393,9 @@ function normalizeUserTiers(u) {
     u.expiredAt = maxExp > 0 ? maxExp : (u.expiredAt || null);
     u.preferredMode = (u.preferredMode === 'TT') ? 'TT' : 'WA';
     u.telegramChatId = u.telegramChatId || null;
-    u.name = formatTitleCaseName(u.name, u.phone);
+    if (u.realName) u.realName = formatTitleCaseName(u.realName, u.phone);
+    if (u.waName) u.waName = formatTitleCaseName(u.waName, u.phone);
+    u.name = formatTitleCaseName(u.realName || u.name, u.phone);
     if (!u.createdAt || typeof u.createdAt !== 'number' || isNaN(u.createdAt)) {
         const regParsed = u.registeredAt ? new Date(u.registeredAt).getTime() : NaN;
         u.createdAt = !isNaN(regParsed) ? regParsed : Date.now();
@@ -1187,7 +1195,7 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
 // -------------------------------------------------------------
 // FUNGSI PUSAT PENGAKTIFAN BAYARAN BERJAYA (WEBHOOK & AUTO-SYNC)
 // -------------------------------------------------------------
-async function processCompletedPayment({ paymentId, referenceNumber, customerName, paymentType, amountPaid, feeAmount = null }) {
+async function processCompletedPayment({ paymentId, referenceNumber, customerName, realName = '', paymentType, amountPaid, feeAmount = null }) {
     if (!referenceNumber || !referenceNumber.includes('|')) {
         return { success: false, reason: 'invalid_reference' };
     }
@@ -1226,7 +1234,8 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             }
         }
 
-        const rawCandidateName = customerName || targetUser?.name || '';
+        const cleanReal = realName && !isGenericDisplayName(realName) ? formatTitleCaseName(realName, targetKey) : null;
+        const rawCandidateName = cleanReal || customerName || targetUser?.name || '';
         const finalName = formatTitleCaseName(rawCandidateName, targetKey);
         const now = Date.now();
         const addMs = days * 24 * 60 * 60 * 1000;
@@ -1236,6 +1245,8 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             targetUser = normalizeUserTiers({
                 phone: targetKey,
                 name: finalName,
+                realName: cleanReal,
+                waName: (!cleanReal && customerName && !isGenericDisplayName(customerName)) ? formatTitleCaseName(customerName, targetKey) : null,
                 status: 'ACTIVE',
                 createdAt: now,
                 registeredAt: new Date().toISOString(),
@@ -1256,7 +1267,13 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             users[targetKey] = targetUser;
         } else {
             normalizeUserTiers(targetUser);
-            if (customerName && (!targetUser.name || /^(ahli|pengguna|member|user\s*\d*)$/i.test(targetUser.name))) {
+            if (cleanReal) {
+                if (!targetUser.waName && targetUser.name && !isGenericDisplayName(targetUser.name) && targetUser.name.toLowerCase() !== cleanReal.toLowerCase()) {
+                    targetUser.waName = targetUser.name;
+                }
+                targetUser.realName = cleanReal;
+                targetUser.name = cleanReal;
+            } else if (customerName && (!targetUser.name || isGenericDisplayName(targetUser.name))) {
                 targetUser.name = formatTitleCaseName(customerName, targetKey);
             }
             targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
@@ -1652,6 +1669,47 @@ async function fetchHitPayAllPages(endpoint, maxPages = 10) {
     return collected;
 }
 
+function syncRealNamesFromHitPay(payments) {
+    if (!Array.isArray(payments) || payments.length === 0) return false;
+    try {
+        const users = loadUsers();
+        let changed = false;
+        const seenPhones = new Set();
+
+        for (const tx of payments) {
+            if (!tx || !tx.realName || isGenericDisplayName(tx.realName)) continue;
+            const rawPhone = tx.buyerPhone || '';
+            if (!rawPhone || rawPhone === '-') continue;
+            const phoneKey = rawPhone.startsWith('tg_') ? rawPhone : normalizeIdentifier(rawPhone);
+            if (!phoneKey || seenPhones.has(phoneKey)) continue;
+            seenPhones.add(phoneKey);
+
+            const target = users[phoneKey] || Object.values(users).find(u => u.phone === phoneKey || u.lid === phoneKey);
+            if (!target) continue;
+
+            const realFormatted = formatTitleCaseName(tx.realName, phoneKey);
+            if (!target.waName && target.name && !isGenericDisplayName(target.name) && target.name.toLowerCase() !== realFormatted.toLowerCase()) {
+                target.waName = formatTitleCaseName(target.name, phoneKey);
+                changed = true;
+            }
+            if (target.realName !== realFormatted || target.name !== realFormatted) {
+                target.realName = realFormatted;
+                target.name = realFormatted;
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            saveUsers(users);
+            console.log('[HitPay Real Name Sync] Nama sebenar pembayar dari HitPay diselaraskan ke users.json.');
+        }
+        return changed;
+    } catch (err) {
+        console.error('[HitPay Real Name Sync Error]:', err.message);
+        return false;
+    }
+}
+
 async function fetchHitPayDashboardData(force = false) {
     if (!HITPAY_API_KEY) {
         return {
@@ -1723,9 +1781,22 @@ async function fetchHitPayDashboardData(force = false) {
                 const tsRaw = (matchedCharge && matchedCharge.created_at) || (subPayment && subPayment.created_at) || pr.updated_at || pr.created_at;
                 const ts = tsRaw ? new Date(tsRaw).getTime() : Date.now();
 
+                const rawRealName =
+                    matchedCharge?.customer_name ||
+                    matchedCharge?.buyer_name ||
+                    matchedCharge?.payer_name ||
+                    subPayment?.buyer_name ||
+                    subPayment?.customer_name ||
+                    '';
+                const formattedRealName = rawRealName && !isGenericDisplayName(rawRealName)
+                    ? formatTitleCaseName(rawRealName, cleanPhone)
+                    : null;
+                const fallbackTxName = formatTitleCaseName(pr.name || pr.email || 'Customer', cleanPhone);
+
                 payments.push({
                     paymentId: (matchedCharge && matchedCharge.id) || (subPayment && subPayment.id) || pr.id,
-                    buyerName: pr.name || matchedCharge?.customer_name || pr.email || 'Customer',
+                    realName: formattedRealName,
+                    buyerName: formattedRealName || fallbackTxName,
                     buyerPhone: cleanPhone,
                     packageDays: Number.isFinite(daysFromRef) ? daysFromRef : 0,
                     amount: amountNum.toFixed(2),
@@ -1744,10 +1815,16 @@ async function fetchHitPayDashboardData(force = false) {
                 const feeNum = (parseFloat(c.fixed_fee) || 0) + (parseFloat(c.discount_fee) || 0);
                 const netNum = c.amount_without_fees != null ? (parseFloat(c.amount_without_fees) || 0) : Math.max(0, amountNum - feeNum);
                 const ts = c.created_at ? new Date(c.created_at).getTime() : Date.now();
+                const cleanChargePhone = c.customer_phone ? (normalizeIdentifier(c.customer_phone) || c.customer_phone) : '-';
+                const rawChargeRealName = c.customer_name || c.buyer_name || c.payer_name || '';
+                const formattedChargeReal = rawChargeRealName && !isGenericDisplayName(rawChargeRealName)
+                    ? formatTitleCaseName(rawChargeRealName, cleanChargePhone)
+                    : null;
                 payments.push({
                     paymentId: c.id || `CHG_${ts}`,
-                    buyerName: c.customer_name || c.remark || c.customer_email || 'HitPay Payment',
-                    buyerPhone: c.customer_phone ? (normalizeIdentifier(c.customer_phone) || c.customer_phone) : '-',
+                    realName: formattedChargeReal,
+                    buyerName: formattedChargeReal || formatTitleCaseName(c.remark || c.customer_email || 'HitPay Payment', cleanChargePhone),
+                    buyerPhone: cleanChargePhone,
                     packageDays: 0,
                     amount: amountNum.toFixed(2),
                     fee: feeNum.toFixed(2),
@@ -1759,6 +1836,7 @@ async function fetchHitPayDashboardData(force = false) {
             }
 
             payments.sort((a, b) => b.timestamp - a.timestamp);
+            syncRealNamesFromHitPay(payments);
 
             let totalCollectedRM = 0;
             let totalNetRM = null;
@@ -1862,7 +1940,7 @@ const PWA_MANIFEST = {
 };
 
 const PWA_SW = `
-const CACHE_NAME = 'statusclear-telemetry-v6';
+const CACHE_NAME = 'statusclear-telemetry-v7';
 const ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -3265,6 +3343,8 @@ const PWA_HTML = `<!DOCTYPE html>
         if (currentPayFilter === 'unpaid' && isPaidUser) return false;
 
         return (u.name || '').toLowerCase().includes(query) ||
+               (u.realName || '').toLowerCase().includes(query) ||
+               (u.waName || '').toLowerCase().includes(query) ||
                (u.phone || '').includes(query) ||
                (u.refCode || '').toLowerCase().includes(query);
       });
@@ -3293,6 +3373,9 @@ const PWA_HTML = `<!DOCTYPE html>
         const monthsLabel = monthsNum > 0 ? (monthsNum + (monthsNum === 1 ? ' month' : ' months')) : 'None';
         const daysLeftNum = u.daysLeft || 0;
         const daysLeftLabel = isAct ? (daysLeftNum + (daysLeftNum === 1 ? ' day left' : ' days left')) : '0 days left';
+        const waSubHtml = (u.waName && String(u.waName).toLowerCase() !== String(u.name || '').toLowerCase())
+          ? '<div style="font-size: 11px; color: #8E9387; margin-top: 1px;">WA: ' + escHtml(u.waName) + '</div>'
+          : '';
         const tierDetails =
           'WA: <strong style="color: ' + (hasWa ? '#C6FF00' : '#8E9387') + ';">' + escHtml(u.waExpiredAtFormatted || 'None') + '</strong>' +
           ' • TT: <strong style="color: ' + (hasTt ? '#C6FF00' : '#8E9387') + ';">' + escHtml(u.ttExpiredAtFormatted || 'None') + '</strong>';
@@ -3304,6 +3387,7 @@ const PWA_HTML = `<!DOCTYPE html>
             '<div class="user-card-header">' +
               '<div>' +
                 '<div class="user-name">' + escHtml(u.name) + '</div>' +
+                waSubHtml +
                 '<div class="user-phone">' + escHtml(u.phone) + ' • Code: <strong style="color: #C6FF00;">' + escHtml(u.refCode) + '</strong></div>' +
               '</div>' +
               '<span class="user-badge ' + (isAct ? 'active' : 'expired') + '">' + tierBadge + '</span>' +
@@ -3806,6 +3890,7 @@ function ensureHttpServer() {
 
             const txDaysByPhone = {};
             const txPaidByPhone = {};
+            const realNameByPhone = {};
             const seenTxIds = new Set();
             [...(hitpayPayments || []), ...(stats.transactions || [])].forEach(tx => {
                 const txKey = tx.paymentId || `${tx.buyerPhone}_${tx.timestamp}_${tx.amount}`;
@@ -3815,6 +3900,9 @@ function ensureHttpServer() {
                     const p = normalizeIdentifier(tx.buyerPhone);
                     txDaysByPhone[p] = (txDaysByPhone[p] || 0) + (parseInt(tx.packageDays, 10) || 30);
                     txPaidByPhone[p] = (txPaidByPhone[p] || 0) + (parseFloat(tx.amount) || 0);
+                    if (!realNameByPhone[p] && tx.realName && !isGenericDisplayName(tx.realName)) {
+                        realNameByPhone[p] = formatTitleCaseName(tx.realName, p);
+                    }
                 }
             });
 
@@ -3892,9 +3980,18 @@ function ensureHttpServer() {
                     }
                     const refUser = u.referredBy ? (users[u.referredBy] || userList.find(x => x.phone === u.referredBy)) : null;
                     const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'None';
+                    const resolvedRealName = u.realName || realNameByPhone[u.phone] || null;
+                    const resolvedDisplayName = resolvedRealName || u.name;
+                    const resolvedWaName = (u.waName && u.waName.toLowerCase() !== resolvedDisplayName.toLowerCase())
+                        ? u.waName
+                        : ((resolvedRealName && u.name && u.name.toLowerCase() !== resolvedRealName.toLowerCase() && !isGenericDisplayName(u.name))
+                            ? u.name
+                            : null);
                     return {
                         phone: u.phone,
-                        name: u.name,
+                        name: resolvedDisplayName,
+                        realName: resolvedRealName,
+                        waName: resolvedWaName,
                         createdAt: u.createdAt || Date.now(),
                         totalPaid: Number((txPaidByPhone[u.phone] || 0).toFixed(2)),
                         rawStatus: u.status || 'NEW',
@@ -4294,6 +4391,7 @@ function ensureHttpServer() {
                         paymentId,
                         referenceNumber,
                         customerName: data.name || parsedBody.name || '',
+                        realName: data.buyer_name || data.customer_name || data.payer_name || parsedBody.buyer_name || parsedBody.customer_name || '',
                         paymentType: data.payment_type || parsedBody.payment_type || (data.payment_methods && data.payment_methods[0]) || 'HitPay Online Gateway',
                         amountPaid: data.amount || parsedBody.amount,
                         feeAmount: data.fees ?? data.fee ?? parsedBody.fees ?? parsedBody.fee ?? null
