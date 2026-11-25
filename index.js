@@ -21,7 +21,8 @@ const {
     DisconnectReason,
     downloadMediaMessage,
     Browsers,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -36,20 +37,59 @@ const heicConvert = require('heic-convert');
 
 const BOT_NAME = "Status Clear By Danial";
 const MAX_QUEUE_SIZE = 25;
+const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 
-// Nombor Pentadbir Utama & Senarai Akses Penuh
-const ADMIN_NUMBER = (process.env.ADMIN_NUMBER || '601154474066').replace(/\D/g, '');
+// Primary Super Admin ('60194066718') & Additional Admins
+const PRIMARY_ADMIN = '60194066718';
+const EXTRA_ADMINS = (process.env.ADMIN_NUMBER || '')
+    .split(',')
+    .map(s => s.trim().replace(/[^0-9]/g, '').replace(/^0/, '60'))
+    .filter(Boolean);
+const ADMIN_NUMBER = PRIMARY_ADMIN;
 const ADMIN_PIN = (process.env.ADMIN_PIN || '406618').trim();
-const ADMIN_IDENTIFIERS = [
-    ADMIN_NUMBER,
-    '601154474066',
-    '60194066718',
+const ADMIN_IDENTIFIERS = Array.from(new Set([
+    PRIMARY_ADMIN,
     '0194066718',
-    '01154474066',
     '194066718',
+    ...EXTRA_ADMINS,
+    '601154474066',
+    '01154474066',
     '1154474066',
     '68225740046362'
-];
+]));
+
+function isPrimaryAdmin(phone, remoteJid = '') {
+    const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
+    return cleanPhone === PRIMARY_ADMIN || cleanPhone === '0194066718' || cleanPhone === '194066718' || String(remoteJid || '').includes(PRIMARY_ADMIN);
+}
+
+function isAnyAdmin(phone, remoteJid = '', fromMe = false) {
+    if (fromMe || isPrimaryAdmin(phone, remoteJid)) return true;
+    const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
+    return ADMIN_IDENTIFIERS.some(id => id && (String(remoteJid || '').includes(id) || cleanPhone === id));
+}
+
+function getPrimaryAdminJid() {
+    return `${PRIMARY_ADMIN}@s.whatsapp.net`;
+}
+
+async function notifyAdmins(sock, text) {
+    if (!sock || !text) return;
+    const primaryJid = getPrimaryAdminJid();
+    try {
+        await sendCachedMessage(sock, primaryJid, { text });
+    } catch (err) {
+        console.error(`[ADMIN -> PRIMARY ${PRIMARY_ADMIN}] Gagal hantar notifikasi:`, err.message);
+    }
+    for (const extra of EXTRA_ADMINS) {
+        if (extra && extra !== PRIMARY_ADMIN) {
+            const extraJid = extra.includes('@') ? extra : `${extra}@s.whatsapp.net`;
+            try {
+                await sendCachedMessage(sock, extraJid, { text });
+            } catch {}
+        }
+    }
+}
 
 // Konfigurasi Storan Kekal Railway (Volume Mounts)
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
@@ -161,31 +201,31 @@ const WEBHOOK_PUBLIC_URL = (
 ).trim();
 
 // -------------------------------------------------------------
-// TEMPLAT PAKEJ LANGGANAN RASMI
+// TEMPLAT PAKEJ LANGGANAN RASMI (WA, TT, COMBO & UPGRADE)
 // -------------------------------------------------------------
 const PACKAGES = {
-    '1': { key: '1', title: '1 Bulan (Asas)', price: 'RM10', amount: '10.00', days: 30 },
-    '2': { key: '2', title: '3 Bulan (Popular)', price: 'RM25', amount: '25.00', days: 90 },
-    '3': { key: '3', title: '6 Bulan (Pro)', price: 'RM48', amount: '48.00', days: 180 },
-    '4': { key: '4', title: '1 Tahun (VIP)', price: 'RM90', amount: '90.00', days: 365 }
+    '1': { key: '1', planCode: 'WA', title: 'WhatsApp Status HD Sahaja', price: 'RM10', amount: '10.00', days: 30 },
+    '2': { key: '2', planCode: 'TT', title: 'TikTok 1080p 60fps HD Sahaja', price: 'RM10', amount: '10.00', days: 30 },
+    '3': { key: '3', planCode: 'COMBO', title: 'Combo WhatsApp + TikTok HD', price: 'RM20', amount: '20.00', days: 30 },
+    '4': { key: '4', planCode: 'UPGRADE_TT', title: 'Upgrade Tambah TikTok HD (Ahli WA Aktif)', price: 'RM10', amount: '10.00', days: 30 }
 };
 
-const PACKAGE_TEMPLATE = 
-`*SENARAI PAKEJ LANGGANAN (${BOT_NAME}):*
+const PACKAGE_TEMPLATE =
+`*SENARAI PELAN LANGGANAN (${BOT_NAME}):*
 
-1️⃣ *1 Bulan (Asas)* — *RM10*
-   └ Tempoh Aktif: +30 Hari
+*1. WhatsApp Status HD Sahaja* — *RM10 / 30 Hari*
+   └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status.
 
-2️⃣ *3 Bulan (Popular)* — *RM25* _(Jimat RM5)_
-   └ Tempoh Aktif: +90 Hari
+*2. TikTok 1080p 60fps HD Sahaja* — *RM10 / 30 Hari*
+   └ Video 1080p 60fps CRF 18 tajam untuk muat naik TikTok.
 
-3️⃣ *6 Bulan (Pro)* — *RM48* _(Jimat RM12)_
-   └ Tempoh Aktif: +180 Hari
+*3. Combo WhatsApp + TikTok HD* — *RM20 / 30 Hari*
+   └ Akses penuh untuk kedua-dua mod WhatsApp & TikTok HD.
 
-4️⃣ *1 Tahun (VIP)* — *RM90* _(Jimat RM30 • Percuma 3 Bulan)_
-   └ Tempoh Aktif: +365 Hari
+*4. Upgrade Tambah TikTok HD* — *RM10 / 30 Hari*
+   └ Khas untuk ahli WhatsApp HD yang sudah active.
 
-👉 *Balas nombor 1, 2, 3, atau 4* untuk menjana pautan pembayaran selamat (FPX, DuitNow QR, eWallet & Kad).`;
+Balas nombor *1, 2, 3, atau 4* untuk jana link pembayaran HitPay (FPX, DuitNow QR, eWallet & Kad).`;
 
 // -------------------------------------------------------------
 // SISTEM PENJANAAN KOD REFERRAL PINTAR (CORE NAME + 3 DIGITS)
@@ -273,6 +313,34 @@ function recordProcessedPayment(paymentId) {
     } catch (e) {
         console.error('Ralat simpan hitpay_processed.json:', e);
     }
+}
+
+function normalizeUserTiers(u) {
+    if (!u || typeof u !== 'object') return u;
+    if (u.waExpiredAt === undefined && u.expiredAt) {
+        u.waExpiredAt = u.expiredAt;
+    }
+    u.waExpiredAt = u.waExpiredAt || null;
+    u.ttExpiredAt = u.ttExpiredAt || null;
+    const maxExp = Math.max(u.waExpiredAt || 0, u.ttExpiredAt || 0);
+    u.expiredAt = maxExp > 0 ? maxExp : (u.expiredAt || null);
+    u.preferredMode = (u.preferredMode === 'TT') ? 'TT' : 'WA';
+    u.telegramChatId = u.telegramChatId || null;
+    return u;
+}
+
+function hasWaAccess(user, isSuperAdmin = false) {
+    if (isSuperAdmin) return true;
+    return !!(user && user.waExpiredAt && user.waExpiredAt > Date.now());
+}
+
+function hasTtAccess(user, isSuperAdmin = false) {
+    if (isSuperAdmin) return true;
+    return !!(user && user.ttExpiredAt && user.ttExpiredAt > Date.now());
+}
+
+function hasAnyAccess(user, isSuperAdmin = false) {
+    return hasWaAccess(user, isSuperAdmin) || hasTtAccess(user, isSuperAdmin);
 }
 
 function loadUsers() {
@@ -368,6 +436,10 @@ function loadUsers() {
             } catch {}
         }
 
+        for (const [k, v] of Object.entries(merged)) {
+            if (v && typeof v === 'object') normalizeUserTiers(v);
+        }
+
         return merged;
     } catch (e) {
         console.error('Ralat gabung loadUsers:', e);
@@ -394,16 +466,16 @@ function findUserRecord(users, remoteJid, altJid) {
     const cleanAlt = normalizeIdentifier(altJid);
 
     // 1. Semakan terus pada rekod ACTIVE
-    if (cleanJid && users[cleanJid] && users[cleanJid].status === 'ACTIVE' && users[cleanJid].expiredAt > Date.now()) {
+    if (cleanJid && users[cleanJid] && hasAnyAccess(users[cleanJid], false)) {
         return users[cleanJid];
     }
-    if (cleanAlt && users[cleanAlt] && users[cleanAlt].status === 'ACTIVE' && users[cleanAlt].expiredAt > Date.now()) {
+    if (cleanAlt && users[cleanAlt] && hasAnyAccess(users[cleanAlt], false)) {
         return users[cleanAlt];
     }
 
     // 2. Semakan melalui pemetaan LID atau telefon bagi akaun ACTIVE
     for (const u of Object.values(users)) {
-        if (u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now()) {
+        if (hasAnyAccess(u, false)) {
             if (u.phone === cleanJid || u.phone === cleanAlt) return u;
             if (u.lid === cleanJid || u.lid === cleanAlt) return u;
             if (u.jid === remoteJid || u.altJid === altJid) return u;
@@ -431,7 +503,7 @@ async function syncAllActiveLids(sock) {
         const uniquePhones = new Set();
 
         for (const u of Object.values(users)) {
-            if (u.status === 'ACTIVE' && u.phone && !uniquePhones.has(u.phone)) {
+            if (hasAnyAccess(u, false) && u.phone && !String(u.phone).startsWith('tg_') && !uniquePhones.has(u.phone)) {
                 uniquePhones.add(u.phone);
                 try {
                     const checkJid = u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`;
@@ -457,7 +529,7 @@ async function syncAllActiveLids(sock) {
 const logger = pino({ level: 'silent' });
 
 // -------------------------------------------------------------
-// CACHE PERCUBAAN SEMULA & SIMPANAN MESEJ RINGKAS (ANTI-WAITING)
+// CACHE PERCUBAAN SEMULA, SIMPANAN MESEJ (500) & HUMAN TYPING DELAY
 // -------------------------------------------------------------
 const msgRetryCounterCache = {
     _map: new Map(),
@@ -469,42 +541,33 @@ const msgRetryCounterCache = {
     clear() { this._map.clear(); }
 };
 
-const MAX_RECENT_MESSAGES = 250;
-const recentMessages = new Map();
+const MAX_CACHED_MESSAGES = 500;
+const cachedMessages = new Map();
 
-function storeRecentMessage(id, message) {
+function storeCachedMessage(id, message) {
     if (!id || !message) return;
-    if (recentMessages.size >= MAX_RECENT_MESSAGES) {
-        const oldestKey = recentMessages.keys().next().value;
-        recentMessages.delete(oldestKey);
+    if (cachedMessages.size >= MAX_CACHED_MESSAGES) {
+        const oldestKey = cachedMessages.keys().next().value;
+        cachedMessages.delete(oldestKey);
     }
+    cachedMessages.set(id, message);
+}
 
-    const stub = {};
-    if (message.conversation) stub.conversation = message.conversation;
-    if (message.extendedTextMessage) stub.extendedTextMessage = { text: message.extendedTextMessage.text || '' };
-    if (message.imageMessage) {
-        stub.imageMessage = {
-            caption: message.imageMessage.caption || '',
-            mimetype: message.imageMessage.mimetype || 'image/jpeg'
-        };
+async function sendCachedMessage(sock, jid, content, options = {}) {
+    const sent = await sock.sendMessage(jid, content, options);
+    if (sent && sent.key && sent.key.id && sent.message) {
+        storeCachedMessage(sent.key.id, sent.message);
     }
-    if (message.videoMessage) {
-        stub.videoMessage = {
-            caption: message.videoMessage.caption || '',
-            mimetype: message.videoMessage.mimetype || 'video/mp4'
-        };
-    }
-    if (message.documentMessage) {
-        stub.documentMessage = {
-            caption: message.documentMessage.caption || '',
-            mimetype: message.documentMessage.mimetype || '',
-            fileName: message.documentMessage.fileName || ''
-        };
-    }
-    if (Object.keys(stub).length === 0) {
-        stub.conversation = '';
-    }
-    recentMessages.set(id, stub);
+    return sent;
+}
+
+async function sendHumanReply(sock, targetJid, content, options = {}) {
+    if (!sock || !targetJid) return null;
+    try { await sock.sendPresenceUpdate('composing', targetJid); } catch {}
+    const delayMs = 4000 + Math.floor(Math.random() * 1001);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+    try { await sock.sendPresenceUpdate('paused', targetJid); } catch {}
+    return sendCachedMessage(sock, targetJid, content, options);
 }
 
 // -------------------------------------------------------------
@@ -769,6 +832,73 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, tar
     });
 }
 
+async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, isHDR) {
+    return new Promise((resolve, reject) => {
+        const isHighFps = sourceFps >= 48;
+        const scaleFilter = "scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)':flags=lanczos";
+        const hasCas = checkCasSupport(binPath);
+        const sharpFilter = hasCas ? 'cas=strength=0.55' : 'unsharp=5:5:0.55:5:5:0.0';
+
+        const filterParts = [];
+        if (isHDR) {
+            const hasZscale = checkZscaleSupport(binPath);
+            if (hasZscale) {
+                filterParts.push('zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p');
+            } else {
+                filterParts.push('eq=contrast=1.08:saturation=1.18,format=yuv420p');
+            }
+        }
+
+        filterParts.push(scaleFilter);
+        filterParts.push(sharpFilter);
+        if (isHighFps) {
+            filterParts.push('setpts=N/(60*TB)');
+        }
+
+        const vfChain = filterParts.join(',');
+        const args = [
+            '-y',
+            '-i', inputPath,
+            '-t', '90',
+            '-vf', vfChain,
+            '-c:v', 'libx264',
+            '-preset', 'slow',
+            '-profile:v', 'high',
+            '-level:v', '4.2',
+            '-crf', '18',
+            '-maxrate', '10M',
+            '-bufsize', '20M',
+            '-pix_fmt', 'yuv420p',
+            '-colorspace', 'bt709',
+            '-color_primaries', 'bt709',
+            '-color_trc', 'bt709',
+            '-color_range', 'tv',
+            '-fps_mode', 'cfr',
+            '-r', '60',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-ar', '48000',
+            '-ac', '2',
+            '-threads', '2',
+            '-movflags', '+faststart',
+            outputPath
+        ];
+
+        const proc = spawn(binPath, args);
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+            if (code === 0 && fs.existsSync(outputPath)) {
+                incrementStat('videosProcessed');
+                resolve();
+            } else {
+                reject(new Error(`FFmpeg TikTok ralat (kod ${code}): ${stderr.slice(-400)}`));
+            }
+        });
+        proc.on('error', reject);
+    });
+}
+
 async function enhanceQhdPhoto(inputPath, outputPath, binPath) {
     const hasCas = checkCasSupport(binPath);
     const sharpFilter = hasCas ? 'cas=strength=0.35' : 'unsharp=5:5:0.35:5:5:0.0';
@@ -837,21 +967,22 @@ function unwrapMessage(msg) {
 // -------------------------------------------------------------
 // PANGGILAN HITPAY PAYMENT REQUEST API (ASLI FETCH)
 // -------------------------------------------------------------
-async function createHitPayPaymentRequest({ phone, pushName, days, amount }) {
+async function createHitPayPaymentRequest({ userKey, phone, pushName, planCode = 'WA', days = 30, amount = '10.00', purpose, redirectUrl }) {
     if (!HITPAY_API_KEY) {
         throw new Error('HITPAY_API_KEY belum dikonfigurasikan di persekitaran (Environment Variables).');
     }
 
-    console.log(`[HITPAY] Creating payment request for ${phone} (${days} days)...`);
+    const refKey = userKey || phone;
+    console.log(`[HITPAY] Creating payment request for ${refKey} (${planCode}, ${days} days)...`);
 
     const cleanAmount = parseFloat(amount).toFixed(2);
     const payload = {
         amount: cleanAmount,
         currency: 'MYR',
-        name: (pushName || phone || 'Ahli StatusClear').slice(0, 50),
-        purpose: `StatusClear (${days} Hari)`,
-        reference_number: `${phone}|${days}`,
-        redirect_url: 'https://wa.me/' + (process.env.PAIRING_NUMBER || ADMIN_NUMBER),
+        name: (pushName || refKey || 'Ahli StatusClear').slice(0, 50),
+        purpose: purpose || `StatusClear ${planCode} (${days} Hari)`,
+        reference_number: `${refKey}|${planCode}|${days}`,
+        redirect_url: redirectUrl || ('https://wa.me/' + (process.env.PAIRING_NUMBER || PRIMARY_ADMIN)),
         send_email: false,
         send_sms: false
     };
@@ -945,7 +1076,7 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
 // -------------------------------------------------------------
 // FUNGSI PUSAT PENGAKTIFAN BAYARAN BERJAYA (WEBHOOK & AUTO-SYNC)
 // -------------------------------------------------------------
-async function processCompletedPayment({ paymentId, referenceNumber, customerName, paymentType }) {
+async function processCompletedPayment({ paymentId, referenceNumber, customerName, paymentType, amountPaid }) {
     if (!referenceNumber || !referenceNumber.includes('|')) {
         return { success: false, reason: 'invalid_reference' };
     }
@@ -957,18 +1088,27 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
 
     if (paymentId) recordProcessedPayment(paymentId);
 
-    const [rawPhone, rawDays] = referenceNumber.split('|');
-    const targetPhone = normalizeIdentifier(rawPhone);
-    const days = parseInt(rawDays, 10) || 30;
+    const refParts = referenceNumber.split('|');
+    const rawKey = (refParts[0] || '').trim();
+    let planCode = 'WA';
+    let days = 30;
+    if (refParts.length >= 3) {
+        planCode = (refParts[1] || 'WA').trim().toUpperCase();
+        days = parseInt(refParts[2], 10) || 30;
+    } else {
+        days = parseInt(refParts[1], 10) || 30;
+    }
 
-    if (!targetPhone) return { success: false, reason: 'no_target_phone' };
+    const isTgUser = rawKey.startsWith('tg_');
+    const targetKey = isTgUser ? rawKey : normalizeIdentifier(rawKey);
+    if (!targetKey) return { success: false, reason: 'no_target_phone' };
 
     try {
         const users = loadUsers();
-        let targetUser = users[targetPhone];
+        let targetUser = users[targetKey];
         if (!targetUser) {
             for (const u of Object.values(users)) {
-                if (u.phone === targetPhone || u.lid === targetPhone) {
+                if (u.phone === targetKey || u.lid === targetKey || (isTgUser && u.telegramChatId === targetKey.slice(3))) {
                     targetUser = u;
                     break;
                 }
@@ -976,16 +1116,21 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
         }
 
         const finalName = customerName || targetUser?.name || 'Ahli';
-
+        const now = Date.now();
+        const addMs = days * 24 * 60 * 60 * 1000;
         const addedMonths = Math.max(1, Math.round(days / 30));
+
         if (!targetUser) {
-            targetUser = {
-                phone: targetPhone,
+            targetUser = normalizeUserTiers({
+                phone: targetKey,
                 name: finalName,
                 status: 'ACTIVE',
                 registeredAt: new Date().toISOString(),
                 subscribedMonths: addedMonths,
-                expiredAt: Date.now() + days * 24 * 60 * 60 * 1000,
+                waExpiredAt: (planCode === 'WA' || planCode === 'COMBO') ? (now + addMs) : null,
+                ttExpiredAt: (planCode === 'TT' || planCode === 'UPGRADE_TT' || planCode === 'COMBO') ? (now + addMs) : null,
+                preferredMode: (planCode === 'TT') ? 'TT' : 'WA',
+                telegramChatId: isTgUser ? targetKey.slice(3) : null,
                 refCode: generateReferralCode(finalName, users),
                 referredBy: null,
                 paidReferrals: 0,
@@ -994,28 +1139,44 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
                 reminded3Days: false,
                 jid: null,
                 altJid: null
-            };
-            users[targetPhone] = targetUser;
+            });
+            users[targetKey] = targetUser;
         } else {
+            normalizeUserTiers(targetUser);
             if (finalName && (!targetUser.name || targetUser.name === 'Ahli' || targetUser.name === 'Pengguna')) {
                 targetUser.name = finalName;
             }
-            const now = Date.now();
-            const baseTime = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
             targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
             targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + addedMonths;
-            targetUser.expiredAt = baseTime + days * 24 * 60 * 60 * 1000;
+
+            if (planCode === 'WA' || planCode === 'COMBO') {
+                const waBase = (targetUser.waExpiredAt && targetUser.waExpiredAt > now) ? targetUser.waExpiredAt : now;
+                targetUser.waExpiredAt = waBase + addMs;
+            }
+            if (planCode === 'TT' || planCode === 'UPGRADE_TT' || planCode === 'COMBO') {
+                const ttBase = (targetUser.ttExpiredAt && targetUser.ttExpiredAt > now) ? targetUser.ttExpiredAt : now;
+                targetUser.ttExpiredAt = ttBase + addMs;
+            }
+            if (planCode === 'TT' && (!targetUser.waExpiredAt || targetUser.waExpiredAt <= now)) {
+                targetUser.preferredMode = 'TT';
+            }
+            if (isTgUser && !targetUser.telegramChatId) {
+                targetUser.telegramChatId = targetKey.slice(3);
+            }
+
+            normalizeUserTiers(targetUser);
             targetUser.status = 'ACTIVE';
             targetUser.reminded3Days = false;
             targetUser.refSentToExisting = true;
             if (!targetUser.refCode) {
                 targetUser.refCode = generateReferralCode(targetUser.name, users);
             }
+            users[targetUser.phone] = targetUser;
         }
 
-        if (currentSock) {
+        if (!isTgUser && currentSock) {
             try {
-                const checkJid = targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`;
+                const checkJid = targetUser.phone.includes('@') ? targetUser.phone : `${targetUser.phone}@s.whatsapp.net`;
                 const [waUser] = await currentSock.onWhatsApp(checkJid);
                 if (waUser && waUser.lid) {
                     const cleanLid = normalizeIdentifier(waUser.lid);
@@ -1030,56 +1191,74 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             targetUser.referralCredited = true;
             const referrer = users[targetUser.referredBy] || Object.values(users).find(u => u.phone === targetUser.referredBy);
             if (referrer) {
+                normalizeUserTiers(referrer);
                 referrer.paidReferrals = (referrer.paidReferrals || 0) + 1;
                 referrer.totalPaidReferrals = (referrer.totalPaidReferrals || 0) + 1;
                 referralRewardMsg = `\n• Penaja: ${referrer.name} (${referrer.phone}) [+1 Tajaan, Baki: ${referrer.paidReferrals}/3]`;
 
-                const refJid = referrer.jid || referrer.altJid || (referrer.phone.includes('@') ? referrer.phone : `${referrer.phone}@s.whatsapp.net`);
-                const friendDisplayName = targetUser.name || finalName || targetPhone;
+                const refJid = (!String(referrer.phone).startsWith('tg_'))
+                    ? (referrer.jid || referrer.altJid || `${referrer.phone}@s.whatsapp.net`)
+                    : null;
+                const friendDisplayName = targetUser.name || finalName || targetUser.phone;
 
                 if (referrer.paidReferrals >= 3) {
                     referrer.paidReferrals -= 3;
                     const refNow = Date.now();
-                    const refBase = (referrer.expiredAt && referrer.expiredAt > refNow) ? referrer.expiredAt : refNow;
-                    referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
+                    const bonusMs = 30 * 24 * 60 * 60 * 1000;
+                    const refHasWa = !!(referrer.waExpiredAt && referrer.waExpiredAt > refNow);
+                    const refHasTt = !!(referrer.ttExpiredAt && referrer.ttExpiredAt > refNow);
+                    if (refHasTt && !refHasWa) {
+                        referrer.ttExpiredAt = referrer.ttExpiredAt + bonusMs;
+                    } else if (refHasWa && refHasTt) {
+                        referrer.waExpiredAt = referrer.waExpiredAt + bonusMs;
+                        referrer.ttExpiredAt = referrer.ttExpiredAt + bonusMs;
+                    } else {
+                        const refBase = refHasWa ? referrer.waExpiredAt : refNow;
+                        referrer.waExpiredAt = refBase + bonusMs;
+                    }
+                    normalizeUserTiers(referrer);
                     referrer.status = 'ACTIVE';
 
                     const newExpiryStr = new Date(referrer.expiredAt).toLocaleDateString('ms-MY', {
                         day: '2-digit', month: '2-digit', year: 'numeric'
                     });
 
-                    if (currentSock) {
+                    const bonusMsg =
+                        `✓ *Tahniah, anda terima +30 hari percuma!*\n\n` +
+                        `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* telah melengkapkan *3/3 tajaan* menggunakan code referral anda (*${referrer.refCode}*).\n\n` +
+                        `• Ganjaran: *+30 Hari* pada pelan active anda\n` +
+                        `• Tarikh tamat baru: *${newExpiryStr}*`;
+
+                    if (currentSock && refJid) {
                         try {
-                            await currentSock.sendMessage(refJid, {
-                                text:
-                                    `🎉 *TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!*\n\n` +
-                                    `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah melengkapkan *3/3 tajaan* menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
-                                    `🎁 *Ganjaran Diterima:*\n` +
-                                    `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n\n` +
-                                    `⏳ *Tarikh Luput Baharu:* *${newExpiryStr}*\n\n` +
-                                    `Teruskan berkongsi kod anda untuk mendapatkan lebih banyak ganjaran percuma! 🚀`
-                            });
+                            await sendHumanReply(currentSock, refJid, { text: bonusMsg });
                             console.log(`[REFERRAL BONUS] Berjaya hantar notifikasi +30 hari ke ${refJid}`);
                         } catch (refErr) {
                             console.error(`[REFERRAL BONUS] Gagal hantar notifikasi bonus ke ${refJid}:`, refErr.message);
                         }
                     }
-                    referralRewardMsg += ` ➔ BONUS +30 HARI TELAH DIBERIKAN!`;
+                    if (referrer.telegramChatId && TELEGRAM_BOT_TOKEN) {
+                        await sendTelegramMessage(referrer.telegramChatId, bonusMsg.replace(/\*/g, '')).catch(() => {});
+                    }
+                    referralRewardMsg += ` -> BONUS +30 HARI TELAH DIBERIKAN!`;
                 } else {
                     const remaining = 3 - referrer.paidReferrals;
-                    if (currentSock) {
+                    const progressMsg =
+                        `✓ *Tajaan berjaya (+1 rakan)*\n\n` +
+                        `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* telah melanggan menggunakan code referral anda (*${referrer.refCode}*).\n\n` +
+                        `• Kemajuan: *${referrer.paidReferrals}/3 rakan*\n` +
+                        `• Baki: *${remaining} rakan* lagi untuk terima +30 hari percuma.`;
+
+                    if (currentSock && refJid) {
                         try {
-                            await currentSock.sendMessage(refJid, {
-                                text:
-                                    `🎉 *TAJAAN BERJAYA (+1 RAKAN)!*\n\n` +
-                                    `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah berjaya melanggan menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
-                                    `📊 *Kemajuan Ganjaran:* *${referrer.paidReferrals}/3 Rakan*\n` +
-                                    `💡 Ajak lagi *${remaining} rakan* sahaja lagi untuk menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik! 🚀`
-                            });
+                            await sendHumanReply(currentSock, refJid, { text: progressMsg });
                             console.log(`[REFERRAL PROGRESS] Berjaya hantar notifikasi kemajuan (${referrer.paidReferrals}/3) ke ${refJid}`);
                         } catch (refErr) {
                             console.error(`[REFERRAL PROGRESS] Gagal hantar notifikasi kemajuan ke ${refJid}:`, refErr.message);
                         }
+                    }
+                    if (referrer.telegramChatId && TELEGRAM_BOT_TOKEN) {
+                        await sendTelegramMessage(referrer.telegramChatId, progressMsg.replace(/\*/g, '')).catch(() => {});
                     }
                 }
             }
@@ -1088,83 +1267,87 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
         saveUsers(users);
 
         // Rekod transaksi untuk paparan PWA Monitor
+        const planPrices = { WA: '10.00', TT: '10.00', UPGRADE_TT: '10.00', COMBO: '20.00' };
         const pkgPrices = { 30: '10.00', 90: '25.00', 180: '48.00', 365: '90.00' };
+        const txAmount = amountPaid != null && !isNaN(parseFloat(amountPaid))
+            ? parseFloat(amountPaid).toFixed(2)
+            : (planPrices[planCode] || pkgPrices[days] || '10.00');
+
         recordTransaction({
             paymentId: paymentId || `HITPAY_${Date.now()}`,
             buyerName: targetUser.name || finalName,
-            buyerPhone: targetPhone,
+            buyerPhone: targetUser.phone,
+            planCode,
             packageDays: days,
-            amount: pkgPrices[days] || '10.00',
+            amount: txAmount,
             timestamp: Date.now(),
             method: paymentType || 'HitPay Online Gateway'
         });
 
-        const formattedExpiryDate = new Date(targetUser.expiredAt).toLocaleDateString('ms-MY', {
+        const activePlanExpiry = (planCode === 'TT' || planCode === 'UPGRADE_TT')
+            ? targetUser.ttExpiredAt
+            : targetUser.waExpiredAt || targetUser.expiredAt;
+        const formattedExpiryDate = new Date(activePlanExpiry).toLocaleDateString('ms-MY', {
             day: '2-digit', month: '2-digit', year: 'numeric'
         });
+        const planLabel = planCode === 'COMBO'
+            ? 'Combo WhatsApp + TikTok HD'
+            : ((planCode === 'TT' || planCode === 'UPGRADE_TT') ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD');
 
-        // Resolusi Sasaran JID WhatsApp yang Kebal
-        const targetJid = targetUser.jid || targetUser.altJid || `${targetPhone}@s.whatsapp.net`;
+        const welcomeTutorialMessage =
+`✓ *Pembayaran berjaya & akaun anda kini active.*
 
-        const welcomeTutorialMessage = 
-`✅ *PEMBAYARAN BERJAYA & AKAUN AKTIF!*
+Terima kasih kerana melanggan *${BOT_NAME}*.
 
-Selamat datang ke *StatusClear HD*! Langganan anda kini sudah aktif dan sedia digunakan sepenuhnya.
+• Pelan: *${planLabel}* (+${days} Hari)
+• Tamat tempoh: *${formattedExpiryDate}*
+• Code referral anda: *${targetUser.refCode}*
 
-📅 *Tempoh Aktif:* +${days} Hari
-⏳ *Tamat Pada:* ${formattedExpiryDate}
+*Cara guna bot supaya kualiti tidak pecah:*
+1. Tekan ikon klip kertas / (+) di ruang chat.
+2. Pilih *Document* (elakkan pilih Gallery/Photos terus).
+3. Pilih *video* atau *gambar* asal anda dan tekan *Send*.
+4. Tunggu bot siap proses dan muat turun file HD tersebut.
 
-━━━━━━━━━━━━━━━━━━━━
-📖 *TUTORIAL GUNA BOT (SUPAYA STATUS TAK PECAH):*
+• Tukar mod bila-bila masa: taip *WA* (WhatsApp Status HD) atau *TT* (TikTok 1080p 60fps).
+• Kongsi code *${targetUser.refCode}* — setiap *3 rakan* yang melanggan, anda dapat *+30 hari percuma*.`;
 
-1️⃣ Tekan ikon *Klip Kertas / (+)* di ruangan chat ini.
-2️⃣ Pilih *Document* (JANGAN pilih Gallery/Photos terus).
-3️⃣ Pilih *Video* (maksimum 60 saat) atau *Gambar* asal anda dan tekan *Send*.
-4️⃣ Tunggu bot proses sebentar (reaksi ⏳ bertukar ✅) dan muat turun fail HD yang bot pulangkan.
-5️⃣ Muat naik fail HD tersebut ke *WhatsApp Status* anda!
-━━━━━━━━━━━━━━━━━━━━
-
-🎁 *KOD REFERRAL PERIBADI ANDA:*
-👉 *${targetUser.refCode}*
-
-Kongsikan kod ini kepada rakan anda! Setiap *3 rakan* yang melanggan menggunakan kod anda, anda akan dapat *PERCUMA +30 Hari (1 Bulan)* secara automatik! 🎉
-
-_Sila hantar video atau gambar pertama anda sebagai Document sekarang untuk mula!_ 🚀`;
-
-        if (currentSock) {
+        if (!isTgUser && currentSock) {
+            const targetJid = targetUser.jid || targetUser.altJid || `${targetUser.phone}@s.whatsapp.net`;
             try {
-                await currentSock.sendMessage(targetJid, { text: welcomeTutorialMessage });
+                await sendHumanReply(currentSock, targetJid, { text: welcomeTutorialMessage });
                 console.log(`[HITPAY -> WA] Sent welcome & tutorial to ${targetJid}`);
             } catch (waErr) {
                 console.error(`[HITPAY -> WA] Ralat penghantaran ke ${targetJid}:`, waErr.message);
-                if (targetJid !== `${targetPhone}@s.whatsapp.net`) {
+                if (targetJid !== `${targetUser.phone}@s.whatsapp.net`) {
                     try {
-                        await currentSock.sendMessage(`${targetPhone}@s.whatsapp.net`, { text: welcomeTutorialMessage });
-                        console.log(`[HITPAY -> WA] Sent welcome & tutorial fallback to ${targetPhone}@s.whatsapp.net`);
+                        await sendHumanReply(currentSock, `${targetUser.phone}@s.whatsapp.net`, { text: welcomeTutorialMessage });
+                        console.log(`[HITPAY -> WA] Sent welcome & tutorial fallback to ${targetUser.phone}@s.whatsapp.net`);
                     } catch (fallbackErr) {
                         console.error(`[HITPAY -> WA] Fallback juga gagal:`, fallbackErr.message);
                     }
                 }
             }
-
-            const adminJid = ADMIN_NUMBER.includes('@') ? ADMIN_NUMBER : `${ADMIN_NUMBER}@s.whatsapp.net`;
-            try {
-                await currentSock.sendMessage(adminJid, {
-                    text:
-                        `💰 *NOTIFIKASI JUALAN HITPAY (AUTOMATIK)*\n\n` +
-                        `• Pelanggan: *${targetUser.name}* (${targetPhone})\n` +
-                        `• Sasaran JID: ${targetJid}\n` +
-                        `• Pakej: +${days} Hari (ID: ${paymentId || '-'})\n` +
-                        `• Kaedah: ${paymentType || 'HitPay Online Gateway'}\n` +
-                        `• Tarikh Luput: ${formattedExpiryDate}\n` +
-                        `• Kod Referral: *${targetUser.refCode}*${referralRewardMsg}`
-                });
-            } catch (adminErr) {
-                console.error('[HITPAY -> ADMIN] Gagal hantar notifikasi ke admin:', adminErr.message);
-            }
         }
 
-        return { success: true, user: targetUser, days, formattedExpiryDate };
+        if (targetUser.telegramChatId && TELEGRAM_BOT_TOKEN) {
+            await sendTelegramMessage(targetUser.telegramChatId, welcomeTutorialMessage.replace(/\*/g, '')).catch(() => {});
+        }
+
+        if (currentSock) {
+            await notifyAdmins(
+                currentSock,
+                `✓ *Notifikasi Jualan HitPay*\n\n` +
+                `• Pelanggan: *${targetUser.name}* (${targetUser.phone})\n` +
+                `• Pelan: *${planLabel}* (${planCode}, +${days} Hari)\n` +
+                `• Jumlah: *RM ${txAmount}*\n` +
+                `• Kaedah: ${paymentType || 'HitPay Online Gateway'}\n` +
+                `• Tamat tempoh: ${formattedExpiryDate}\n` +
+                `• Code referral: *${targetUser.refCode}*${referralRewardMsg}`
+            );
+        }
+
+        return { success: true, user: targetUser, planCode, days, formattedExpiryDate };
     } catch (err) {
         console.error('[processCompletedPayment] Ralat pemprosesan:', err);
         return { success: false, error: err.message };
@@ -1210,7 +1393,8 @@ async function syncHitPayPayments() {
                         paymentId,
                         referenceNumber: ref,
                         customerName: item.name || '',
-                        paymentType: (item.payment_methods && item.payment_methods[0]) || 'HitPay Gateway'
+                        paymentType: (item.payment_methods && item.payment_methods[0]) || 'HitPay Gateway',
+                        amountPaid: item.amount
                     });
                     if (result.success) {
                         activatedCount++;
@@ -1276,9 +1460,11 @@ function applyPendingUserMigrations() {
         const irfan = uniqueUsers.find(u => (u.name || '').toLowerCase().includes('irfan anuar'))
             || uniqueUsers.find(u => (u.name || '').toLowerCase().includes('irfan'));
         if (irfan && !cfg.migrations.irfanAnuarPlus2Months_v1) {
-            const baseExpiry = (irfan.expiredAt && irfan.expiredAt > 0) ? irfan.expiredAt : Date.now();
+            normalizeUserTiers(irfan);
+            const baseExpiry = (irfan.waExpiredAt && irfan.waExpiredAt > 0) ? irfan.waExpiredAt : ((irfan.expiredAt && irfan.expiredAt > 0) ? irfan.expiredAt : Date.now());
             const existingMonths = irfan.subscribedMonths || Math.max(1, Math.round(Math.max(0, baseExpiry - (irfan.registeredAt ? new Date(irfan.registeredAt).getTime() : Date.now())) / (30 * 24 * 60 * 60 * 1000)) || 1);
-            irfan.expiredAt = baseExpiry + (60 * 24 * 60 * 60 * 1000);
+            irfan.waExpiredAt = baseExpiry + (60 * 24 * 60 * 60 * 1000);
+            normalizeUserTiers(irfan);
             irfan.status = irfan.expiredAt > Date.now() ? 'ACTIVE' : irfan.status;
             irfan.subscribedMonths = existingMonths + 2;
             irfan.reminded3Days = false;
@@ -1552,7 +1738,7 @@ const PWA_MANIFEST = {
 };
 
 const PWA_SW = `
-const CACHE_NAME = 'statusclear-telemetry-v4';
+const CACHE_NAME = 'statusclear-telemetry-v5';
 const ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -1862,11 +2048,11 @@ const PWA_HTML = `<!DOCTYPE html>
     }
     .pill-filter-bar {
       display: flex;
-      gap: 8px;
+      gap: 4px;
       background: #141612;
       border: 1px solid rgba(198, 255, 0, 0.14);
       border-radius: 999px;
-      padding: 5px;
+      padding: 4px;
       margin-bottom: 16px;
     }
     .filter-pill {
@@ -1874,10 +2060,10 @@ const PWA_HTML = `<!DOCTYPE html>
       background: transparent;
       border: none;
       border-radius: 999px;
-      padding: 8px 10px;
+      padding: 8px 6px;
       color: #8E9387;
       font-family: inherit;
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: 700;
       cursor: pointer;
       white-space: nowrap;
@@ -2346,6 +2532,13 @@ const PWA_HTML = `<!DOCTYPE html>
         <label class="form-label" for="reg-phone">WhatsApp Phone Number</label>
         <input type="text" id="reg-phone" class="form-input" placeholder="e.g. 0123456789 or 60123456789">
 
+        <label class="form-label" for="reg-tier">Subscription Tier</label>
+        <select id="reg-tier" class="form-input">
+          <option value="WA">WhatsApp Status HD (WA)</option>
+          <option value="TT">TikTok 1080p 60fps HD (TT)</option>
+          <option value="COMBO">Combo WhatsApp + TikTok (WA + TT)</option>
+        </select>
+
         <label class="form-label" for="reg-months">Subscription Duration</label>
         <select id="reg-months" class="form-input">
           <option value="1">1 Month (30 Days)</option>
@@ -2369,9 +2562,10 @@ const PWA_HTML = `<!DOCTYPE html>
         <input type="text" class="search-box" id="user-search" placeholder="Search name, phone number, or referral code..." oninput="filterUsers()">
       </div>
       <div class="pill-filter-bar" id="user-filter-bar">
-        <button type="button" class="filter-pill active" id="filter-all" onclick="setUserFilter('all')">All (0)</button>
-        <button type="button" class="filter-pill" id="filter-paid" onclick="setUserFilter('paid')">Paid (0)</button>
-        <button type="button" class="filter-pill" id="filter-unpaid" onclick="setUserFilter('unpaid')">Unpaid (0)</button>
+        <button type="button" class="filter-pill active" id="filter-all" onclick="setUserFilter('all')">Semua (0)</button>
+        <button type="button" class="filter-pill" id="filter-wa" onclick="setUserFilter('wa')">Subs WA (0)</button>
+        <button type="button" class="filter-pill" id="filter-tt" onclick="setUserFilter('tt')">Subs TT (0)</button>
+        <button type="button" class="filter-pill" id="filter-combo" onclick="setUserFilter('combo')">Subs WA + TT (0)</button>
       </div>
       <div id="users-list-container">
         <!-- Rendered dynamically -->
@@ -2798,6 +2992,7 @@ const PWA_HTML = `<!DOCTYPE html>
     async function submitRegisterMember() {
       const nameEl = document.getElementById('reg-name');
       const phoneEl = document.getElementById('reg-phone');
+      const tierEl = document.getElementById('reg-tier');
       const monthsEl = document.getElementById('reg-months');
       const refEl = document.getElementById('reg-refcode');
       const btn = document.getElementById('reg-submit-btn');
@@ -2805,6 +3000,7 @@ const PWA_HTML = `<!DOCTYPE html>
 
       const name = (nameEl && nameEl.value || '').trim();
       const phone = (phoneEl && phoneEl.value || '').trim();
+      const tier = (tierEl && tierEl.value) || 'WA';
       const months = parseInt(monthsEl && monthsEl.value, 10) || 1;
       const referralCode = (refEl && refEl.value || '').trim();
 
@@ -2815,7 +3011,7 @@ const PWA_HTML = `<!DOCTYPE html>
 
       btn.disabled = true;
       lbl.innerText = 'Registering...';
-      const res = await postAction('registerUser', { name, phone, months, referralCode });
+      const res = await postAction('registerUser', { name, phone, tier, months, referralCode });
       btn.disabled = false;
       lbl.innerText = 'Activate & Save Member';
 
@@ -2855,7 +3051,7 @@ const PWA_HTML = `<!DOCTYPE html>
     // USERS RENDERING & ACTIONS
     function setUserFilter(filter) {
       currentUserFilter = filter;
-      ['all', 'paid', 'unpaid'].forEach(f => {
+      ['all', 'wa', 'tt', 'combo'].forEach(f => {
         const el = document.getElementById('filter-' + f);
         if (el) el.classList.toggle('active', f === filter);
       });
@@ -2866,20 +3062,26 @@ const PWA_HTML = `<!DOCTYPE html>
       const container = document.getElementById('users-list-container');
       const query = (document.getElementById('user-search').value || '').toLowerCase().trim();
 
-      const paidCount = users.filter(u => u.status === 'ACTIVE').length;
-      const unpaidCount = users.length - paidCount;
+      const waCount = users.filter(u => !!u.waActive).length;
+      const ttCount = users.filter(u => !!u.ttActive).length;
+      const comboCount = users.filter(u => !!u.waActive && !!u.ttActive).length;
       const allBtn = document.getElementById('filter-all');
-      const paidBtn = document.getElementById('filter-paid');
-      const unpaidBtn = document.getElementById('filter-unpaid');
-      if (allBtn) allBtn.innerText = 'All (' + users.length + ')';
-      if (paidBtn) paidBtn.innerText = 'Paid (' + paidCount + ')';
-      if (unpaidBtn) unpaidBtn.innerText = 'Unpaid (' + unpaidCount + ')';
+      const waBtn = document.getElementById('filter-wa');
+      const ttBtn = document.getElementById('filter-tt');
+      const comboBtn = document.getElementById('filter-combo');
+      if (allBtn) allBtn.innerText = 'Semua (' + users.length + ')';
+      if (waBtn) waBtn.innerText = 'Subs WA (' + waCount + ')';
+      if (ttBtn) ttBtn.innerText = 'Subs TT (' + ttCount + ')';
+      if (comboBtn) comboBtn.innerText = 'Subs WA + TT (' + comboCount + ')';
 
       const filtered = users.filter(u => {
+        const hasWa = !!u.waActive;
+        const hasTt = !!u.ttActive;
         const matchesCat =
           currentUserFilter === 'all' ||
-          (currentUserFilter === 'paid' && u.status === 'ACTIVE') ||
-          (currentUserFilter === 'unpaid' && u.status !== 'ACTIVE');
+          (currentUserFilter === 'wa' && hasWa) ||
+          (currentUserFilter === 'tt' && hasTt) ||
+          (currentUserFilter === 'combo' && hasWa && hasTt);
         if (!matchesCat) return false;
         return (u.name || '').toLowerCase().includes(query) ||
                (u.phone || '').includes(query) ||
@@ -2893,13 +3095,20 @@ const PWA_HTML = `<!DOCTYPE html>
 
       let html = '';
       filtered.forEach(u => {
-        const isAct = u.status === 'ACTIVE';
-        const badgeText = isAct ? 'ACTIVE' : (u.rawStatus === 'WAITING' ? 'WAITING' : (u.rawStatus === 'NEW' ? 'UNPAID' : 'EXPIRED'));
-        const safePhone = String(u.phone || '').replace(/[^0-9]/g, '');
+        const hasWa = !!u.waActive;
+        const hasTt = !!u.ttActive;
+        const isAct = hasWa || hasTt || u.status === 'ACTIVE';
+        const tierBadge = (hasWa && hasTt)
+          ? 'WA + TT'
+          : (hasWa ? 'WA' : (hasTt ? 'TT' : (u.rawStatus === 'WAITING' ? 'WAITING' : (u.rawStatus === 'NEW' ? 'UNPAID' : 'EXPIRED'))));
+        const safePhone = escHtml(String(u.phone || ''));
         const monthsNum = u.subscribedMonths || 0;
         const monthsLabel = monthsNum > 0 ? (monthsNum + (monthsNum === 1 ? ' month' : ' months')) : 'None';
         const daysLeftNum = u.daysLeft || 0;
         const daysLeftLabel = isAct ? (daysLeftNum + (daysLeftNum === 1 ? ' day left' : ' days left')) : '0 days left';
+        const tierDetails =
+          'WA: <strong style="color: ' + (hasWa ? '#C6FF00' : '#8E9387') + ';">' + escHtml(u.waExpiredAtFormatted || 'None') + '</strong>' +
+          ' • TT: <strong style="color: ' + (hasTt ? '#C6FF00' : '#8E9387') + ';">' + escHtml(u.ttExpiredAtFormatted || 'None') + '</strong>';
         const refByHtml = u.referredByName
           ? '<div style="font-size: 11px; color: #8E9387;">Referred by: <strong style="color: #FFFFFF;">' + escHtml(u.referredByName) + '</strong>' + (u.referredByCode ? ' (' + escHtml(u.referredByCode) + ')' : '') + '</div>'
           : '';
@@ -2910,19 +3119,21 @@ const PWA_HTML = `<!DOCTYPE html>
                 '<div class="user-name">' + escHtml(u.name) + '</div>' +
                 '<div class="user-phone">' + escHtml(u.phone) + ' • Code: <strong style="color: #C6FF00;">' + escHtml(u.refCode) + '</strong></div>' +
               '</div>' +
-              '<span class="user-badge ' + (isAct ? 'active' : 'expired') + '">' + badgeText + '</span>' +
+              '<span class="user-badge ' + (isAct ? 'active' : 'expired') + '">' + tierBadge + '</span>' +
             '</div>' +
             '<div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #8E9387;">' +
               '<span>Subscribed: <strong style="color: #FFFFFF;">' + escHtml(monthsLabel) + '</strong></span>' +
               '<span style="color: ' + (isAct ? '#C6FF00' : '#FF6B6B') + '; font-weight: 700;">' + escHtml(daysLeftLabel) + '</span>' +
             '</div>' +
+            '<div style="font-size: 11px; color: #8E9387;">' + tierDetails + '</div>' +
             '<div style="font-size: 12px; color: #8E9387;">' +
               'Expires: <strong style="color: #FFFFFF;">' + escHtml(u.expiredAtFormatted) + '</strong> • Referrals: <strong style="color: #C6FF00;">' + (u.paidReferrals || 0) + '/3</strong>' +
             '</div>' +
             refByHtml +
             '<div class="user-actions">' +
-              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-days="30">+30 Days</button>' +
-              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-days="90">+90 Days</button>' +
+              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-tier="WA" data-days="30">+30d WA</button>' +
+              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-tier="TT" data-days="30">+30d TT</button>' +
+              '<button type="button" class="btn-action lime" data-action="extend" data-phone="' + safePhone + '" data-tier="COMBO" data-days="30">+30d Combo</button>' +
               '<button type="button" class="btn-action danger" data-action="expire" data-phone="' + safePhone + '">Expire</button>' +
             '</div>' +
           '</div>';
@@ -3013,7 +3224,8 @@ const PWA_HTML = `<!DOCTYPE html>
       const phone = btn.getAttribute('data-phone');
       if (act === 'extend') {
         const days = parseInt(btn.getAttribute('data-days'), 10) || 30;
-        handleUserExtend(phone, days);
+        const tier = btn.getAttribute('data-tier') || 'WA';
+        handleUserExtend(phone, days, tier);
       } else if (act === 'expire') {
         handleUserExpire(phone);
       }
@@ -3023,9 +3235,10 @@ const PWA_HTML = `<!DOCTYPE html>
       if (currentData) renderUsers(currentData.users || []);
     }
 
-    async function handleUserExtend(phone, days) {
-      if (confirm('Add +' + days + ' days to ' + phone + '?')) {
-        await postAction('extendUser', { phone, days });
+    async function handleUserExtend(phone, days, tier) {
+      const planTier = tier || 'WA';
+      if (confirm('Add +' + days + ' days (' + planTier + ') to ' + phone + '?')) {
+        await postAction('extendUser', { phone, days, tier: planTier });
         fetchStats();
       }
     }
@@ -3202,6 +3415,59 @@ let broadcastState = {
     lastCompletedAt: null
 };
 
+const BROADCAST_DELAY_MS = 30000;
+
+function startBackgroundBroadcast({ recipients, buildMessage, onComplete }) {
+    if (broadcastState.running) {
+        return { started: false, reason: 'already_running' };
+    }
+    broadcastState = {
+        running: true,
+        sent: 0,
+        failed: 0,
+        total: recipients.length,
+        lastCompletedAt: null
+    };
+
+    (async () => {
+        for (let i = 0; i < recipients.length; i++) {
+            const u = recipients[i];
+            try {
+                const text = typeof buildMessage === 'function' ? buildMessage(u) : '';
+                if (text) {
+                    const isTgOnly = String(u.phone || '').startsWith('tg_');
+                    if (!isTgOnly && currentSock && currentSock.user) {
+                        const targetJid = u.jid || u.altJid || (String(u.phone).includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`);
+                        await sendCachedMessage(currentSock, targetJid, { text });
+                        broadcastState.sent++;
+                    } else if (u.telegramChatId && TELEGRAM_BOT_TOKEN) {
+                        await sendTelegramMessage(u.telegramChatId, text.replace(/\*/g, ''));
+                        broadcastState.sent++;
+                    } else {
+                        broadcastState.failed++;
+                    }
+                }
+            } catch (sendErr) {
+                broadcastState.failed++;
+                console.error(`[Broadcast Queue] Gagal hantar ke ${u.phone}:`, sendErr.message);
+            }
+            if (i < recipients.length - 1) {
+                await new Promise(r => setTimeout(r, BROADCAST_DELAY_MS));
+            }
+        }
+        broadcastState.running = false;
+        broadcastState.lastCompletedAt = Date.now();
+        if (typeof onComplete === 'function') {
+            try { await onComplete(broadcastState); } catch {}
+        }
+    })().catch(err => {
+        console.error('[Broadcast Queue Error]:', err);
+        broadcastState.running = false;
+    });
+
+    return { started: true, total: recipients.length };
+}
+
 function ensureHttpServer() {
     if (httpServer) return httpServer;
 
@@ -3346,8 +3612,15 @@ function ensureHttpServer() {
                 hitpay: hitpayData,
                 transactions: hitpayPayments,
                 users: userList.map(u => {
-                    const isAct = u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now();
-                    const daysLeft = isAct ? Math.max(0, Math.ceil((u.expiredAt - Date.now()) / (1000 * 60 * 60 * 24))) : 0;
+                    normalizeUserTiers(u);
+                    const nowTs = Date.now();
+                    const waActive = hasWaAccess(u, false);
+                    const ttActive = hasTtAccess(u, false);
+                    const isAct = waActive || ttActive;
+                    const maxExp = Math.max(waActive ? (u.waExpiredAt || 0) : 0, ttActive ? (u.ttExpiredAt || 0) : 0) || u.expiredAt;
+                    const daysLeft = isAct && maxExp ? Math.max(0, Math.ceil((maxExp - nowTs) / (1000 * 60 * 60 * 24))) : 0;
+                    const waDaysLeft = waActive ? Math.max(0, Math.ceil((u.waExpiredAt - nowTs) / (1000 * 60 * 60 * 24))) : 0;
+                    const ttDaysLeft = ttActive ? Math.max(0, Math.ceil((u.ttExpiredAt - nowTs) / (1000 * 60 * 60 * 24))) : 0;
                     let subMonths = u.subscribedMonths || 0;
                     if (!subMonths) {
                         if (txDaysByPhone[u.phone]) {
@@ -3364,13 +3637,25 @@ function ensureHttpServer() {
                         }
                     }
                     const refUser = u.referredBy ? (users[u.referredBy] || userList.find(x => x.phone === u.referredBy)) : null;
+                    const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'None';
                     return {
                         phone: u.phone,
                         name: u.name,
                         rawStatus: u.status || 'NEW',
                         status: isAct ? 'ACTIVE' : 'EXPIRED',
+                        tier: (waActive && ttActive) ? 'COMBO' : (waActive ? 'WA' : (ttActive ? 'TT' : 'NONE')),
+                        waActive,
+                        ttActive,
+                        waExpiredAt: u.waExpiredAt || null,
+                        ttExpiredAt: u.ttExpiredAt || null,
+                        waExpiredAtFormatted: fmtDate(u.waExpiredAt),
+                        ttExpiredAtFormatted: fmtDate(u.ttExpiredAt),
+                        waDaysLeft,
+                        ttDaysLeft,
+                        preferredMode: u.preferredMode || 'WA',
+                        telegramLinked: !!u.telegramChatId,
                         expiredAt: u.expiredAt,
-                        expiredAtFormatted: u.expiredAt ? new Date(u.expiredAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'None',
+                        expiredAtFormatted: fmtDate(maxExp),
                         daysLeft,
                         subscribedMonths: subMonths,
                         refCode: u.refCode || '-',
@@ -3395,13 +3680,18 @@ function ensureHttpServer() {
                     const action = body.action;
 
                     if (action === 'registerUser') {
-                        const targetPhone = normalizeIdentifier(body.phone);
+                        const rawPhone = String(body.phone || '').trim();
+                        const targetPhone = rawPhone.startsWith('tg_') ? rawPhone : normalizeIdentifier(rawPhone);
                         const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'Member';
+                        const tier = ['WA', 'TT', 'COMBO'].includes(String(body.tier || '').toUpperCase())
+                            ? String(body.tier).toUpperCase()
+                            : 'WA';
                         const months = Math.max(1, parseInt(body.months, 10) || 1);
                         const days = months === 12 ? 365 : months * 30;
+                        const addMs = days * 24 * 60 * 60 * 1000;
                         const refCodeInput = typeof body.referralCode === 'string' ? body.referralCode.trim().toUpperCase() : '';
 
-                        if (!targetPhone || targetPhone.length < 8) {
+                        if (!targetPhone || targetPhone.length < 5) {
                             res.writeHead(400, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ success: false, message: 'Invalid phone number.' }));
                             return;
@@ -3410,7 +3700,6 @@ function ensureHttpServer() {
                         const users = loadUsers();
                         let targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
                         const now = Date.now();
-                        const base = (targetUser && targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
 
                         let matchedReferrer = null;
                         if (refCodeInput) {
@@ -3418,13 +3707,15 @@ function ensureHttpServer() {
                         }
 
                         if (!targetUser) {
-                            targetUser = {
+                            targetUser = normalizeUserTiers({
                                 phone: targetPhone,
                                 name,
                                 status: 'ACTIVE',
                                 registeredAt: new Date().toISOString(),
                                 subscribedMonths: months,
-                                expiredAt: base + (days * 24 * 60 * 60 * 1000),
+                                waExpiredAt: (tier === 'WA' || tier === 'COMBO') ? (now + addMs) : null,
+                                ttExpiredAt: (tier === 'TT' || tier === 'COMBO') ? (now + addMs) : null,
+                                preferredMode: tier === 'TT' ? 'TT' : 'WA',
                                 refCode: generateReferralCode(name, users),
                                 referredBy: matchedReferrer && matchedReferrer.phone !== targetPhone ? matchedReferrer.phone : null,
                                 referredByCode: matchedReferrer && matchedReferrer.phone !== targetPhone ? matchedReferrer.refCode : null,
@@ -3435,12 +3726,24 @@ function ensureHttpServer() {
                                 reminded3Days: false,
                                 jid: null,
                                 altJid: null
-                            };
+                            });
                         } else {
+                            normalizeUserTiers(targetUser);
                             if (name && name !== 'Member') targetUser.name = name;
                             targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
                             targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + months;
-                            targetUser.expiredAt = base + (days * 24 * 60 * 60 * 1000);
+                            if (tier === 'WA' || tier === 'COMBO') {
+                                const waBase = (targetUser.waExpiredAt && targetUser.waExpiredAt > now) ? targetUser.waExpiredAt : now;
+                                targetUser.waExpiredAt = waBase + addMs;
+                            }
+                            if (tier === 'TT' || tier === 'COMBO') {
+                                const ttBase = (targetUser.ttExpiredAt && targetUser.ttExpiredAt > now) ? targetUser.ttExpiredAt : now;
+                                targetUser.ttExpiredAt = ttBase + addMs;
+                            }
+                            if (tier === 'TT' && (!targetUser.waExpiredAt || targetUser.waExpiredAt <= now)) {
+                                targetUser.preferredMode = 'TT';
+                            }
+                            normalizeUserTiers(targetUser);
                             targetUser.status = 'ACTIVE';
                             targetUser.reminded3Days = false;
                             targetUser.refSentToExisting = true;
@@ -3452,20 +3755,22 @@ function ensureHttpServer() {
                         }
 
                         if (matchedReferrer && matchedReferrer.phone !== targetPhone && !targetUser.referralCredited) {
+                            normalizeUserTiers(matchedReferrer);
                             targetUser.referralCredited = true;
                             matchedReferrer.paidReferrals = (matchedReferrer.paidReferrals || 0) + 1;
                             matchedReferrer.totalPaidReferrals = (matchedReferrer.totalPaidReferrals || 0) + 1;
                             if (matchedReferrer.paidReferrals >= 3) {
                                 matchedReferrer.paidReferrals -= 3;
-                                const refBase = (matchedReferrer.expiredAt && matchedReferrer.expiredAt > now) ? matchedReferrer.expiredAt : now;
-                                matchedReferrer.expiredAt = refBase + (30 * 24 * 60 * 60 * 1000);
+                                const refBase = (matchedReferrer.waExpiredAt && matchedReferrer.waExpiredAt > now) ? matchedReferrer.waExpiredAt : now;
+                                matchedReferrer.waExpiredAt = refBase + (30 * 24 * 60 * 60 * 1000);
+                                normalizeUserTiers(matchedReferrer);
                                 matchedReferrer.status = 'ACTIVE';
                             }
                             users[matchedReferrer.phone] = matchedReferrer;
                             if (matchedReferrer.lid) users[matchedReferrer.lid] = matchedReferrer;
                         }
 
-                        if (currentSock && currentSock.user) {
+                        if (!targetPhone.startsWith('tg_') && currentSock && currentSock.user) {
                             try {
                                 const [waUser] = await currentSock.onWhatsApp(`${targetPhone}@s.whatsapp.net`);
                                 if (waUser && waUser.lid) {
@@ -3483,7 +3788,7 @@ function ensureHttpServer() {
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({
                             success: true,
-                            message: `${targetUser.name} (${targetPhone}) activated for ${months} ${months === 1 ? 'month' : 'months'}.`
+                            message: `${targetUser.name} (${targetPhone}) activated (${tier}) for ${months} ${months === 1 ? 'month' : 'months'}.`
                         }));
                         return;
                     }
@@ -3505,14 +3810,27 @@ function ensureHttpServer() {
                     }
 
                     if (action === 'extendUser') {
-                        const targetPhone = normalizeIdentifier(body.phone);
+                        const rawPhone = String(body.phone || '').trim();
+                        const targetPhone = rawPhone.startsWith('tg_') ? rawPhone : normalizeIdentifier(rawPhone);
                         const days = parseInt(body.days, 10) || 30;
+                        const tier = ['WA', 'TT', 'COMBO'].includes(String(body.tier || '').toUpperCase())
+                            ? String(body.tier).toUpperCase()
+                            : 'WA';
                         const users = loadUsers();
                         let targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
                         if (targetUser) {
+                            normalizeUserTiers(targetUser);
                             const now = Date.now();
-                            const base = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
-                            targetUser.expiredAt = base + (days * 24 * 60 * 60 * 1000);
+                            const addMs = days * 24 * 60 * 60 * 1000;
+                            if (tier === 'WA' || tier === 'COMBO') {
+                                const waBase = (targetUser.waExpiredAt && targetUser.waExpiredAt > now) ? targetUser.waExpiredAt : now;
+                                targetUser.waExpiredAt = waBase + addMs;
+                            }
+                            if (tier === 'TT' || tier === 'COMBO') {
+                                const ttBase = (targetUser.ttExpiredAt && targetUser.ttExpiredAt > now) ? targetUser.ttExpiredAt : now;
+                                targetUser.ttExpiredAt = ttBase + addMs;
+                            }
+                            normalizeUserTiers(targetUser);
                             targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + Math.max(1, Math.round(days / 30));
                             targetUser.status = 'ACTIVE';
                             targetUser.reminded3Days = false;
@@ -3520,7 +3838,7 @@ function ensureHttpServer() {
                             if (targetUser.phone) users[targetUser.phone] = targetUser;
                             saveUsers(users);
                             res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true, message: `Added +${days} days.` }));
+                            res.end(JSON.stringify({ success: true, message: `Added +${days} days (${tier}).` }));
                             return;
                         }
                         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -3529,11 +3847,15 @@ function ensureHttpServer() {
                     }
 
                     if (action === 'expireUser') {
-                        const targetPhone = normalizeIdentifier(body.phone);
+                        const rawPhone = String(body.phone || '').trim();
+                        const targetPhone = rawPhone.startsWith('tg_') ? rawPhone : normalizeIdentifier(rawPhone);
                         const users = loadUsers();
                         let targetUser = users[targetPhone] || Object.values(users).find(u => u.phone === targetPhone);
                         if (targetUser) {
-                            targetUser.expiredAt = Date.now() - 1000;
+                            const pastTs = Date.now() - 1000;
+                            targetUser.waExpiredAt = pastTs;
+                            targetUser.ttExpiredAt = pastTs;
+                            targetUser.expiredAt = pastTs;
                             targetUser.status = 'EXPIRED';
                             if (targetUser.lid) users[targetUser.lid] = targetUser;
                             if (targetUser.phone) users[targetUser.phone] = targetUser;
@@ -3577,7 +3899,7 @@ function ensureHttpServer() {
                             res.end(JSON.stringify({ success: false, message: 'Broadcast message cannot be empty.' }));
                             return;
                         }
-                        if (!currentSock || !currentSock.user) {
+                        if ((!currentSock || !currentSock.user) && !TELEGRAM_BOT_TOKEN) {
                             res.writeHead(400, { 'Content-Type': 'application/json' });
                             res.end(JSON.stringify({ success: false, message: 'WhatsApp bot is OFFLINE. Please connect WhatsApp first.' }));
                             return;
@@ -3591,8 +3913,8 @@ function ensureHttpServer() {
                         const users = loadUsers();
                         const uniqueUsers = Object.values(users).filter((u, i, arr) => arr.findIndex(x => x.phone === u.phone) === i);
                         const recipients = uniqueUsers.filter(u => {
-                            if (!u.phone || u.phone === ADMIN_NUMBER) return false;
-                            const isPaid = u.status === 'ACTIVE' && u.expiredAt && u.expiredAt > Date.now();
+                            if (!u.phone || isAnyAdmin(u.phone, u.jid || '', false)) return false;
+                            const isPaid = hasAnyAccess(u, false);
                             if (target === 'paid') return isPaid;
                             if (target === 'unpaid') return !isPaid;
                             return true;
@@ -3604,53 +3926,26 @@ function ensureHttpServer() {
                             return;
                         }
 
-                        const runBroadcast = async () => {
-                            broadcastState = {
-                                running: true,
-                                sent: 0,
-                                failed: 0,
-                                total: recipients.length,
-                                lastCompletedAt: null
-                            };
-                            for (const u of recipients) {
-                                try {
-                                    const targetJid = u.jid || u.altJid || (u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`);
-                                    const personalized = messageText.replace(/\{(name|nama)\}/gi, u.name || 'Ahli');
-                                    await currentSock.sendMessage(targetJid, { text: personalized });
-                                    broadcastState.sent++;
-                                } catch (sendErr) {
-                                    broadcastState.failed++;
-                                    console.error(`[PWA Broadcast] Gagal hantar ke ${u.phone}:`, sendErr.message);
+                        startBackgroundBroadcast({
+                            recipients,
+                            buildMessage: (u) => messageText.replace(/\{(name|nama)\}/gi, u.name || 'Ahli'),
+                            onComplete: async (st) => {
+                                if (currentSock && currentSock.user) {
+                                    await notifyAdmins(
+                                        currentSock,
+                                        `✓ *Broadcast Selesai*\n\n• Berjaya: *${st.sent}/${st.total}*\n• Gagal: *${st.failed}*`
+                                    );
                                 }
-                                await new Promise(r => setTimeout(r, 900));
                             }
-                            broadcastState.running = false;
-                            broadcastState.lastCompletedAt = Date.now();
-                        };
+                        });
 
-                        if (recipients.length <= 15) {
-                            await runBroadcast();
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({
-                                success: true,
-                                sent: broadcastState.sent,
-                                failed: broadcastState.failed,
-                                total: broadcastState.total,
-                                message: `Broadcast complete! ${broadcastState.sent}/${broadcastState.total} sent${broadcastState.failed > 0 ? `, ${broadcastState.failed} failed` : ''}.`
-                            }));
-                        } else {
-                            runBroadcast().catch(err => {
-                                console.error('[PWA Broadcast Error]:', err);
-                                broadcastState.running = false;
-                            });
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({
-                                success: true,
-                                queued: true,
-                                total: recipients.length,
-                                message: `Broadcast started in background for ${recipients.length} recipients.`
-                            }));
-                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            success: true,
+                            queued: true,
+                            total: recipients.length,
+                            message: `Broadcast queued for ${recipients.length} recipients (30s interval per message).`
+                        }));
                         return;
                     }
 
@@ -3743,7 +4038,8 @@ function ensureHttpServer() {
                         paymentId,
                         referenceNumber,
                         customerName: data.name || parsedBody.name || '',
-                        paymentType: data.payment_type || parsedBody.payment_type || (data.payment_methods && data.payment_methods[0]) || 'HitPay Online Gateway'
+                        paymentType: data.payment_type || parsedBody.payment_type || (data.payment_methods && data.payment_methods[0]) || 'HitPay Online Gateway',
+                        amountPaid: data.amount || parsedBody.amount
                     });
                 }
 
@@ -3777,18 +4073,19 @@ async function startBot() {
 
     const sock = makeWASocket({
         version,
-        auth: state,
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, logger)
+        },
         logger,
         printQRInTerminal: !pairingNumber,
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
         msgRetryCounterCache,
+        retryRequestDelayMs: 500,
         getMessage: async (key) => {
-            if (key && key.id && recentMessages.has(key.id)) {
-                return recentMessages.get(key.id);
-            }
-            return { conversation: '' };
+            return (key && key.id && cachedMessages.has(key.id)) ? cachedMessages.get(key.id) : undefined;
         }
     });
 
@@ -3853,7 +4150,7 @@ async function startBot() {
 
         for (const msg of m.messages) {
             if (msg.key && msg.key.id) {
-                storeRecentMessage(msg.key.id, unwrapMessage(msg.message) || msg.message);
+                storeCachedMessage(msg.key.id, unwrapMessage(msg.message) || msg.message);
             }
 
             const remoteJid = msg.key.remoteJid || '';
@@ -3953,8 +4250,11 @@ async function startBot() {
             }
 
             const fromMe = msg.key.fromMe;
-            const isAdmin = fromMe || ADMIN_IDENTIFIERS.some(id => remoteJid.includes(id) || phone === id) || phone === ADMIN_NUMBER;
-            const isActive = user && user.status === 'ACTIVE' && user.expiredAt && user.expiredAt > Date.now();
+            const isSuperAdmin = isPrimaryAdmin(phone, remoteJid);
+            const isAdmin = isAnyAdmin(phone, remoteJid, fromMe);
+            const waActive = hasWaAccess(user, isSuperAdmin);
+            const ttActive = hasTtAccess(user, isSuperAdmin);
+            const isActive = waActive || ttActive;
 
             const textContent = (inner.conversation || inner.extendedTextMessage?.text || '').trim();
             const textParts = textContent.split(/\s+/);
@@ -4016,17 +4316,25 @@ async function startBot() {
                 if (['tambah', 'add', 'daftar'].includes(cmd)) {
                     const rawTarget = textParts[1];
                     const days = parseInt(textParts[2], 10);
-                    const optName = textParts.slice(3).join(' ').trim();
+                    const maybeTier = (textParts[3] || '').toLowerCase();
+                    let grantTier = 'wa';
+                    let optName = '';
+                    if (['wa', 'tt', 'combo'].includes(maybeTier)) {
+                        grantTier = maybeTier;
+                        optName = textParts.slice(4).join(' ').trim();
+                    } else {
+                        optName = textParts.slice(3).join(' ').trim();
+                    }
 
                     if (!rawTarget || isNaN(days) || days <= 0) {
-                        await sock.sendMessage(remoteJid, {
+                        await sendCachedMessage(sock, remoteJid, {
                             text:
-                                `❌ *Format Tidak Sah!*\n\n` +
+                                `Format tidak sah.\n\n` +
                                 `Gunakan format:\n` +
-                                `*tambah <nombor> <hari> [nama]*\n` +
-                                `atau */add <nombor> <hari> [nama]*\n\n` +
+                                `*/add <nombor> <hari> [wa|tt|combo] [nama]*\n\n` +
                                 `Contoh:\n` +
-                                `*tambah 01113270914 30 Fieya*`
+                                `*/add 01113270914 30 wa Fieya*\n` +
+                                `*/add 01113270914 30 combo Fieya*`
                         }, { quoted: msg });
                         continue;
                     }
@@ -4042,13 +4350,21 @@ async function startBot() {
                         }
                     }
 
+                    const now = Date.now();
+                    const addMs = days * 24 * 60 * 60 * 1000;
+                    const addMonths = Math.max(1, Math.round(days / 30));
+
                     if (!targetUser) {
                         const fallbackName = optName || 'Ahli';
-                        targetUser = {
+                        targetUser = normalizeUserTiers({
                             phone: targetPhone,
                             name: fallbackName,
                             status: 'ACTIVE',
-                            expiredAt: Date.now() + days * 24 * 60 * 60 * 1000,
+                            registeredAt: new Date().toISOString(),
+                            subscribedMonths: addMonths,
+                            waExpiredAt: (grantTier === 'wa' || grantTier === 'combo') ? (now + addMs) : null,
+                            ttExpiredAt: (grantTier === 'tt' || grantTier === 'combo') ? (now + addMs) : null,
+                            preferredMode: grantTier === 'tt' ? 'TT' : 'WA',
                             refCode: generateReferralCode(fallbackName, users),
                             referredBy: null,
                             paidReferrals: 0,
@@ -4057,13 +4373,25 @@ async function startBot() {
                             reminded3Days: false,
                             jid: null,
                             altJid: null
-                        };
+                        });
                         users[targetPhone] = targetUser;
                     } else {
+                        normalizeUserTiers(targetUser);
                         if (optName) targetUser.name = optName;
-                        const now = Date.now();
-                        const baseTime = (targetUser.expiredAt && targetUser.expiredAt > now) ? targetUser.expiredAt : now;
-                        targetUser.expiredAt = baseTime + days * 24 * 60 * 60 * 1000;
+                        targetUser.registeredAt = targetUser.registeredAt || new Date().toISOString();
+                        targetUser.subscribedMonths = (targetUser.subscribedMonths || 0) + addMonths;
+                        if (grantTier === 'wa' || grantTier === 'combo') {
+                            const waBase = (targetUser.waExpiredAt && targetUser.waExpiredAt > now) ? targetUser.waExpiredAt : now;
+                            targetUser.waExpiredAt = waBase + addMs;
+                        }
+                        if (grantTier === 'tt' || grantTier === 'combo') {
+                            const ttBase = (targetUser.ttExpiredAt && targetUser.ttExpiredAt > now) ? targetUser.ttExpiredAt : now;
+                            targetUser.ttExpiredAt = ttBase + addMs;
+                        }
+                        if (grantTier === 'tt' && (!targetUser.waExpiredAt || targetUser.waExpiredAt <= now)) {
+                            targetUser.preferredMode = 'TT';
+                        }
+                        normalizeUserTiers(targetUser);
                         targetUser.status = 'ACTIVE';
                         targetUser.reminded3Days = false;
                         targetUser.refSentToExisting = true;
@@ -4087,6 +4415,7 @@ async function startBot() {
                         targetUser.referralCredited = true;
                         const referrer = users[targetUser.referredBy] || Object.values(users).find(u => u.phone === targetUser.referredBy);
                         if (referrer) {
+                            normalizeUserTiers(referrer);
                             referrer.paidReferrals = (referrer.paidReferrals || 0) + 1;
                             referrer.totalPaidReferrals = (referrer.totalPaidReferrals || 0) + 1;
                             referralRewardMsg = `\n• Penaja: ${referrer.name} (${referrer.phone}) [+1 Tajaan, Baki: ${referrer.paidReferrals}/3]`;
@@ -4097,8 +4426,9 @@ async function startBot() {
                             if (referrer.paidReferrals >= 3) {
                                 referrer.paidReferrals -= 3;
                                 const refNow = Date.now();
-                                const refBase = (referrer.expiredAt && referrer.expiredAt > refNow) ? referrer.expiredAt : refNow;
-                                referrer.expiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
+                                const refBase = (referrer.waExpiredAt && referrer.waExpiredAt > refNow) ? referrer.waExpiredAt : refNow;
+                                referrer.waExpiredAt = refBase + 30 * 24 * 60 * 60 * 1000;
+                                normalizeUserTiers(referrer);
                                 referrer.status = 'ACTIVE';
 
                                 const newExpiryStr = new Date(referrer.expiredAt).toLocaleDateString('ms-MY', {
@@ -4106,26 +4436,24 @@ async function startBot() {
                                 });
 
                                 try {
-                                    await sock.sendMessage(refJid, {
+                                    await sendHumanReply(sock, refJid, {
                                         text:
-                                            `🎉 *TAHNIAH! ANDA MENDAPAT 1 BULAN PERCUMA!*\n\n` +
-                                            `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah melengkapkan *3/3 tajaan* menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
-                                            `🎁 *Ganjaran Diterima:*\n` +
-                                            `Tempoh langganan akaun anda telah ditambah secara automatik selama *+30 HARI*!\n\n` +
-                                            `⏳ *Tarikh Luput Baharu:* *${newExpiryStr}*\n\n` +
-                                            `Teruskan berkongsi kod anda untuk mendapatkan lebih banyak ganjaran percuma! 🚀`
+                                            `✓ *Tahniah, anda terima +30 hari percuma!*\n\n` +
+                                            `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah melengkapkan *3/3 tajaan* menggunakan code referral anda (*${referrer.refCode}*).\n\n` +
+                                            `• Ganjaran: *+30 Hari* langganan percuma\n` +
+                                            `• Tarikh tamat baru: *${newExpiryStr}*`
                                     });
                                 } catch {}
-                                referralRewardMsg += ` ➔ BONUS +30 HARI TELAH DIBERIKAN!`;
+                                referralRewardMsg += ` -> BONUS +30 HARI TELAH DIBERIKAN!`;
                             } else {
                                 const remaining = 3 - referrer.paidReferrals;
                                 try {
-                                    await sock.sendMessage(refJid, {
+                                    await sendHumanReply(sock, refJid, {
                                         text:
-                                            `🎉 *TAJAAN BERJAYA (+1 RAKAN)!*\n\n` +
-                                            `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah berjaya melanggan menggunakan kod referral anda (*${referrer.refCode}*)!\n\n` +
-                                            `📊 *Kemajuan Ganjaran:* *${referrer.paidReferrals}/3 Rakan*\n` +
-                                            `💡 Ajak lagi *${remaining} rakan* sahaja lagi untuk menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik! 🚀`
+                                            `✓ *Tajaan berjaya (+1 rakan)*\n\n` +
+                                            `Hai *${referrer.name}*, rakan anda *${friendDisplayName}* (${targetPhone}) telah melanggan menggunakan code referral anda (*${referrer.refCode}*).\n\n` +
+                                            `• Kemajuan: *${referrer.paidReferrals}/3 rakan*\n` +
+                                            `• Baki: *${remaining} rakan* lagi untuk terima +30 hari percuma.`
                                     });
                                 } catch {}
                             }
@@ -4134,34 +4462,33 @@ async function startBot() {
 
                     saveUsers(users);
 
-                    const expDateStr = new Date(targetUser.expiredAt).toLocaleDateString('ms-MY', {
+                    const tierExpiry = grantTier === 'tt' ? targetUser.ttExpiredAt : (targetUser.waExpiredAt || targetUser.expiredAt);
+                    const expDateStr = new Date(tierExpiry).toLocaleDateString('ms-MY', {
                         day: '2-digit', month: '2-digit', year: 'numeric'
                     });
+                    const tierLabel = grantTier === 'combo' ? 'Combo WA + TikTok HD' : (grantTier === 'tt' ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD');
 
                     const userJid = targetUser.jid || targetUser.altJid || (targetPhone.includes('@') ? targetPhone : `${targetPhone}@s.whatsapp.net`);
                     try {
-                        await sock.sendMessage(userJid, {
+                        await sendHumanReply(sock, userJid, {
                             text:
-                                `🎉 *TAHNIAH! LANGGANAN ANDA TELAH DIAKTIFKAN*\n\n` +
-                                `Nama: ${targetUser.name}\n` +
-                                `Status: AKTIF (+${days} Hari)\n` +
-                                `Tarikh Luput: ${expDateStr}\n` +
-                                `Kod Referral Peribadi Anda: *${targetUser.refCode}*\n\n` +
-                                `🎁 *Ganjaran Referral Peribadi:*\n` +
-                                `Ajak 3 rakan anda melanggan menggunakan kod anda (*${targetUser.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan secara automatik!\n\n` +
-                                `Sila hantar video atau foto anda sebagai Dokumen untuk memulakan pemprosesan.`
+                                `✓ *Langganan anda telah diaktifkan.*\n\n` +
+                                `• Nama: ${targetUser.name}\n` +
+                                `• Pelan: *${tierLabel}* (+${days} Hari)\n` +
+                                `• Tamat tempoh: *${expDateStr}*\n` +
+                                `• Code referral anda: *${targetUser.refCode}*\n\n` +
+                                `Sila hantar video atau gambar anda sebagai *Document* untuk mula memproses.`
                         });
                     } catch {}
 
-                    await sock.sendMessage(remoteJid, {
+                    await sendCachedMessage(sock, remoteJid, {
                         text:
-                            `✅ *PENGAKTIFAN KEAHLIAN BERJAYA*\n\n` +
+                            `✓ *Pengaktifan Ahli Berjaya*\n\n` +
                             `• Nama: ${targetUser.name}\n` +
                             `• Nombor: ${targetPhone}\n` +
-                            `• Status: AKTIF (Diselaraskan)\n` +
-                            `• Tempoh: +${days} Hari\n` +
-                            `• Tarikh Luput: ${expDateStr}\n` +
-                            `• Kod Referral: *${targetUser.refCode}*${referralRewardMsg}`
+                            `• Pelan: ${tierLabel} (+${days} Hari)\n` +
+                            `• Tamat tempoh: ${expDateStr}\n` +
+                            `• Code referral: *${targetUser.refCode}*${referralRewardMsg}`
                     }, { quoted: msg });
                     continue;
                 }
@@ -4217,35 +4544,44 @@ async function startBot() {
                 }
 
                 if (['hebah', 'broadcast', 'broadcastref'].includes(cmd)) {
-                    const activeUsers = Object.values(users).filter(u => u.status === 'ACTIVE' && u.phone && u.phone !== ADMIN_NUMBER);
-                    await sock.sendMessage(remoteJid, {
-                        text: `Memulakan hebahan kod referral kepada ${activeUsers.length} ahli aktif...`
-                    }, { quoted: msg });
+                    const activeUsers = Object.values(users).filter((u, i, arr) =>
+                        u && u.phone && !isAnyAdmin(u.phone, u.jid || '', false) && hasAnyAccess(u, false) &&
+                        arr.findIndex(x => x.phone === u.phone) === i
+                    );
 
-                    let sentCount = 0;
-                    for (const u of activeUsers) {
-                        try {
-                            if (!u.refCode) u.refCode = generateReferralCode(u.name, users);
-                            u.refSentToExisting = true;
-                            const targetJid = u.jid || u.altJid || (u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`);
-                            await sock.sendMessage(targetJid, {
-                                text:
-                                    `MAKLUMAN GANJARAN REFERRAL (${BOT_NAME})\n\n` +
-                                    `Hai ${u.name}, nikmati langganan PERCUMA dengan berkongsi kod jemputan anda!\n\n` +
-                                    `Kod Referral Peribadi Anda: *${u.refCode}*\n\n` +
-                                    `Ganjaran:\n` +
-                                    `Setiap kali 3 rakan anda melanggan menggunakan kod anda, akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan secara automatik!`
-                            });
-                            sentCount++;
-                            await new Promise(r => setTimeout(r, 1200));
-                        } catch (err) {
-                            console.error(`Gagal hebah ke ${u.phone}:`, err);
-                        }
+                    if (activeUsers.length === 0) {
+                        await sendCachedMessage(sock, remoteJid, { text: 'Tiada ahli active untuk dihantar hebahan.' }, { quoted: msg });
+                        continue;
                     }
+
+                    activeUsers.forEach(u => {
+                        if (!u.refCode) u.refCode = generateReferralCode(u.name, users);
+                        u.refSentToExisting = true;
+                    });
                     saveUsers(users);
-                    await sock.sendMessage(remoteJid, {
-                        text: `Hebahan selesai. Sebanyak ${sentCount} mesej berjaya dihantar.`
-                    }, { quoted: msg });
+
+                    const started = startBackgroundBroadcast({
+                        recipients: activeUsers,
+                        buildMessage: (u) =>
+                            `Makluman Ganjaran Referral (${BOT_NAME})\n\n` +
+                            `Hai ${u.name}, kongsikan code referral anda kepada rakan untuk terima langganan percuma:\n` +
+                            `• Code anda: *${u.refCode}*\n\n` +
+                            `Setiap *3 rakan* yang melanggan menggunakan code ini, anda akan terima *+30 hari percuma* secara automatik.`,
+                        onComplete: async (st) => {
+                            await notifyAdmins(
+                                sock,
+                                `✓ *Hebahan Referral Selesai*\n\n• Berjaya: *${st.sent}/${st.total}*\n• Gagal: *${st.failed}*`
+                            );
+                        }
+                    });
+
+                    if (!started.started) {
+                        await sendCachedMessage(sock, remoteJid, { text: 'Hebahan lain sedang berjalan. Sila tunggu hingga selesai.' }, { quoted: msg });
+                    } else {
+                        await sendCachedMessage(sock, remoteJid, {
+                            text: `Hebahan referral dimasukkan ke background queue untuk *${activeUsers.length} ahli active* (sela 30 saat setiap mesej).`
+                        }, { quoted: msg });
+                    }
                     continue;
                 }
 
@@ -4350,7 +4686,7 @@ async function startBot() {
                     let extraInfo = '';
 
                     msgRetryCounterCache.flushAll();
-                    recentMessages.clear();
+                    cachedMessages.clear();
 
                     if (targetRaw) {
                         const targetPhone = normalizeIdentifier(targetRaw);
@@ -4374,13 +4710,12 @@ async function startBot() {
 
                     const synced = await syncAllActiveLids(sock);
 
-                    await sock.sendMessage(remoteJid, {
+                    await sendCachedMessage(sock, remoteJid, {
                         text:
-                            `🔧 *PEMULIHAN SESI SIGNAL BERJAYA (/fixsession)*\n\n` +
-                            `• Retry Counter Cache: Dikosongkan (flushAll)\n` +
-                            `• Simpanan Mesej Ringkas: Direset\n` +
-                            `• Penyelarasan LID Ahli Aktif: ${synced} diselaraskan${extraInfo}\n\n` +
-                            `Masalah *"Waiting for this message"* telah dipulihkan. Sila minta pengguna menghantar semula mesej mereka.`
+                            `✓ *Pemulihan Sesi Signal Berjaya (/fixsession)*\n\n` +
+                            `• Retry Counter Cache: Dikosongkan\n` +
+                            `• Simpanan Mesej (cachedMessages): Direset\n` +
+                            `• Penyelarasan LID Ahli Aktif: ${synced} diselaraskan${extraInfo}`
                     }, { quoted: msg });
                     continue;
                 }
@@ -4394,13 +4729,13 @@ async function startBot() {
                     const minutes = Math.floor((uptimeSec % 3600) / 60);
                     const percentage = ((parseFloat(rssMB) / 384) * 100).toFixed(1);
 
-                    await sock.sendMessage(remoteJid, {
+                    await sendCachedMessage(sock, remoteJid, {
                         text:
                             `STATUS SISTEM & PRESTASI PELAYAN\n\n` +
                             `Penggunaan Memori:\n` +
                             `• Memori Fizikal (RSS): ${rssMB} MB / 384.0 MB (${percentage}%)\n` +
                             `• Memori Heap Aktif: ${heapUsedMB} MB\n` +
-                            `• Simpanan Mesej (recentMessages): ${recentMessages.size}/250 item\n` +
+                            `• Simpanan Mesej (cachedMessages): ${cachedMessages.size}/${MAX_CACHED_MESSAGES} item\n` +
                             `• HitPay Status: ${HITPAY_API_KEY ? 'Aktif (' + HITPAY_ENV + ')' : 'HITPAY_API_KEY Tiada'}\n` +
                             `• Kawalan Memori (GC): Aktif (--expose-gc & 384M Cap)\n\n` +
                             `Status Antrian Pemprosesan:\n` +
@@ -4412,37 +4747,147 @@ async function startBot() {
                 }
 
                 if (['bantuan', 'menu', 'help'].includes(cmd)) {
-                    await sock.sendMessage(remoteJid, {
+                    await sendCachedMessage(sock, remoteJid, {
                         text:
-                            `📋 *PANDUAN PERINTAH PENTADBIR (${BOT_NAME})*\n\n` +
-                            `1. *syncbayar* (atau */cekbayar*)\n` +
-                            `   └ Semak dan aktifkan bayaran HitPay tertunggak secara manual dari API.\n\n` +
-                            `2. *tunggu*\n` +
-                            `   └ Lihat senarai pengguna yang belum bayar / hantar resit.\n\n` +
-                            `3. *tambah <nombor> <hari> [nama]* (atau */add*)\n` +
-                            `   └ Aktifkan ahli baharu atau sambung tempoh.\n` +
-                            `   Contoh: tambah 01113270914 30 Fieya\n\n` +
-                            `4. *kod <nombor> <nama_khas>* (atau */setref*)\n` +
-                            `   └ Tukar kod referral ahli.\n` +
-                            `   Contoh: kod 01113270914 FIEYA\n\n` +
-                            `5. *hebah* (atau */broadcastref*)\n` +
-                            `   └ Hantar kod referral ke semua ahli aktif secara automatik.\n\n` +
-                            `6. *semak <nombor>* (atau */check*)\n` +
-                            `   └ Semak baki hari dan status referral ahli.\n` +
-                            `   Contoh: semak 01113270914\n\n` +
-                            `7. *padam <nombor>*\n` +
-                            `   └ Batalkan keahlian pengguna.\n\n` +
-                            `8. *senarai*\n` +
-                            `   └ Paparkan semua ahli aktif dan tarikh luput.\n\n` +
-                            `9. *selaras*\n` +
-                            `   └ Segerakkan identiti LID WhatsApp ahli aktif.\n\n` +
-                            `10. *fixsession [nombor]*\n` +
-                            `   └ Pulihkan sesi enkripsi Signal WhatsApp.\n\n` +
-                            `11. *ram*\n` +
-                            `   └ Semak status memori pelayan & antrian.`
+                            `Panduan Perintah Pentadbir (${BOT_NAME}):\n\n` +
+                            `• */add <nombor> <hari> [wa|tt|combo] [nama]* — Aktifkan atau tambah tempoh pelan ahli.\n` +
+                            `• *syncbayar* — Semak bayaran HitPay tertunggak.\n` +
+                            `• *tunggu* — Senarai pengguna menunggu pembayaran.\n` +
+                            `• */setref <nombor> <kod>* — Tukar code referral ahli.\n` +
+                            `• */broadcastref* — Hebah code referral ke semua ahli active (30s/mesej).\n` +
+                            `• */check <nombor>* — Semak status keahlian.\n` +
+                            `• *padam <nombor>* — Padam ahli.\n` +
+                            `• *senarai* — Senarai ahli active.\n` +
+                            `• *selaras* — Selaras LID ahli.\n` +
+                            `• *fixsession [nombor]* — Pulihkan sesi Signal.\n` +
+                            `• *ram* — Semak memori & queue pelayan.`
                     }, { quoted: msg });
                     continue;
                 }
+            }
+
+            // ---------------------------------------------------------
+            // 1B. TUKAR MOD PEMPROSESAN (WA / TT) & PAUTAN SILANG PLATFORM (/link)
+            // ---------------------------------------------------------
+            if (['tt', '/tt', 'tiktok', '/tiktok'].includes(cmd)) {
+                user.preferredMode = 'TT';
+                user.jid = remoteJid;
+                if (altJid) user.altJid = altJid;
+                saveUsers(users);
+
+                if (ttActive) {
+                    const ttExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.ttExpiredAt).toLocaleDateString('ms-MY');
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `✓ *MOD TIKTOK 1080P 60FPS AKTIF*\n\n` +
+                            `Semua video yang anda hantar selepas ini akan diproses menggunakan profil *TikTok HD (1080p 60fps, High Bitrate)*.\n\n` +
+                            `• Status TikTok HD: Aktif sehingga ${ttExp}\n` +
+                            `• Untuk kembali ke mod WhatsApp Status HD, balas *WA*.`
+                    }, { quoted: msg });
+                } else if (waActive) {
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `Mod pilihan anda ditukar ke *TikTok 1080p 60fps*, namun akaun anda buat masa ini hanya mempunyai langganan *WhatsApp Status HD* yang aktif.\n\n` +
+                            `Balas *4* untuk upgrade tambah akses *TikTok HD (RM10/bulan)*, atau balas *WA* untuk kembali ke mod WhatsApp Status.`
+                    }, { quoted: msg });
+                } else {
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `Mod pilihan anda ditetapkan ke *TikTok 1080p 60fps*, namun anda belum mempunyai langganan aktif.\n\n` +
+                            `Balas *2* untuk langgan *TikTok HD (RM10/bulan)* atau *3* untuk *Combo WA + TT (RM20/bulan)*.`
+                    }, { quoted: msg });
+                }
+                continue;
+            }
+
+            if (['wa', '/wa', 'whatsapp', '/whatsapp'].includes(cmd)) {
+                user.preferredMode = 'WA';
+                user.jid = remoteJid;
+                if (altJid) user.altJid = altJid;
+                saveUsers(users);
+
+                if (waActive) {
+                    const waExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.waExpiredAt).toLocaleDateString('ms-MY');
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `✓ *MOD WHATSAPP STATUS HD AKTIF*\n\n` +
+                            `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil *WhatsApp Status HD (60fps + QHD+)*.\n\n` +
+                            `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
+                            `• Untuk bertukar ke mod TikTok 1080p 60fps, balas *TT*.`
+                    }, { quoted: msg });
+                } else if (ttActive) {
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `Mod pilihan anda ditukar ke *WhatsApp Status HD*, namun akaun anda buat masa ini hanya mempunyai langganan *TikTok HD* yang aktif.\n\n` +
+                            `Balas *1* untuk langgan *WhatsApp Status HD (RM10/bulan)*, atau balas *TT* untuk kembali ke mod TikTok HD.`
+                    }, { quoted: msg });
+                } else {
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `Mod pilihan anda ditetapkan ke *WhatsApp Status HD*, namun anda belum mempunyai langganan aktif.\n\n` +
+                            `Balas *1* untuk langgan *WhatsApp Status HD (RM10/bulan)* atau *3* untuk *Combo WA + TT (RM20/bulan)*.`
+                    }, { quoted: msg });
+                }
+                continue;
+            }
+
+            if (cmd === '/link' || cmd === 'link') {
+                const targetCode = (textParts[1] || '').trim().toUpperCase();
+                if (!targetCode) {
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `Sila masukkan kod rujukan akaun anda. Contoh: */link ${user.refCode || 'KODANDA'}*`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                const targetAcc = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === targetCode);
+                if (!targetAcc) {
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `Kod rujukan *${targetCode}* tidak ditemui. Sila semak kod anda melalui arahan *STATUS* pada akaun asal.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                if (targetAcc === user) {
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `Kod *${targetCode}* adalah kod akaun WhatsApp ini sendiri. Hantarkan kod ini di bot Telegram untuk memautkan langganan anda.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
+                normalizeUserTiers(user);
+                normalizeUserTiers(targetAcc);
+                const mergedWa = Math.max(user.waExpiredAt || 0, targetAcc.waExpiredAt || 0);
+                const mergedTt = Math.max(user.ttExpiredAt || 0, targetAcc.ttExpiredAt || 0);
+                const nowMs = Date.now();
+
+                user.waExpiredAt = mergedWa;
+                user.ttExpiredAt = mergedTt;
+                user.expiredAt = Math.max(mergedWa, mergedTt);
+                targetAcc.waExpiredAt = mergedWa;
+                targetAcc.ttExpiredAt = mergedTt;
+                targetAcc.expiredAt = Math.max(mergedWa, mergedTt);
+
+                if (mergedWa > nowMs || mergedTt > nowMs) {
+                    user.status = 'ACTIVE';
+                    targetAcc.status = 'ACTIVE';
+                }
+                if (targetAcc.telegramChatId && !user.telegramChatId) user.telegramChatId = targetAcc.telegramChatId;
+                if (!targetAcc.linkedWaPhone) targetAcc.linkedWaPhone = phone;
+                user.jid = remoteJid;
+                if (altJid) user.altJid = altJid;
+                saveUsers(users);
+
+                const waStr = mergedWa > nowMs ? new Date(mergedWa).toLocaleDateString('ms-MY') : 'Tiada';
+                const ttStr = mergedTt > nowMs ? new Date(mergedTt).toLocaleDateString('ms-MY') : 'Tiada';
+                await sendHumanReply(sock, remoteJid, {
+                    text:
+                        `✓ *AKAUN BERJAYA DIPAUTKAN*\n\n` +
+                        `Langganan anda kini diselaraskan merentasi platform:\n` +
+                        `• WhatsApp Status HD: ${waStr}\n` +
+                        `• TikTok 1080p 60fps HD: ${ttStr}`
+                }, { quoted: msg });
+                continue;
             }
 
             // ---------------------------------------------------------
@@ -4450,7 +4895,18 @@ async function startBot() {
             // ---------------------------------------------------------
             const cleanText = textContent.trim();
             const selectedPkg = PACKAGES[cleanText];
-            if (selectedPkg && (!isActive || (user && user.status !== 'ACTIVE') || (user && user.expiredAt && user.expiredAt <= Date.now()))) {
+            if (selectedPkg) {
+                if (selectedPkg.requiresWa && !waActive) {
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `Pakej *4 (Upgrade TikTok HD RM10)* khas untuk ahli yang sudah mempunyai langganan *WhatsApp Status HD* aktif.\n\n` +
+                            `Sila pilih salah satu pakej berikut:\n` +
+                            `• Balas *2* untuk *TikTok 1080p 60fps HD Sahaja (RM10/bulan)*\n` +
+                            `• Balas *3* untuk *Combo WhatsApp + TikTok HD (RM20/bulan)*`
+                    }, { quoted: msg });
+                    continue;
+                }
+
                 try {
                     await sock.sendMessage(remoteJid, {
                         react: { text: '⏳', key: msg.key }
@@ -4459,29 +4915,27 @@ async function startBot() {
 
                 try {
                     const hitpayRes = await createHitPayPaymentRequest({
+                        userKey: phone,
                         phone: phone,
                         pushName: msg.pushName || user?.name || phone,
+                        planCode: selectedPkg.planCode,
                         days: selectedPkg.days,
-                        amount: selectedPkg.amount
+                        amount: selectedPkg.amount,
+                        purpose: `${BOT_NAME} - ${selectedPkg.title}`
                     });
 
-                    await sock.sendMessage(remoteJid, {
+                    await sendHumanReply(sock, remoteJid, {
                         text:
-                            `💳 *PAUTAN PEMBAYARAN RASMI HITPAY*\n\n` +
-                            `Pakej: *${selectedPkg.title}* (${selectedPkg.price} - ${selectedPkg.days} Hari)\n\n` +
+                            `✓ *PAUTAN PEMBAYARAN RASMI HITPAY*\n\n` +
+                            `Pakej: *${selectedPkg.title}* (${selectedPkg.price} / ${selectedPkg.days} Hari)\n\n` +
                             `Sila tekan pautan selamat di bawah untuk membuat bayaran:\n` +
-                            `🔗 ${hitpayRes.url}\n\n` +
-                            `📌 *Kaedah Pembayaran Disokong:*\n` +
-                            `• DuitNow QR (Semua Bank & eWallet)\n` +
-                            `• FPX Online Banking (Maybank2u, CIMB Clicks, Bank Islam, dsb.)\n` +
-                            `• Touch 'n Go eWallet, GrabPay, ShopeePay\n` +
-                            `• Kad Debit / Kredit (Visa & Mastercard)\n\n` +
-                            `⚡ *Pengesahan Automatik:*\n` +
-                            `Akaun anda akan diaktifkan secara serta-merta sebaik sahaja transaksi selesai tanpa perlu hantar sebarang resit!`
+                            `${hitpayRes.url}\n\n` +
+                            `Kaedah bayaran disokong: DuitNow QR, FPX Online Banking, eWallet (TNG / GrabPay / ShopeePay), serta Kad Debit & Kredit.\n\n` +
+                            `Akses anda akan diaktifkan secara automatik sebaik sahaja pembayaran selesai tanpa perlu menghantar resit.`
                     }, { quoted: msg });
 
                     if (user) {
-                        user.status = 'WAITING';
+                        if (!isActive) user.status = 'WAITING';
                         user.jid = remoteJid;
                         if (altJid) user.altJid = altJid;
                         saveUsers(users);
@@ -4495,8 +4949,8 @@ async function startBot() {
 
                 } catch (err) {
                     console.error(`[HITPAY] Ralat semasa memproses pembayaran untuk ${phone}:`, err.message);
-                    await sock.sendMessage(remoteJid, {
-                        text: `❌ *Ralat Pembayaran HitPay:*\n${err.message}\n\nSila hubungi pentadbir jika masalah berterusan.`
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `Maaf, terdapat ralat semasa menjana pautan HitPay: ${err.message}. Sila cuba sebentar lagi atau hubungi pentadbir.`
                     }, { quoted: msg });
                 }
                 continue;
@@ -4509,15 +4963,15 @@ async function startBot() {
             const matchedReferrer = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === candidateCode);
             if (matchedReferrer) {
                 if (user && (user.phone === matchedReferrer.phone || user.refCode === matchedReferrer.refCode)) {
-                    await sock.sendMessage(remoteJid, {
+                    await sendHumanReply(sock, remoteJid, {
                         text: "Ralat: Anda tidak boleh menggunakan kod referral peribadi anda sendiri."
                     }, { quoted: msg });
                     continue;
                 }
 
                 if (isActive) {
-                    await sock.sendMessage(remoteJid, {
-                        text: `Akaun anda sudah berstatus AKTIF sehingga ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}. Kod referral hanya sah untuk pendaftaran atau pembaharuan langganan.`
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `Akaun anda sudah berstatus active. Kod referral hanya sah untuk pendaftaran baharu atau pembaharuan langganan yang telah tamat.`
                     }, { quoted: msg });
                     continue;
                 }
@@ -4529,26 +4983,27 @@ async function startBot() {
                 saveUsers(users);
 
                 const confirmCaption =
-                    `✅ *KOD REFERRAL DISAHKAN!*\n\n` +
+                    `✓ *KOD REFERRAL DISAHKAN*\n\n` +
                     `Anda dijemput oleh *${matchedReferrer.name}* (${matchedReferrer.refCode}).\n\n` +
                     `${PACKAGE_TEMPLATE}`;
 
-                await sock.sendMessage(remoteJid, { text: confirmCaption }, { quoted: msg });
+                await sendHumanReply(sock, remoteJid, { text: confirmCaption }, { quoted: msg });
 
                 // Notifikasi Automatik ke Penaja bahawa kod telah ditebus oleh rakan
-                const refJid = matchedReferrer.jid || matchedReferrer.altJid || (matchedReferrer.phone.includes('@') ? matchedReferrer.phone : `${matchedReferrer.phone}@s.whatsapp.net`);
+                const refJid = matchedReferrer.jid || matchedReferrer.altJid || (matchedReferrer.phone && matchedReferrer.phone.includes('@') ? matchedReferrer.phone : `${matchedReferrer.phone}@s.whatsapp.net`);
                 const friendName = msg.pushName || user.name || phone;
-                try {
-                    await sock.sendMessage(refJid, {
-                        text:
-                            `🔔 *KOD REFERRAL ANDA DIGUNAKAN!*\n\n` +
-                            `Hai *${matchedReferrer.name}*, rakan anda *${friendName}* (${phone}) baru sahaja memasukkan kod referral anda (*${matchedReferrer.refCode}*)!\n\n` +
-                            `📌 *Status:* Rakan anda kini sedang memilih pakej langganan.\n` +
-                            `⚡ Anda akan menerima notifikasi sebaik sahaja mereka selesai membuat pembayaran. Terima kasih!`
-                    });
-                    console.log(`[REFERRAL NOTI] Penaja ${matchedReferrer.phone} diberitahu tentang ${phone} menggunakan kod.`);
-                } catch (notiErr) {
-                    console.error(`[REFERRAL NOTI] Gagal hantar notifikasi ke penaja:`, notiErr.message);
+                if (refJid && !String(matchedReferrer.phone).startsWith('tg_')) {
+                    try {
+                        await sendHumanReply(sock, refJid, {
+                            text:
+                                `✓ *KOD REFERRAL ANDA DIGUNAKAN*\n\n` +
+                                `Hai *${matchedReferrer.name}*, rakan anda *${friendName}* (${phone}) baru sahaja memasukkan kod referral anda (*${matchedReferrer.refCode}*).\n\n` +
+                                `Status: Rakan anda sedang memilih pakej langganan. Anda akan dimaklumkan sebaik sahaja pembayaran mereka selesai.`
+                        });
+                        console.log(`[REFERRAL NOTI] Penaja ${matchedReferrer.phone} diberitahu tentang ${phone} menggunakan kod.`);
+                    } catch (notiErr) {
+                        console.error(`[REFERRAL NOTI] Gagal hantar notifikasi ke penaja:`, notiErr.message);
+                    }
                 }
 
                 continue;
@@ -4557,15 +5012,15 @@ async function startBot() {
             // ---------------------------------------------------------
             // 4. PEMBAYARAN TERUS (BAYAR / PAKEJ)
             // ---------------------------------------------------------
-            if (['bayar', '/bayar', 'pakej', 'beli', 'qr'].includes(cmd) || upperText === 'BAYAR' || upperText === 'PAKEJ') {
-                user.status = 'WAITING';
+            if (['bayar', '/bayar', 'pakej', 'beli', 'qr', 'upgrade', '/upgrade'].includes(cmd) || upperText === 'BAYAR' || upperText === 'PAKEJ') {
+                if (!isActive) user.status = 'WAITING';
                 user.jid = remoteJid;
                 if (altJid) user.altJid = altJid;
                 saveUsers(users);
 
-                await sock.sendMessage(remoteJid, {
+                await sendHumanReply(sock, remoteJid, {
                     text:
-                        `MAKLUMAT PEMBAYARAN LANGGANAN (${BOT_NAME})\n\n` +
+                        `MAKLUMAT PAKEJ LANGGANAN (${BOT_NAME})\n\n` +
                         `${PACKAGE_TEMPLATE}`
                 }, { quoted: msg });
                 continue;
@@ -4583,59 +5038,67 @@ async function startBot() {
                     user.refSentToExisting = true;
                     saveUsers(users);
 
-                    const expDateStr = new Date(user.expiredAt).toLocaleDateString('ms-MY', {
-                        day: '2-digit', month: '2-digit', year: 'numeric'
-                    });
+                    const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 untuk langgan)');
+                    const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : (waActive ? 'Tidak Active (Balas 4 untuk upgrade RM10)' : 'Tidak Active (Balas 2 untuk langgan)'));
+                    const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
 
-                    await sock.sendMessage(remoteJid, {
+                    await sendHumanReply(sock, remoteJid, {
                         text:
-                            `SELAMAT KEMBALI KE ${BOT_NAME}!\n\n` +
-                            `Status Keahlian: *AKTIF*\n` +
-                            `Tarikh Luput: ${expDateStr}\n` +
-                            `Kod Referral Peribadi Anda: *${user.refCode}*\n\n` +
-                            `Panduan Penggunaan:\n` +
-                            `• Video 60 FPS: Sila hantar video anda sebagai fail Dokumen (Lampiran > Dokumen > Galeri) bagi mengekalkan kualiti tanpa mampatan.\n` +
-                            `• Foto QHD+: Hantar foto anda untuk diproses ke resolusi 2560px dengan ketajaman CAS.\n\n` +
-                            `🎁 *Ganjaran Referral Peribadi:*\n` +
-                            `Ajak 3 rakan anda melanggan menggunakan kod anda (*${user.refCode}*), dan anda akan menerima *PERCUMA 1 BULAN (30 Hari)* secara automatik!`
+                            `✓ *SELAMAT KEMBALI KE ${BOT_NAME}*\n\n` +
+                            `• Mod Pemprosesan Semasa: *${currentMode === 'TT' ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD'}*\n` +
+                            `• Langganan WhatsApp HD: ${waStr}\n` +
+                            `• Langganan TikTok HD: ${ttStr}\n` +
+                            `• Kod Referral Peribadi: *${user.refCode}*\n\n` +
+                            `Panduan Ringkas:\n` +
+                            `• Hantar video atau foto anda sebagai *file / document* (Lampiran > Document > Galeri) supaya kualiti asal kekal terpelihara.\n` +
+                            `• Taip *TT* untuk tukar ke mod TikTok 1080p 60fps, atau *WA* untuk mod WhatsApp Status HD (boleh juga letak caption WA/TT pada document).\n` +
+                            `• Guna arahan */link ${user.refCode}* di Telegram jika mahu pautkan langganan anda.\n\n` +
+                            `Ganjaran Referral: Ajak 3 rakan melanggan menggunakan kod *${user.refCode}* untuk tebus 1 bulan percuma secara automatik.`
                     }, { quoted: msg });
                 } else {
                     saveUsers(users);
-                    const isExpired = user && user.expiredAt && user.expiredAt <= Date.now();
+                    const lastExp = Math.max(user?.waExpiredAt || 0, user?.ttExpiredAt || 0, user?.expiredAt || 0);
+                    const isExpired = lastExp > 0 && lastExp <= Date.now();
                     const introText = isExpired
-                        ? `STATUS: LANGGANAN TELAH TAMAT\n\nTempoh keahlian anda bagi ${BOT_NAME} telah tamat pada ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}.`
-                        : `STATUS: TIADA LANGGANAN AKTIF\n\nSelamat datang ke ${BOT_NAME}. Akaun anda belum mempunyai langganan aktif untuk memproses video 60 FPS & foto WhatsApp Status berkualiti tinggi.`;
+                        ? `STATUS: LANGGANAN TELAH TAMAT\n\nTempoh keahlian anda bagi ${BOT_NAME} telah tamat pada ${new Date(lastExp).toLocaleDateString('ms-MY')}.`
+                        : `STATUS: TIADA LANGGANAN ACTIVE\n\nSelamat datang ke ${BOT_NAME}. Akaun anda belum mempunyai langganan active untuk memproses video 60fps & foto QHD+.`;
 
                     const welcomeCaption =
                         `${introText}\n\n` +
                         `${PACKAGE_TEMPLATE}\n\n` +
-                        `💡 *Cara Mendaftar:*\n` +
-                        `1. Balas nombor *1, 2, 3, atau 4* untuk menjana pautan bayaran HitPay automatik (FPX, DuitNow QR, eWallet & Kad).\n` +
+                        `Cara Mendaftar:\n` +
+                        `1. Balas nombor *1, 2, 3, atau 4* untuk menjana link bayaran HitPay automatik (DuitNow QR, FPX, eWallet & Kad).\n` +
                         `2. Atau hantarkan kod referral rakan anda jika ada (contoh: *FIEYANINA482*).`;
 
-                    await sock.sendMessage(remoteJid, { text: welcomeCaption }, { quoted: msg });
+                    await sendHumanReply(sock, remoteJid, { text: welcomeCaption }, { quoted: msg });
                 }
                 continue;
             }
 
             if (['status', 'baki', 'langganan'].includes(cmd)) {
                 if (isActive) {
-                    const daysLeft = Math.ceil((user.expiredAt - Date.now()) / (1000 * 60 * 60 * 24));
-                    await sock.sendMessage(remoteJid, {
+                    const waDays = isSuperAdmin ? 9999 : (waActive ? Math.ceil((user.waExpiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0);
+                    const ttDays = isSuperAdmin ? 9999 : (ttActive ? Math.ceil((user.ttExpiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0);
+                    const waLine = isSuperAdmin ? 'Active (Super Admin Unlimited)' : (waActive ? `Active (${waDays} hari lagi, luput ${new Date(user.waExpiredAt).toLocaleDateString('ms-MY')})` : 'Tiada');
+                    const ttLine = isSuperAdmin ? 'Active (Super Admin Unlimited)' : (ttActive ? `Active (${ttDays} hari lagi, luput ${new Date(user.ttExpiredAt).toLocaleDateString('ms-MY')})` : 'Tiada');
+                    const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+
+                    await sendHumanReply(sock, remoteJid, {
                         text:
-                            `STATUS KEAHLIAN ANDA\n\n` +
+                            `✓ *STATUS KEAHLIAN ANDA*\n\n` +
                             `• Nama: *${user.name}*\n` +
-                            `• Status: Aktif (${daysLeft} hari lagi)\n` +
-                            `• Tarikh Luput: ${new Date(user.expiredAt).toLocaleDateString('ms-MY')}\n` +
-                            `• Kod Referral: *${user.refCode}*\n` +
+                            `• Mod Pilihan: *${currentMode === 'TT' ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD'}*\n` +
+                            `• WhatsApp Status HD: ${waLine}\n` +
+                            `• TikTok 1080p 60fps HD: ${ttLine}\n` +
+                            `• Kod Referral: *${user.refCode || '-'}*\n` +
                             `• Kemajuan Ganjaran: ${user.paidReferrals || 0}/3 rakan melanggan\n\n` +
-                            `Ajak rakan anda melanggan menggunakan kod referral anda untuk menerima 1 bulan langganan percuma!`
+                            `Balas *TT* atau *WA* untuk menukar mod pemprosesan, atau *BAYAR* untuk tambah/perbaharui langganan.`
                     }, { quoted: msg });
                 } else {
-                    await sock.sendMessage(remoteJid, {
+                    await sendHumanReply(sock, remoteJid, {
                         text:
-                            `STATUS: TIADA LANGGANAN AKTIF\n\n` +
-                            `Akaun anda belum berdaftar sebagai ahli aktif ${BOT_NAME}.\n\n` +
+                            `STATUS: TIADA LANGGANAN ACTIVE\n\n` +
+                            `Akaun anda belum berdaftar sebagai ahli active ${BOT_NAME}.\n\n` +
                             `Sila taip *START* untuk melihat senarai pakej dan memulakan langganan.`
                     }, { quoted: msg });
                 }
@@ -4646,14 +5109,14 @@ async function startBot() {
             // 6. PENGESANAN MEDIA & SEKATAN KEAHLIAN (MEMBERSHIP GATE)
             // ---------------------------------------------------------
             if (inner.videoMessage) {
-                await sock.sendMessage(remoteJid, {
+                await sendHumanReply(sock, remoteJid, {
                     text:
                         `PERINGATAN FORMAT PENGHANTARAN VIDEO\n\n` +
-                        `Fail video dikesan dihantar melalui mod biasa. Aplikasi WhatsApp memampatkan kualiti video biasa sebelum penghantaran.\n\n` +
-                        `Sila hantar semula video sebagai Dokumen:\n` +
+                        `Video ini dikesan dihantar melalui mod biasa, jadi WhatsApp akan memampatkan kualiti video tersebut.\n\n` +
+                        `Sila hantar semula video sebagai *file / document*:\n` +
                         `1. Tekan ikon Lampiran (+ atau klip kertas)\n` +
-                        `2. Pilih Dokumen > Pilih daripada galeri\n` +
-                        `3. Hantar video anda sebagai fail dokumen.`
+                        `2. Pilih *Document* > Pilih daripada galeri\n` +
+                        `3. Hantar video anda sebagai document.`
                 }, { quoted: msg });
                 continue;
             }
@@ -4693,13 +5156,41 @@ async function startBot() {
                 continue;
             }
 
+            const mediaCaptionUpper = (docMsg?.caption || inner.imageMessage?.caption || textContent || '').trim().toUpperCase();
+            let effectiveMode = user?.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+            if (/\b(TT|TIKTOK)\b/.test(mediaCaptionUpper)) {
+                effectiveMode = 'TT';
+            } else if (/\b(WA|WHATSAPP)\b/.test(mediaCaptionUpper)) {
+                effectiveMode = 'WA';
+            }
+
             if (!isActive) {
                 const isWaiting = user && user.status === 'WAITING';
                 const msgText = isWaiting
-                    ? `AKSES DITANGGUHKAN: MENUNGGU PEMBAYARAN\n\nAkaun anda sedang dalam proses pembayaran. Sila selesaikan pembayaran menggunakan pautan HitPay yang telah diberikan atau taip *START* untuk melihat semula pakej.`
-                    : `AKSES DISEKAT: LANGGANAN DIPERLUKAN\n\nFungsi pemprosesan video 60 FPS & foto QHD+ hanya tersedia untuk ahli aktif.\n\nTaip *START* untuk melihat pakej langganan rasmi.`;
+                    ? `AKSES DITANGGUHKAN: MENUNGGU PEMBAYARAN\n\nAkaun anda sedang menunggu pengesahan bayaran. Sila lengkapkan transaksi melalui link HitPay yang telah diberikan atau taip *START* untuk lihat semula pakej.`
+                    : `AKSES DISEKAT: LANGGANAN DIPERLUKAN\n\nFungsi pemprosesan video 60fps & foto QHD+ hanya tersedia untuk ahli active.\n\nTaip *START* untuk melihat pakej langganan rasmi.`;
 
-                await sock.sendMessage(remoteJid, { text: msgText }, { quoted: msg });
+                await sendHumanReply(sock, remoteJid, { text: msgText }, { quoted: msg });
+                continue;
+            }
+
+            if (effectiveMode === 'TT' && !ttActive) {
+                await sendHumanReply(sock, remoteJid, {
+                    text:
+                        `AKSES TIKTOK HD DIPERLUKAN\n\n` +
+                        `Pelan anda buat masa ini hanya meliputi *WhatsApp Status HD*. Untuk memproses video dalam mod *TikTok 1080p 60fps HD*, sila balas *4* untuk upgrade tambah akses TikTok HD (*RM10/bulan*).\n\n` +
+                        `Jika anda mahu memproses untuk WhatsApp Status, balas *WA* dan hantar semula file anda.`
+                }, { quoted: msg });
+                continue;
+            }
+
+            if (effectiveMode === 'WA' && !waActive) {
+                await sendHumanReply(sock, remoteJid, {
+                    text:
+                        `AKSES WHATSAPP STATUS HD DIPERLUKAN\n\n` +
+                        `Pelan anda buat masa ini hanya meliputi *TikTok 1080p 60fps HD*. Untuk memproses media bagi *WhatsApp Status HD*, sila balas *1* (*RM10/bulan*) atau *3* untuk *Combo WA + TT (RM20/bulan)*.\n\n` +
+                        `Jika anda mahu memproses video untuk TikTok, balas *TT* atau sertakan caption *TT* pada document anda.`
+                }, { quoted: msg });
                 continue;
             }
 
@@ -4748,14 +5239,14 @@ async function startBot() {
                             const sizeKB = (sizeBytes / 1024).toFixed(1);
                             const sharpNote = hasCas ? 'CAS 0.35 (Kontras Adaptif)' : 'Lanczos Sharp Resample';
 
-                            await sock.sendMessage(remoteJid, {
+                            await sendCachedMessage(sock, remoteJid, {
                                 image: { stream: fs.createReadStream(outputPath) },
                                 caption:
-                                    `PENGOPTIMUMAN FOTO SELESAI\n\n` +
-                                    `Foto anda telah ditingkatkan ke resolusi 2560px (QHD+) dengan penalaan tajam ${sharpNote} & kawalan anti-mampatan WhatsApp Status.\n\n` +
-                                    `• Saiz Fail: ${sizeKB} KB (Zon Selamat)\n` +
+                                    `✓ *PENGOPTIMUMAN FOTO SELESAI*\n\n` +
+                                    `Foto anda telah ditingkatkan ke resolusi 2560px (QHD+) dengan penalaan ${sharpNote} & kawalan anti-mampatan WhatsApp Status.\n\n` +
+                                    `• Saiz File: ${sizeKB} KB (Zon Selamat)\n` +
                                     `• Profil Kualiti: JPEG Q=${usedQ}\n\n` +
-                                    `Sila muat naik foto ini terus ke WhatsApp Status anda!`
+                                    `Anda boleh terus muat naik foto ini ke WhatsApp Status anda.`
                             }, { quoted: msg });
 
                             try {
@@ -4769,11 +5260,10 @@ async function startBot() {
                                 user.refSentToExisting = true;
                                 saveUsers(users);
 
-                                await sock.sendMessage(remoteJid, {
+                                await sendHumanReply(sock, remoteJid, {
                                     text:
-                                        `🎁 *KOD REFERRAL PERIBADI ANDA: ${user.refCode}*\n\n` +
-                                        `Sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran percuma!\n\n` +
-                                        `Ajak 3 rakan anda melanggan menggunakan kod referral anda (*${user.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan tambahan secara automatik! 🚀`
+                                        `✓ *KOD REFERRAL PERIBADI ANDA: ${user.refCode}*\n\n` +
+                                        `Sebagai ahli active ${BOT_NAME}, ajak 3 rakan anda melanggan menggunakan kod *${user.refCode}* untuk menerima 1 bulan (30 hari) langganan tambahan secara percuma.`
                                 });
                             }
 
@@ -4782,7 +5272,7 @@ async function startBot() {
                         } catch (err) {
                             console.error('[Ralat Pemprosesan Imej]', err);
                             try {
-                                await sock.sendMessage(remoteJid, {
+                                await sendHumanReply(sock, remoteJid, {
                                     text: `Ralat: Proses penambahbaikan foto gagal dilaksanakan. (${err.message})`
                                 }, { quoted: msg });
                             } catch {}
@@ -4803,18 +5293,18 @@ async function startBot() {
 
                 if (!enqueueResult.success) {
                     if (enqueueResult.reason === 'full') {
-                        await sock.sendMessage(remoteJid, {
-                            text: `MAKLUMAN: Kapasiti antrian pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} media). Sila tunggu beberapa minit sebelum menghantar semula.`
+                        await sendHumanReply(sock, remoteJid, {
+                            text: `MAKLUMAN: Kapasiti giliran pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} media). Sila tunggu beberapa minit sebelum menghantar semula.`
                         }, { quoted: msg });
                     } else if (enqueueResult.reason === 'duplicate') {
-                        await sock.sendMessage(remoteJid, {
-                            text: `PERINGATAN: Anda sudah mempunyai satu media yang sedang menunggu atau diproses dalam antrian. Sila tunggu media semasa selesai sebelum menghantar media baharu.`
+                        await sendHumanReply(sock, remoteJid, {
+                            text: `PERINGATAN: Anda sudah mempunyai satu media yang sedang diproses dalam giliran. Sila tunggu media semasa selesai sebelum menghantar media baharu.`
                         }, { quoted: msg });
                     }
                 } else {
                     if (enqueueResult.position > 1) {
-                        await sock.sendMessage(remoteJid, {
-                            text: `Foto diterima. Anda berada di giliran ke-${enqueueResult.position} dalam antrian pemprosesan. Sistem akan memaklumkan anda sebaik sahaja pemprosesan bermula.`
+                        await sendHumanReply(sock, remoteJid, {
+                            text: `Foto diterima. Anda berada di giliran ke-${enqueueResult.position}. Sistem akan memproses foto anda sebaik sahaja giliran tiba.`
                         }, { quoted: msg });
                     }
                 }
@@ -4822,19 +5312,20 @@ async function startBot() {
             }
 
             // ---------------------------------------------------------
-            // 8. CABANG B: PEMPROSESAN DOKUMEN VIDEO (Gred 4K 60 FPS)
+            // 8. CABANG B: PEMPROSESAN DOKUMEN VIDEO (WA 60FPS / TIKTOK 1080P 60FPS)
             // ---------------------------------------------------------
             if (isDocVideo) {
                 const fileLength = Number(docMsg.fileLength || 0);
                 const sizeMB = (fileLength / (1024 * 1024)).toFixed(1);
                 const videoInputExt = VIDEO_EXTS.has(docExt) ? docExt : (MIME_TO_VIDEO_EXT[docMime] || '.mp4');
+                const targetMode = effectiveMode === 'TT' ? 'TT' : 'WA';
 
                 const enqueueResult = videoQueue.enqueue({
                     userId: remoteJid,
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                         const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
-                        const outputPath = path.join(TEMP_DIR, `status_clear_60fps_${fileId}.mp4`);
+                        const outputPath = path.join(TEMP_DIR, `${targetMode === 'TT' ? 'tiktok_hd' : 'status_clear'}_60fps_${fileId}.mp4`);
 
                         try {
                             try {
@@ -4843,74 +5334,110 @@ async function startBot() {
                                 });
                             } catch {}
 
-                            console.log(`\n[Pemprosesan Video Bermula] Memuat turun video (${sizeMB} MB, format ${videoInputExt}) dari ${remoteJid}...`);
+                            console.log(`\n[Pemprosesan Video ${targetMode} Bermula] Memuat turun video (${sizeMB} MB, format ${videoInputExt}) dari ${remoteJid}...`);
 
                             const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
                             await pipeline(mediaStream, fs.createWriteStream(inputPath));
 
                             const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
 
-                            const effectiveDuration = Math.min(durationSec, 60);
-                            const rawBitrate = Math.floor(((15.2 * 8192) / effectiveDuration) - 96);
-                            const vBitrate = Math.max(3500, Math.min(11500, rawBitrate));
-                            const targetShortSide = vBitrate >= 4600 ? 1080 : 720;
-                            const isTrimmed = durationSec > 60;
-                            const isHighFps = sourceFps >= 48;
+                            if (targetMode === 'TT') {
+                                const isTrimmedTT = durationSec > 90;
+                                const isHighFpsTT = sourceFps >= 48;
+                                const fpsStatusTT = isHighFpsTT ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
 
-                            const resLabel = targetShortSide === 1080 ? (isHighFps ? '1080p (60 FPS)' : '1080p (HD)') : (isHighFps ? '720p (60 FPS)' : '720p (HD)');
-                            const fpsStatus = isHighFps ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
+                                console.log(`[FFmpeg TikTok] 1080p CRF 18 (10M maxrate) | CAS: 0.55 | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Durasi: ${durationSec.toFixed(1)}s`);
+                                await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR);
 
-                            console.log(`[FFmpeg Transcode] ${resLabel} @ ${vBitrate} kbps | CAS: 0.35 | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
-                            await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
+                                await sendCachedMessage(sock, remoteJid, {
+                                    video: { stream: fs.createReadStream(outputPath) },
+                                    mimetype: 'video/mp4'
+                                }, { quoted: msg });
 
-                            await sock.sendMessage(remoteJid, {
-                                video: { stream: fs.createReadStream(outputPath) },
-                                mimetype: 'video/mp4'
-                            }, { quoted: msg });
+                                try {
+                                    await sock.sendMessage(remoteJid, {
+                                        react: { text: '✅', key: msg.key }
+                                    });
+                                } catch {}
 
-                            try {
-                                await sock.sendMessage(remoteJid, {
-                                    react: { text: '✅', key: msg.key }
+                                const hasCasTT = checkCasSupport(ffmpegPath);
+                                const casNoteTT = hasCasTT ? 'CAS 0.55 (Ketajaman Tinggi)' : 'Unsharp Adaptive';
+                                const trimNoteTT = isTrimmedTT ? '\n• Catatan: Video telah dipotong kepada 90 saat pertama mengikut had profil TikTok HD.' : '';
+                                const colorNoteTT = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
+
+                                await sendHumanReply(sock, remoteJid, {
+                                    text:
+                                        `✓ *PENGOPTIMUMAN VIDEO TIKTOK SELESAI*\n\n` +
+                                        `Video anda siap diproses menggunakan profil *TikTok 1080p 60fps High Bitrate*. Simpan dan muat naik terus ke TikTok untuk ketajaman maksimum.\n\n` +
+                                        `Spesifikasi Output:\n` +
+                                        `• Resolusi: 1080p Full HD (High Profile)\n` +
+                                        `• Kadar Bingkai: ${fpsStatusTT}\n` +
+                                        `• Kualiti: CRF 18 | Maxrate 10 Mbps | Audio 192k\n` +
+                                        `• Penalaan: ${casNoteTT}\n` +
+                                        `• Profil Warna: ${colorNoteTT}${trimNoteTT}`
                                 });
-                            } catch {}
+                            } else {
+                                const effectiveDuration = Math.min(durationSec, 60);
+                                const rawBitrate = Math.floor(((15.2 * 8192) / effectiveDuration) - 96);
+                                const vBitrate = Math.max(3500, Math.min(11500, rawBitrate));
+                                const targetShortSide = vBitrate >= 4600 ? 1080 : 720;
+                                const isTrimmed = durationSec > 60;
+                                const isHighFps = sourceFps >= 48;
 
-                            const hasCas = checkCasSupport(ffmpegPath);
-                            const casNote = hasCas ? 'CAS 0.35 (Gred 4K)' : 'Unsharp Adaptive';
-                            const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
-                            const motionNote = isHighFps ? ' (True 60fps Native)' : ' (True Native CFR)';
-                            const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
+                                const resLabel = targetShortSide === 1080 ? (isHighFps ? '1080p (60 FPS)' : '1080p (HD)') : (isHighFps ? '720p (60 FPS)' : '720p (HD)');
+                                const fpsStatus = isHighFps ? '60.0 FPS Malar (True 60fps Native)' : `${sourceFps.toFixed(1)} FPS Malar (True Native CFR)`;
 
-                            await sock.sendMessage(remoteJid, {
-                                text:
-                                    `PENGOPTIMUMAN VIDEO SELESAI\n\n` +
-                                    `Sila majukan (forward) video di atas terus ke Status WhatsApp anda tanpa melakukan sebarang suntingan atau pemotongan (trim) bagi mengekalkan kestabilan dan kualiti video.\n\n` +
-                                    `Spesifikasi Output:\n` +
-                                    `• Resolusi: ${resLabel}${motionNote}\n` +
-                                    `• Kadar Bingkai: ${fpsStatus}\n` +
-                                    `• Bitrate: ${vBitrate} kbps (Sasaran ~15.2 MB Passthrough)\n` +
-                                    `• Penalaan: ${casNote} | aq-mode 3 | Audio 96k\n` +
-                                    `• Profil Warna: ${colorNote}${trimNote}`
-                            });
+                                console.log(`[FFmpeg Transcode WA] ${resLabel} @ ${vBitrate} kbps | CAS: 0.35 | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Mod: ${isHighFps ? 'True 60fps Native' : 'Native CFR'} | Durasi: ${durationSec.toFixed(1)}s`);
+                                await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
+
+                                await sendCachedMessage(sock, remoteJid, {
+                                    video: { stream: fs.createReadStream(outputPath) },
+                                    mimetype: 'video/mp4'
+                                }, { quoted: msg });
+
+                                try {
+                                    await sock.sendMessage(remoteJid, {
+                                        react: { text: '✅', key: msg.key }
+                                    });
+                                } catch {}
+
+                                const hasCas = checkCasSupport(ffmpegPath);
+                                const casNote = hasCas ? 'CAS 0.35 (Gred 4K)' : 'Unsharp Adaptive';
+                                const trimNote = isTrimmed ? '\n• Catatan: Video telah dipotong kepada 60 saat pertama mengikut had WhatsApp Status.' : '';
+                                const motionNote = isHighFps ? ' (True 60fps Native)' : ' (True Native CFR)';
+                                const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped Sinematik)' : 'BT.709 Asal (SDR True Colors)';
+
+                                await sendHumanReply(sock, remoteJid, {
+                                    text:
+                                        `✓ *PENGOPTIMUMAN VIDEO SELESAI*\n\n` +
+                                        `Sila majukan (forward) video di atas terus ke WhatsApp Status anda tanpa sebarang suntingan atau trim bagi mengekalkan kualiti asal.\n\n` +
+                                        `Spesifikasi Output:\n` +
+                                        `• Resolusi: ${resLabel}${motionNote}\n` +
+                                        `• Kadar Bingkai: ${fpsStatus}\n` +
+                                        `• Bitrate: ${vBitrate} kbps (Sasaran ~15.2 MB Passthrough)\n` +
+                                        `• Penalaan: ${casNote} | aq-mode 3 | Audio 96k\n` +
+                                        `• Profil Warna: ${colorNote}${trimNote}`
+                                });
+                            }
 
                             if (user && user.status === 'ACTIVE' && (!user.refSentToExisting || !user.refCode)) {
                                 if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
                                 user.refSentToExisting = true;
                                 saveUsers(users);
 
-                                await sock.sendMessage(remoteJid, {
+                                await sendHumanReply(sock, remoteJid, {
                                     text:
-                                        `🎁 *KOD REFERRAL PERIBADI ANDA: ${user.refCode}*\n\n` +
-                                        `Sebagai ahli aktif ${BOT_NAME}, anda layak menikmati ganjaran percuma!\n\n` +
-                                        `Ajak 3 rakan anda melanggan menggunakan kod referral anda (*${user.refCode}*), dan akaun anda akan menerima *PERCUMA 1 BULAN (30 Hari)* langganan tambahan secara automatik! 🚀`
+                                        `✓ *KOD REFERRAL PERIBADI ANDA: ${user.refCode}*\n\n` +
+                                        `Sebagai ahli active ${BOT_NAME}, ajak 3 rakan anda melanggan menggunakan kod *${user.refCode}* untuk menerima 1 bulan (30 hari) langganan tambahan secara percuma.`
                                 });
                             }
 
-                            console.log(`[Selesai] Video berjaya dihantar ke ${remoteJid}.`);
+                            console.log(`[Selesai] Video ${targetMode} berjaya dihantar ke ${remoteJid}.`);
 
                         } catch (err) {
                             console.error('[Ralat Pemprosesan Video]', err);
                             try {
-                                await sock.sendMessage(remoteJid, {
+                                await sendHumanReply(sock, remoteJid, {
                                     text: `Ralat: Proses pengoptimuman video gagal dilaksanakan. (${err.message})`
                                 }, { quoted: msg });
                             } catch {}
@@ -4930,18 +5457,18 @@ async function startBot() {
 
                 if (!enqueueResult.success) {
                     if (enqueueResult.reason === 'full') {
-                        await sock.sendMessage(remoteJid, {
-                            text: `MAKLUMAN: Kapasiti antrian pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} video). Sila tunggu beberapa minit sebelum menghantar semula video anda.`
+                        await sendHumanReply(sock, remoteJid, {
+                            text: `MAKLUMAN: Kapasiti giliran pemprosesan sedang penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE} video). Sila tunggu beberapa minit sebelum menghantar semula video anda.`
                         }, { quoted: msg });
                     } else if (enqueueResult.reason === 'duplicate') {
-                        await sock.sendMessage(remoteJid, {
-                            text: `PERINGATAN: Anda sudah mempunyai satu media yang sedang menunggu atau diproses dalam antrian. Sila tunggu video semasa selesai sebelum menghantar video baharu.`
+                        await sendHumanReply(sock, remoteJid, {
+                            text: `PERINGATAN: Anda sudah mempunyai satu media yang sedang diproses dalam giliran. Sila tunggu video semasa selesai sebelum menghantar video baharu.`
                         }, { quoted: msg });
                     }
                 } else {
                     if (enqueueResult.position > 1) {
-                        await sock.sendMessage(remoteJid, {
-                            text: `Video diterima. Anda berada di giliran ke-${enqueueResult.position} dalam antrian pemprosesan. Sistem akan memaklumkan anda sebaik sahaja pemprosesan bermula.`
+                        await sendHumanReply(sock, remoteJid, {
+                            text: `Video diterima (Mod ${targetMode === 'TT' ? 'TikTok 1080p 60fps' : 'WhatsApp Status HD'}). Anda berada di giliran ke-${enqueueResult.position}. Sistem akan memproses sebaik sahaja giliran tiba.`
                         }, { quoted: msg });
                     }
                 }
@@ -4950,4 +5477,528 @@ async function startBot() {
     });
 }
 
+// =====================================================================
+// TELEGRAM BOT INTEGRATION (BERKONGSI PANGKALAN DATA & HITPAY)
+// =====================================================================
+async function tgApi(method, body) {
+    if (!TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN not configured');
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {})
+    });
+    const data = await res.json();
+    if (!data.ok) {
+        throw new Error(data.description || `Telegram API error on ${method}`);
+    }
+    return data.result;
+}
+
+async function sendTelegramMessage(chatId, text, replyToMessageId = null) {
+    if (!TELEGRAM_BOT_TOKEN || !chatId) return null;
+    try {
+        const payload = { chat_id: String(chatId), text: String(text || '') };
+        if (replyToMessageId) payload.reply_to_message_id = replyToMessageId;
+        return await tgApi('sendMessage', payload);
+    } catch (err) {
+        console.error(`[TELEGRAM] Gagal hantar mesej ke ${chatId}:`, err.message);
+        return null;
+    }
+}
+
+async function sendTelegramMedia(chatId, mediaType, filePath, caption, replyToMessageId = null) {
+    if (!TELEGRAM_BOT_TOKEN || !chatId) return null;
+    const buf = await fs.promises.readFile(filePath);
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    if (caption) form.append('caption', caption);
+    if (replyToMessageId) form.append('reply_to_message_id', String(replyToMessageId));
+
+    const fileName = path.basename(filePath);
+    if (mediaType === 'photo') {
+        form.append('photo', new Blob([buf], { type: 'image/jpeg' }), fileName);
+        const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+            method: 'POST',
+            body: form
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.description || 'Telegram sendPhoto failed');
+        return data.result;
+    } else {
+        form.append('supports_streaming', 'true');
+        form.append('video', new Blob([buf], { type: 'video/mp4' }), fileName);
+        const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo`, {
+            method: 'POST',
+            body: form
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.description || 'Telegram sendVideo failed');
+        return data.result;
+    }
+}
+
+async function downloadTelegramFile(fileId, maxBytes = 20 * 1024 * 1024, destPath) {
+    const fileInfo = await tgApi('getFile', { file_id: fileId });
+    if (fileInfo.file_size && fileInfo.file_size > maxBytes) {
+        throw new Error(`Saiz file melebihi had maksimum 20 MB Telegram Bot (${(fileInfo.file_size / (1024 * 1024)).toFixed(1)} MB).`);
+    }
+    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+    const res = await fetch(fileUrl);
+    if (!res.ok) throw new Error(`Gagal muat turun file Telegram (HTTP ${res.status})`);
+    const arrayBuf = await res.arrayBuffer();
+    if (arrayBuf.byteLength > maxBytes) {
+        throw new Error(`Saiz file melebihi had maksimum 20 MB Telegram Bot (${(arrayBuf.byteLength / (1024 * 1024)).toFixed(1)} MB).`);
+    }
+    await fs.promises.writeFile(destPath, Buffer.from(arrayBuf));
+    return destPath;
+}
+
+function getOrCreateTelegramUser(users, chatId, displayName) {
+    const tgKey = `tg_${chatId}`;
+    let user = users[tgKey] || Object.values(users).find(u => String(u.telegramChatId || '') === String(chatId));
+    if (!user) {
+        user = normalizeUserTiers({
+            phone: tgKey,
+            telegramChatId: String(chatId),
+            name: displayName || `TG_${chatId}`,
+            status: 'NEW',
+            waExpiredAt: null,
+            ttExpiredAt: null,
+            preferredMode: 'WA',
+            refCode: null,
+            referredBy: null,
+            paidReferrals: 0,
+            totalPaidReferrals: 0,
+            refSentToExisting: false,
+            reminded3Days: false,
+            jid: null,
+            altJid: null
+        });
+        users[tgKey] = user;
+        saveUsers(users);
+    } else {
+        normalizeUserTiers(user);
+        if (!user.telegramChatId) {
+            user.telegramChatId = String(chatId);
+            saveUsers(users);
+        }
+    }
+    return { tgKey, user };
+}
+
+async function handleTelegramMessage(tgMsg) {
+    if (!tgMsg || !tgMsg.chat) return;
+    const chatId = String(tgMsg.chat.id);
+    const msgId = tgMsg.message_id;
+    const fromName = [tgMsg.from?.first_name, tgMsg.from?.last_name].filter(Boolean).join(' ') || tgMsg.from?.username || `User ${chatId}`;
+    const textContent = (tgMsg.text || tgMsg.caption || '').trim();
+    const textParts = textContent.split(/\s+/);
+    const cmdRaw = (textParts[0] || '').toLowerCase();
+    const cmd = cmdRaw.split('@')[0];
+    const upperText = textContent.toUpperCase();
+
+    const users = loadUsers();
+    const { tgKey, user } = getOrCreateTelegramUser(users, chatId, fromName);
+    const isSuperAdmin = isPrimaryAdmin(user.phone) || isPrimaryAdmin(user.linkedWaPhone);
+    const waActive = hasWaAccess(user, isSuperAdmin);
+    const ttActive = hasTtAccess(user, isSuperAdmin);
+    const isActive = waActive || ttActive;
+    const cleanPkgTemplate = PACKAGE_TEMPLATE.replace(/\*/g, '');
+
+    if (['/tt', 'tt', '/tiktok', 'tiktok'].includes(cmd)) {
+        user.preferredMode = 'TT';
+        saveUsers(users);
+        if (ttActive) {
+            const ttExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.ttExpiredAt).toLocaleDateString('ms-MY');
+            await sendTelegramMessage(chatId,
+                `✓ MOD TIKTOK 1080P 60FPS AKTIF\n\n` +
+                `Semua video yang anda hantar selepas ini akan diproses menggunakan profil TikTok HD (1080p 60fps, High Bitrate).\n\n` +
+                `• Status TikTok HD: Aktif sehingga ${ttExp}\n` +
+                `• Untuk kembali ke mod WhatsApp Status HD, hantar /wa`,
+                msgId
+            );
+        } else if (waActive) {
+            await sendTelegramMessage(chatId,
+                `Mod pilihan ditukar ke TikTok 1080p 60fps, namun pelan aktif anda kini hanya WhatsApp Status HD.\n\nBalas 4 untuk upgrade tambah TikTok HD (RM10/bulan), atau /wa untuk kembali ke mod WhatsApp.`,
+                msgId
+            );
+        } else {
+            await sendTelegramMessage(chatId,
+                `Mod pilihan ditetapkan ke TikTok 1080p 60fps, namun anda belum mempunyai langganan aktif.\n\nBalas 2 untuk TikTok HD (RM10/bulan) atau 3 untuk Combo WA + TT (RM20/bulan).`,
+                msgId
+            );
+        }
+        return;
+    }
+
+    if (['/wa', 'wa', '/whatsapp', 'whatsapp'].includes(cmd)) {
+        user.preferredMode = 'WA';
+        saveUsers(users);
+        if (waActive) {
+            const waExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.waExpiredAt).toLocaleDateString('ms-MY');
+            await sendTelegramMessage(chatId,
+                `✓ MOD WHATSAPP STATUS HD AKTIF\n\n` +
+                `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil WhatsApp Status HD (60fps + QHD+).\n\n` +
+                `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
+                `• Untuk bertukar ke mod TikTok 1080p 60fps, hantar /tt`,
+                msgId
+            );
+        } else if (ttActive) {
+            await sendTelegramMessage(chatId,
+                `Mod pilihan ditukar ke WhatsApp Status HD, namun pelan aktif anda kini hanya TikTok HD.\n\nBalas 1 untuk WhatsApp Status HD (RM10/bulan), atau /tt untuk kembali ke mod TikTok.`,
+                msgId
+            );
+        } else {
+            await sendTelegramMessage(chatId,
+                `Mod pilihan ditetapkan ke WhatsApp Status HD, namun anda belum mempunyai langganan aktif.\n\nBalas 1 untuk WhatsApp Status HD (RM10/bulan) atau 3 untuk Combo WA + TT (RM20/bulan).`,
+                msgId
+            );
+        }
+        return;
+    }
+
+    if (cmd === '/link') {
+        const targetCode = (textParts[1] || '').trim().toUpperCase();
+        if (!targetCode) {
+            await sendTelegramMessage(chatId, `Sila sertakan kod rujukan akaun anda. Contoh: /link ${user.refCode || 'KODANDA'}`, msgId);
+            return;
+        }
+        const targetAcc = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === targetCode);
+        if (!targetAcc) {
+            await sendTelegramMessage(chatId, `Kod rujukan ${targetCode} tidak ditemui. Sila semak kod anda menggunakan arahan STATUS di WhatsApp.`, msgId);
+            return;
+        }
+        if (targetAcc === user) {
+            await sendTelegramMessage(chatId, `Kod ${targetCode} adalah kod akaun Telegram ini sendiri.`, msgId);
+            return;
+        }
+        normalizeUserTiers(user);
+        normalizeUserTiers(targetAcc);
+        const mergedWa = Math.max(user.waExpiredAt || 0, targetAcc.waExpiredAt || 0);
+        const mergedTt = Math.max(user.ttExpiredAt || 0, targetAcc.ttExpiredAt || 0);
+        const nowMs = Date.now();
+
+        user.waExpiredAt = mergedWa;
+        user.ttExpiredAt = mergedTt;
+        user.expiredAt = Math.max(mergedWa, mergedTt);
+        targetAcc.waExpiredAt = mergedWa;
+        targetAcc.ttExpiredAt = mergedTt;
+        targetAcc.expiredAt = Math.max(mergedWa, mergedTt);
+
+        if (mergedWa > nowMs || mergedTt > nowMs) {
+            user.status = 'ACTIVE';
+            targetAcc.status = 'ACTIVE';
+        }
+        targetAcc.telegramChatId = chatId;
+        user.telegramChatId = chatId;
+        if (targetAcc.phone && !String(targetAcc.phone).startsWith('tg_')) {
+            user.linkedWaPhone = targetAcc.phone;
+        }
+        saveUsers(users);
+
+        const waStr = mergedWa > nowMs ? new Date(mergedWa).toLocaleDateString('ms-MY') : 'Tiada';
+        const ttStr = mergedTt > nowMs ? new Date(mergedTt).toLocaleDateString('ms-MY') : 'Tiada';
+        await sendTelegramMessage(chatId,
+            `✓ AKAUN BERJAYA DIPAUTKAN\n\n` +
+            `Langganan anda kini diselaraskan antara WhatsApp dan Telegram:\n` +
+            `• WhatsApp Status HD: ${waStr}\n` +
+            `• TikTok 1080p 60fps HD: ${ttStr}`,
+            msgId
+        );
+        return;
+    }
+
+    const selectedPkg = PACKAGES[textContent];
+    if (selectedPkg && !tgMsg.document && !tgMsg.video && !tgMsg.photo) {
+        if (selectedPkg.requiresWa && !waActive) {
+            await sendTelegramMessage(chatId,
+                `Pakej 4 (Upgrade TikTok HD RM10) khas untuk ahli yang sudah mempunyai langganan WhatsApp Status HD aktif.\n\n` +
+                `Sila pilih:\n• Balas 2 untuk TikTok 1080p 60fps HD Sahaja (RM10/bulan)\n• Balas 3 untuk Combo WhatsApp + TikTok HD (RM20/bulan)`,
+                msgId
+            );
+            return;
+        }
+        try {
+            const hitpayRes = await createHitPayPaymentRequest({
+                userKey: tgKey,
+                phone: tgKey,
+                pushName: fromName,
+                planCode: selectedPkg.planCode,
+                days: selectedPkg.days,
+                amount: selectedPkg.amount,
+                purpose: `${BOT_NAME} (Telegram) - ${selectedPkg.title}`
+            });
+            if (!isActive) user.status = 'WAITING';
+            saveUsers(users);
+
+            await sendTelegramMessage(chatId,
+                `✓ PAUTAN PEMBAYARAN RASMI HITPAY\n\n` +
+                `Pakej: ${selectedPkg.title} (${selectedPkg.price} / ${selectedPkg.days} Hari)\n\n` +
+                `Sila klik link di bawah untuk membuat bayaran (DuitNow QR, FPX, eWallet & Kad):\n` +
+                `${hitpayRes.url}\n\n` +
+                `Akses anda akan diaktifkan secara automatik sebaik sahaja transaksi selesai.`,
+                msgId
+            );
+        } catch (err) {
+            await sendTelegramMessage(chatId, `Maaf, terdapat ralat semasa menjana link HitPay: ${err.message}`, msgId);
+        }
+        return;
+    }
+
+    if (['/bayar', 'bayar', '/pakej', 'pakej', '/upgrade', 'upgrade'].includes(cmd)) {
+        if (!isActive) user.status = 'WAITING';
+        saveUsers(users);
+        await sendTelegramMessage(chatId, `MAKLUMAT PAKEJ LANGGANAN (${BOT_NAME})\n\n${cleanPkgTemplate}`, msgId);
+        return;
+    }
+
+    if (['/start', 'start', '/menu', 'menu', '/help', 'help'].includes(cmd)) {
+        if (isActive) {
+            if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
+            user.refSentToExisting = true;
+            saveUsers(users);
+
+            const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1)');
+            const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : (waActive ? 'Tidak Active (Balas 4 untuk upgrade RM10)' : 'Tidak Active (Balas 2)'));
+            const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+
+            await sendTelegramMessage(chatId,
+                `✓ SELAMAT KEMBALI KE ${BOT_NAME} (TELEGRAM)\n\n` +
+                `• Mod Semasa: ${currentMode === 'TT' ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD'}\n` +
+                `• WhatsApp Status HD: ${waStr}\n` +
+                `• TikTok 1080p 60fps HD: ${ttStr}\n` +
+                `• Kod Referral: ${user.refCode}\n\n` +
+                `Panduan Ringkas:\n` +
+                `• Hantar video atau foto sebagai File (tanpa compression, maks 20 MB mengikut had Telegram Bot API).\n` +
+                `• Taip /tt untuk mod TikTok 1080p 60fps, atau /wa untuk mod WhatsApp Status HD.\n` +
+                `• Ada langganan WhatsApp sedia ada? Taip /link <KOD_REFERRAL_WA_ANDA>.`,
+                msgId
+            );
+        } else {
+            await sendTelegramMessage(chatId,
+                `Selamat datang ke ${BOT_NAME} (Telegram).\n\n${cleanPkgTemplate}\n\n` +
+                `Cara Mendaftar:\n` +
+                `1. Balas nombor 1, 2, 3, atau 4 untuk menjana link bayaran HitPay automatik.\n` +
+                `2. Atau jika anda sudah melanggan di WhatsApp, hantar /link <KOD_REFERRAL_ANDA>.`,
+                msgId
+            );
+        }
+        return;
+    }
+
+    if (['/status', 'status', 'baki'].includes(cmd)) {
+        if (isActive) {
+            const waDays = isSuperAdmin ? 9999 : (waActive ? Math.ceil((user.waExpiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0);
+            const ttDays = isSuperAdmin ? 9999 : (ttActive ? Math.ceil((user.ttExpiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0);
+            const waLine = isSuperAdmin ? 'Active (Super Admin Unlimited)' : (waActive ? `Active (${waDays} hari lagi, luput ${new Date(user.waExpiredAt).toLocaleDateString('ms-MY')})` : 'Tiada');
+            const ttLine = isSuperAdmin ? 'Active (Super Admin Unlimited)' : (ttActive ? `Active (${ttDays} hari lagi, luput ${new Date(user.ttExpiredAt).toLocaleDateString('ms-MY')})` : 'Tiada');
+            await sendTelegramMessage(chatId,
+                `✓ STATUS KEAHLIAN ANDA\n\n` +
+                `• Nama: ${user.name}\n` +
+                `• Mod Pilihan: ${(user.preferredMode || 'WA') === 'TT' ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD'}\n` +
+                `• WhatsApp Status HD: ${waLine}\n` +
+                `• TikTok 1080p 60fps HD: ${ttLine}\n` +
+                `• Kod Referral: ${user.refCode || '-'}\n` +
+                `• Kemajuan Ganjaran: ${user.paidReferrals || 0}/3 rakan melanggan`,
+                msgId
+            );
+        } else {
+            await sendTelegramMessage(chatId,
+                `STATUS: TIADA LANGGANAN ACTIVE\n\nSila hantar /start untuk melihat pakej langganan atau /link <KOD> jika sudah melanggan di WhatsApp.`,
+                msgId
+            );
+        }
+        return;
+    }
+
+    if (textContent && !tgMsg.photo && !tgMsg.video && !tgMsg.document) {
+        const candidateCode = (cmd === '/ref' && textParts[1]) ? textParts[1].toUpperCase() : upperText;
+        const matchedReferrer = Object.values(users).find(u => u.refCode && u.refCode.toUpperCase() === candidateCode);
+        if (matchedReferrer && matchedReferrer !== user) {
+            if (isActive) {
+                await sendTelegramMessage(chatId, `Akaun anda sudah berstatus active. Kod referral hanya sah untuk pendaftaran baharu atau pembaharuan langganan yang tamat.`, msgId);
+                return;
+            }
+            user.referredBy = matchedReferrer.phone;
+            user.status = 'WAITING';
+            saveUsers(users);
+            await sendTelegramMessage(chatId, `✓ KOD REFERRAL DISAHKAN\n\nAnda dijemput oleh ${matchedReferrer.name} (${matchedReferrer.refCode}).\n\n${cleanPkgTemplate}`, msgId);
+            return;
+        }
+    }
+
+    const doc = tgMsg.document;
+    const vid = tgMsg.video;
+    const photos = Array.isArray(tgMsg.photo) ? tgMsg.photo : [];
+    const docName = (doc?.file_name || '').trim();
+    const docExt = path.extname(docName).toLowerCase();
+    const docMime = (doc?.mime_type || '').toLowerCase();
+
+    const VIDEO_EXTS = new Set(['.mp4', '.mov', '.m4v', '.mkv', '.avi', '.webm', '.3gp']);
+    const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif']);
+
+    const isTgVideo = !!vid || (!!doc && (docMime.startsWith('video/') || VIDEO_EXTS.has(docExt)));
+    const isTgHeic = !!doc && !isTgVideo && (docExt === '.heic' || docExt === '.heif' || docMime.includes('heic') || docMime.includes('heif'));
+    const isTgImage = photos.length > 0 || (!!doc && !isTgVideo && (docMime.startsWith('image/') || IMAGE_EXTS.has(docExt)));
+
+    if (!isTgVideo && !isTgImage) return;
+
+    if (!isActive) {
+        await sendTelegramMessage(chatId,
+            `AKSES DISEKAT: LANGGANAN DIPERLUKAN\n\nFungsi pemprosesan video 60fps & foto QHD+ hanya tersedia untuk ahli active. Hantar /start untuk melanggan atau /link <KOD>.`,
+            msgId
+        );
+        return;
+    }
+
+    const captionUpper = (tgMsg.caption || '').trim().toUpperCase();
+    let effectiveMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+    if (/\b(TT|TIKTOK)\b/.test(captionUpper)) effectiveMode = 'TT';
+    else if (/\b(WA|WHATSAPP)\b/.test(captionUpper)) effectiveMode = 'WA';
+
+    if (effectiveMode === 'TT' && !ttActive) {
+        await sendTelegramMessage(chatId,
+            `Pelan anda kini hanya meliputi WhatsApp Status HD. Balas 4 untuk upgrade TikTok HD (RM10/bulan), atau hantar /wa untuk proses mod WhatsApp.`,
+            msgId
+        );
+        return;
+    }
+    if (effectiveMode === 'WA' && !waActive) {
+        await sendTelegramMessage(chatId,
+            `Pelan anda kini hanya meliputi TikTok HD. Balas 1 untuk WhatsApp Status HD (RM10/bulan) atau 3 untuk Combo (RM20/bulan), atau hantar /tt untuk proses mod TikTok.`,
+            msgId
+        );
+        return;
+    }
+
+    const MAX_TG_BYTES = 20 * 1024 * 1024;
+    if (isTgImage) {
+        const fileObj = photos.length > 0 ? photos[photos.length - 1] : doc;
+        if (fileObj.file_size && fileObj.file_size > MAX_TG_BYTES) {
+            await sendTelegramMessage(chatId, `Maaf, saiz foto (${(fileObj.file_size / (1024 * 1024)).toFixed(1)} MB) melebihi had muat turun 20 MB Telegram Bot API.`, msgId);
+            return;
+        }
+        const heicExt = docExt === '.heif' ? '.heif' : '.heic';
+        const enqueueResult = videoQueue.enqueue({
+            userId: tgKey,
+            run: async () => {
+                const fileId = `tg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+                const rawHeicPath = isTgHeic ? path.join(TEMP_DIR, `raw_${fileId}${heicExt}`) : null;
+                const inputPath = path.join(TEMP_DIR, `input_${fileId}.jpg`);
+                const outputPath = path.join(TEMP_DIR, `status_clear_photo_${fileId}.jpg`);
+                try {
+                    await downloadTelegramFile(fileObj.file_id, MAX_TG_BYTES, isTgHeic ? rawHeicPath : inputPath);
+                    if (isTgHeic) {
+                        let heicBuf = await fs.promises.readFile(rawHeicPath);
+                        let jpgBuf = await heicConvert({ buffer: heicBuf, format: 'JPEG', quality: 0.98 });
+                        await fs.promises.writeFile(inputPath, jpgBuf);
+                        heicBuf = null;
+                        jpgBuf = null;
+                    }
+                    const { sizeBytes, hasCas, usedQ } = await enhanceQhdPhoto(inputPath, outputPath, ffmpegPath);
+                    const sizeKB = (sizeBytes / 1024).toFixed(1);
+                    const sharpNote = hasCas ? 'CAS 0.35 (Kontras Adaptif)' : 'Lanczos Sharp Resample';
+                    await sendTelegramMedia(chatId, 'photo', outputPath,
+                        `✓ PENGOPTIMUMAN FOTO SELESAI\nResolusi: 2560px QHD+ | ${sharpNote} | ${sizeKB} KB (JPEG Q=${usedQ})`,
+                        msgId
+                    );
+                } catch (err) {
+                    await sendTelegramMessage(chatId, `Ralat pemprosesan foto: ${err.message}`, msgId);
+                } finally {
+                    if (rawHeicPath && fs.existsSync(rawHeicPath)) { try { fs.unlinkSync(rawHeicPath); } catch {} }
+                    if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
+                    if (fs.existsSync(outputPath)) { try { fs.unlinkSync(outputPath); } catch {} }
+                    if (global.gc) { try { global.gc(); } catch {} }
+                }
+            }
+        });
+        if (!enqueueResult.success) {
+            await sendTelegramMessage(chatId, enqueueResult.reason === 'full' ? `Giliran penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE}). Cuba lagi sebentar.` : `Media anda masih diproses dalam giliran.`, msgId);
+        }
+        return;
+    }
+
+    if (isTgVideo) {
+        const fileObj = vid || doc;
+        if (fileObj.file_size && fileObj.file_size > MAX_TG_BYTES) {
+            await sendTelegramMessage(chatId,
+                `Maaf, saiz video (${(fileObj.file_size / (1024 * 1024)).toFixed(1)} MB) melebihi had 20 MB Telegram Bot API.\n\nUntuk video bersaiz besar sehingga 100MB, anda boleh hantar melalui WhatsApp bot menggunakan akaun yang dipautkan (/link).`,
+                msgId
+            );
+            return;
+        }
+        const videoInputExt = VIDEO_EXTS.has(docExt) ? docExt : '.mp4';
+        const targetMode = effectiveMode === 'TT' ? 'TT' : 'WA';
+        const enqueueResult = videoQueue.enqueue({
+            userId: tgKey,
+            run: async () => {
+                const fileId = `tg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+                const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
+                const outputPath = path.join(TEMP_DIR, `${targetMode === 'TT' ? 'tiktok_hd' : 'status_clear'}_60fps_${fileId}.mp4`);
+                try {
+                    await downloadTelegramFile(fileObj.file_id, MAX_TG_BYTES, inputPath);
+                    const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
+                    if (targetMode === 'TT') {
+                        await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR);
+                        await sendTelegramMedia(chatId, 'video', outputPath,
+                            `✓ VIDEO TIKTOK 1080P 60FPS SELESAI\nProfil: 1080p Full HD | ${sourceFps >= 48 ? '60fps' : sourceFps.toFixed(1) + 'fps'} | CRF 18 (10M maxrate) | CAS 0.55`,
+                            msgId
+                        );
+                    } else {
+                        const effectiveDuration = Math.min(durationSec, 60);
+                        const rawBitrate = Math.floor(((15.2 * 8192) / effectiveDuration) - 96);
+                        const vBitrate = Math.max(3500, Math.min(11500, rawBitrate));
+                        const targetShortSide = vBitrate >= 4600 ? 1080 : 720;
+                        await transcode60fpsVideo(inputPath, outputPath, ffmpegPath, vBitrate, targetShortSide, sourceFps, isHDR);
+                        await sendTelegramMedia(chatId, 'video', outputPath,
+                            `✓ VIDEO WHATSAPP STATUS HD SELESAI\nProfil: ${targetShortSide}p | ${sourceFps >= 48 ? '60fps' : sourceFps.toFixed(1) + 'fps'} | ${vBitrate} kbps`,
+                            msgId
+                        );
+                    }
+                } catch (err) {
+                    await sendTelegramMessage(chatId, `Ralat pemprosesan video: ${err.message}`, msgId);
+                } finally {
+                    if (fs.existsSync(inputPath)) { try { fs.unlinkSync(inputPath); } catch {} }
+                    if (fs.existsSync(outputPath)) { try { fs.unlinkSync(outputPath); } catch {} }
+                    if (global.gc) { try { global.gc(); } catch {} }
+                }
+            }
+        });
+        if (!enqueueResult.success) {
+            await sendTelegramMessage(chatId, enqueueResult.reason === 'full' ? `Giliran penuh (${MAX_QUEUE_SIZE}/${MAX_QUEUE_SIZE}). Cuba lagi sebentar.` : `Media anda masih diproses dalam giliran.`, msgId);
+        }
+    }
+}
+
+async function startTelegramBot() {
+    if (!TELEGRAM_BOT_TOKEN) return;
+    console.log('[TELEGRAM BOT] Memulakan long-polling Telegram Bot API...');
+    let offset = 0;
+    while (true) {
+        try {
+            const updates = await tgApi('getUpdates', {
+                offset,
+                timeout: 25,
+                allowed_updates: ['message']
+            });
+            if (Array.isArray(updates)) {
+                for (const upd of updates) {
+                    offset = upd.update_id + 1;
+                    if (upd.message) {
+                        handleTelegramMessage(upd.message).catch(err => {
+                            console.error('[TELEGRAM] Ralat pengendalian mesej:', err.message);
+                        });
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('[TELEGRAM] Ralat getUpdates:', err.message);
+            await new Promise(r => setTimeout(r, 5000));
+        }
+    }
+}
+
 startBot();
+if (TELEGRAM_BOT_TOKEN) {
+    startTelegramBot();
+}
