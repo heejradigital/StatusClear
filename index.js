@@ -5927,24 +5927,21 @@ async function startBot() {
                             const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
 
                             if (targetMode === 'TT') {
-                                const isTrimmedTT = durationSec > 90;
                                 console.log(`[FFmpeg TikTok] 1080p60 CRF 17 (15M maxrate) | Dual Sharpen + hqdn3d + Audio Norm | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Durasi: ${durationSec.toFixed(1)}s`);
                                 await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR);
 
-                                const trimNoteTT = isTrimmedTT ? '\n• Catatan: Video dipotong ke 90 saat pertama.' : '';
-                                const colorNoteTT = isHDR ? 'BT.709 (HDR Tone-Mapped)' : 'BT.709 Vivid';
+                                const ttSent = await safeSendMessage(sock, remoteJid, {
+                                    document: fs.readFileSync(outputPath),
+                                    mimetype: 'video/mp4',
+                                    fileName: 'TikTok_HD_' + Date.now() + '.mp4'
+                                }, { quoted: msg });
+                                if (ttSent && ttSent.key && ttSent.key.id && ttSent.message) {
+                                    storeCachedMessage(ttSent.key.id, ttSent.message);
+                                }
 
                                 await sendCachedMessage(sock, remoteJid, {
-                                    document: { stream: fs.createReadStream(outputPath) },
-                                    mimetype: 'video/mp4',
-                                    fileName: path.basename(outputPath),
-                                    caption:
-                                        `✓ *VIDEO TIKTOK 1080P 60FPS SIAP*\n\n` +
-                                        `Simpan *file* ini terus ke galeri anda (dihantar sebagai document supaya kualiti 1080p60 kekal tanpa mampatan).\n\n` +
-                                        `• Profil: 1080p 60fps | CRF 17 (15 Mbps) | ${colorNoteTT}\n` +
-                                        `• Audio: Highpass + Dynamic Normalized (192kbps)${trimNoteTT}\n\n` +
-                                        `*Tip Upload:* Sebelum post di TikTok, pastikan tetapan *Allow high-quality uploads* diaktifkan.`
-                                }, { quoted: msg });
+                                    text: 'Video TikTok 1080p 60fps HD siap diproses. Simpan fail di atas ke Gallery dan pastikan tetapan Allow high-quality uploads diaktifkan sebelum post di TikTok.'
+                                });
 
                                 try {
                                     await sock.sendMessage(remoteJid, {
@@ -5963,7 +5960,6 @@ async function startBot() {
                                 }
 
                                 const totalParts = durationSec <= 60 ? 1 : Math.ceil(durationSec / 60);
-                                const colorNote = isHDR ? 'BT.709 (HDR Tone-Mapped)' : 'BT.709 Vivid';
 
                                 for (let partIdx = 0; partIdx < totalParts; partIdx++) {
                                     const startSec = partIdx * 60;
@@ -5976,20 +5972,23 @@ async function startBot() {
                                         console.log(`[FFmpeg Transcode WA] Bahagian ${partIdx + 1}/${totalParts} | 1080p60 @ ${targetVideoKbps} kbps (<16.5MB) | Durasi: ${clipDuration.toFixed(1)}s | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR' : 'SDR'})`);
                                         await transcode60fpsVideo(inputPath, partOutputPath, ffmpegPath, targetVideoKbps, sourceFps, isHDR, startSec, clipDuration);
 
-                                        const partCaption = totalParts === 1
-                                            ? `✓ *VIDEO WHATSAPP STATUS HD SIAP*\n\nSimpan *file* ini terus ke galeri dan muat naik ke WhatsApp Status tanpa trim/edit supaya kualiti 1080p60 kekal tajam.\n\n• Profil: 1080p 60fps | ${targetVideoKbps} kbps (<16.5MB Bypass) | ${colorNote}\n• Audio: Highpass + Dynamic Normalized (160kbps)`
-                                            : `✓ *VIDEO WHATSAPP STATUS HD — Bahagian ${partIdx + 1}/${totalParts}*\n\nSimpan *file* ini terus ke galeri dan muat naik mengikut turutan ke WhatsApp Status.\n\n• Profil: 1080p 60fps | ${targetVideoKbps} kbps (<16.5MB Bypass)`;
-
-                                        await sendCachedMessage(sock, remoteJid, {
-                                            document: { stream: fs.createReadStream(partOutputPath) },
-                                            mimetype: 'video/mp4',
-                                            fileName: partFileName,
-                                            caption: partCaption
+                                        const waSent = await safeSendMessage(sock, remoteJid, {
+                                            video: fs.readFileSync(partOutputPath),
+                                            mimetype: 'video/mp4'
                                         }, { quoted: msg });
+                                        if (waSent && waSent.key && waSent.key.id && waSent.message) {
+                                            storeCachedMessage(waSent.key.id, waSent.message);
+                                        }
                                     } finally {
                                         if (fs.existsSync(partOutputPath)) { try { fs.unlinkSync(partOutputPath); } catch {} }
                                     }
                                 }
+
+                                await sendCachedMessage(sock, remoteJid, {
+                                    text: totalParts === 1
+                                        ? 'Video HD siap diproses. Anda boleh terus forward video di atas ke WhatsApp Status.'
+                                        : `Video HD siap diproses (${totalParts} bahagian, 60 saat setiap satu). Sila forward mengikut turutan ke WhatsApp Status.`
+                                });
 
                                 try {
                                     await sock.sendMessage(remoteJid, {
@@ -6569,8 +6568,9 @@ async function handleTelegramMessage(tgMsg) {
                     const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
                     if (targetMode === 'TT') {
                         await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR);
-                        await sendTelegramMedia(chatId, 'document', outputPath,
-                            `✓ VIDEO TIKTOK 1080P 60FPS SIAP\nSimpan file ini terus ke galeri anda (tanpa mampatan).\n• Profil: 1080p60 | CRF 17 (15 Mbps) | Audio 192k Normalized\nTip: Aktifkan "Allow high-quality uploads" sebelum post di TikTok.`,
+                        await sendTelegramMedia(chatId, 'document', outputPath, null, msgId);
+                        await sendTelegramMessage(chatId,
+                            'Video TikTok 1080p 60fps HD siap diproses. Simpan fail di atas ke Gallery dan pastikan tetapan Allow high-quality uploads diaktifkan sebelum post di TikTok.',
                             msgId
                         );
                     } else {
