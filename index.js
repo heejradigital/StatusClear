@@ -1011,12 +1011,8 @@ function computeWaTargetBitrate(clipDuration) {
 async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sourceFps, isHDR, startSec = 0, clipDuration = 60) {
     return new Promise((resolve, reject) => {
         const segDuration = Math.min(60, Math.max(1, clipDuration));
-        const maxShortSide = segDuration <= 25 ? 1080 : 720;
         const hasCas = checkCasSupport(binPath);
-        const scaleFilter = `scale='if(gt(iw,ih),-2,min(${maxShortSide},iw))':'if(gt(iw,ih),min(${maxShortSide},ih),-2)':flags=lanczos`;
-        const sharpStage = hasCas
-            ? 'unsharp=5:5:0.65:3:3:0.0,cas=0.75'
-            : 'unsharp=5:5:0.65:3:3:0.0';
+        const scaleFilter = "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'";
 
         const filterParts = [];
         if (isHDR) {
@@ -1028,14 +1024,11 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sou
             }
         }
 
-        filterParts.push(
-            scaleFilter,
-            'setsar=1',
-            'hqdn3d=1.0:1.0:2.5:2.5',
-            sharpStage,
-            'eq=contrast=1.04:saturation=1.07',
-            'fps=60'
-        );
+        filterParts.push(scaleFilter);
+        if (hasCas) {
+            filterParts.push('cas=0.45');
+        }
+        filterParts.push('fps=60');
 
         const vfChain = filterParts.join(',');
         const args = ['-y'];
@@ -1048,21 +1041,15 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sou
             '-vf', vfChain,
             '-c:v', 'libx264',
             '-profile:v', 'high',
-            '-level', '4.1',
-            '-preset', 'fast',
+            '-preset', 'veryfast',
             '-crf', '18',
-            '-maxrate', `${vBitrate}k`,
-            '-bufsize', `${vBitrate * 2}k`,
-            '-g', '60',
-            '-keyint_min', '60',
-            '-sc_threshold', '0',
+            '-maxrate', '8M',
+            '-bufsize', '16M',
             '-pix_fmt', 'yuv420p',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
-            '-color_range', 'tv',
             '-movflags', '+faststart',
-            '-af', 'highpass=f=75,dynaudnorm=f=150:g=15',
             '-c:a', 'aac',
             '-b:a', '128k',
             '-ar', '48000',
@@ -5970,8 +5957,7 @@ async function startBot() {
                                     const partOutputPath = path.join(TEMP_DIR, `${fileId}_${partFileName}`);
 
                                     try {
-                                        const adaptiveResLabel = clipDuration <= 25 ? '1080p60' : '720p60';
-                                        console.log(`[FFmpeg Transcode WA] Bahagian ${partIdx + 1}/${totalParts} | ${adaptiveResLabel} @ ${targetVideoKbps} kbps (<15.8MB) | Durasi: ${clipDuration.toFixed(1)}s | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR' : 'SDR'})`);
+                                        console.log(`[FFmpeg Transcode WA] Bahagian ${partIdx + 1}/${totalParts} | 1080p60 CRF 18 (8M maxrate) | CAS 0.45 | Durasi: ${clipDuration.toFixed(1)}s | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR' : 'SDR'})`);
                                         await transcode60fpsVideo(inputPath, partOutputPath, ffmpegPath, targetVideoKbps, sourceFps, isHDR, startSec, clipDuration);
 
                                         const waSent = await safeSendMessage(sock, remoteJid, {
@@ -6593,10 +6579,9 @@ async function handleTelegramMessage(tgMsg) {
                             const partOutputPath = path.join(TEMP_DIR, `${fileId}_${partFileName}`);
                             try {
                                 await transcode60fpsVideo(inputPath, partOutputPath, ffmpegPath, targetVideoKbps, sourceFps, isHDR, startSec, clipDuration);
-                                const adaptiveResLabel = clipDuration <= 25 ? '1080p60' : '720p60';
                                 const tgWaCaption = totalParts === 1
-                                    ? `✓ VIDEO WHATSAPP STATUS HD SIAP\nSimpan file ini terus ke galeri dan muat naik ke WhatsApp Status tanpa trim/edit.\n• Profil: ${adaptiveResLabel} | ${targetVideoKbps} kbps (<15.8MB Bypass) | Audio 128k Normalized`
-                                    : `✓ VIDEO WHATSAPP STATUS HD — Bahagian ${partIdx + 1}/${totalParts}\nSimpan file ini dan muat naik mengikut turutan ke WhatsApp Status.\n• Profil: ${adaptiveResLabel} | ${targetVideoKbps} kbps (<15.8MB Bypass)`;
+                                    ? `✓ VIDEO WHATSAPP STATUS HD SIAP\nSimpan file ini terus ke galeri dan muat naik ke WhatsApp Status tanpa trim/edit.\n• Profil: 1080p60 | CRF 18 (8M maxrate) | Audio 128k`
+                                    : `✓ VIDEO WHATSAPP STATUS HD — Bahagian ${partIdx + 1}/${totalParts}\nSimpan file ini dan muat naik mengikut turutan ke WhatsApp Status.\n• Profil: 1080p60 | CRF 18 (8M maxrate)`;
                                 await sendTelegramMedia(chatId, 'document', partOutputPath, tgWaCaption, msgId);
                             } finally {
                                 if (fs.existsSync(partOutputPath)) { try { fs.unlinkSync(partOutputPath); } catch {} }
