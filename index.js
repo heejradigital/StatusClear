@@ -1195,7 +1195,7 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-g', String(targetFps),
             '-keyint_min', String(targetFps),
             '-sc_threshold', '0',
-            '-x264-params', 'cabac=1:deblock=-1:-1:aq-mode=3:aq-strength=0.90:psy-rd=0.95:0.08',
+            '-x264-params', 'deblock=-1,-1:aq-mode=3:aq-strength=0.90:psy-rd=0.95,0.08',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
