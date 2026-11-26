@@ -229,8 +229,12 @@ function saveConfig(cfg) {
 }
 
 // -------------------------------------------------------------
-// KONFIGURASI HITPAY PAYMENT GATEWAY
+// KONFIGURASI CHIP ASIA & HITPAY PAYMENT GATEWAY
 // -------------------------------------------------------------
+const CHIP_BRAND_ID = (process.env.CHIP_BRAND_ID || '').trim();
+const CHIP_API_KEY = (process.env.CHIP_API_KEY || '').trim();
+const CHIP_API_URL = 'https://gate.chip-in.asia/api/v1/purchases/';
+
 const HITPAY_API_KEY = (process.env.HITPAY_API_KEY || '').trim();
 const HITPAY_SALT = (process.env.HITPAY_SALT || '').trim();
 const HITPAY_ENV = (process.env.HITPAY_ENV || 'live').toLowerCase().trim();
@@ -245,6 +249,12 @@ const WEBHOOK_PUBLIC_URL = (
     (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '') ||
     (process.env.RAILWAY_STATIC_URL ? `https://${process.env.RAILWAY_STATIC_URL}` : '')
 ).trim();
+
+const PUBLIC_BASE_URL = (
+    process.env.PUBLIC_BASE_URL ||
+    WEBHOOK_PUBLIC_URL ||
+    'https://statusclear-production.up.railway.app'
+).replace(/\/+$/, '').trim();
 
 // -------------------------------------------------------------
 // TEMPLAT PAKEJ LANGGANAN RASMI (WA, TT, COMBO & UPGRADE)
@@ -1251,6 +1261,95 @@ function unwrapMessage(msg) {
 }
 
 // -------------------------------------------------------------
+// PENJANAAN NO. INVOIS CLEAR STATUS (CS-YYYYMMDD-XXXX) & CHIP ASIA
+// -------------------------------------------------------------
+function generateClearStatusInvoiceRef() {
+    const dateStr = new Date().toLocaleDateString('en-CA').replace(/-/g, '');
+    const stats = loadStats();
+    let seq = 1;
+    if (stats.lastInvoiceDate === dateStr) {
+        seq = (parseInt(stats.lastInvoiceSeq, 10) || 0) + 1;
+    }
+    stats.lastInvoiceDate = dateStr;
+    stats.lastInvoiceSeq = seq;
+    saveStats(stats);
+    return `CS-${dateStr}-${String(seq).padStart(4, '0')}`;
+}
+
+async function createChipCheckout({ userKey, phone, formattedName, userEmail = '', planType = 'WA', planTitle = 'WhatsApp Status HD', amountRM = '11.99', days = 30, platform = 'whatsapp', appliedRefCode = '' }) {
+    if (!CHIP_BRAND_ID || !CHIP_API_KEY) {
+        throw new Error('CHIP_BRAND_ID atau CHIP_API_KEY belum dikonfigurasikan di Environment Variables.');
+    }
+
+    const invoiceRef = generateClearStatusInvoiceRef();
+    const numericPhone = String(phone || '').replace(/[^0-9]/g, '') || '60000000000';
+    const safeEmailUser = String(phone || numericPhone).replace(/[^a-zA-Z0-9._-]/g, '');
+    const priceCents = Math.round((parseFloat(amountRM) || 0) * 100);
+
+    const payload = {
+        brand_id: CHIP_BRAND_ID,
+        reference: invoiceRef,
+        client: {
+            email: userEmail || `${safeEmailUser}@clearstatus.my`,
+            full_name: formattedName || 'Pelanggan StatusClear',
+            phone: `+${numericPhone}`
+        },
+        purchase: {
+            currency: 'MYR',
+            products: [
+                {
+                    name: `Clear Status - ${planTitle}`,
+                    price: priceCents,
+                    quantity: 1
+                }
+            ],
+            metadata: {
+                app: 'clear_status',
+                invoiceRef,
+                phone: userKey || phone,
+                planType,
+                days,
+                platform,
+                referralCode: appliedRefCode || ''
+            }
+        },
+        success_callback: `${PUBLIC_BASE_URL}/webhook/chip`,
+        success_redirect: `${PUBLIC_BASE_URL}/?paid=1`,
+        failure_redirect: `${PUBLIC_BASE_URL}/?paid=0`
+    };
+
+    console.log(`[CHIP ASIA] Creating checkout ${invoiceRef} for ${userKey || phone} (${planType}, RM${(priceCents / 100).toFixed(2)})...`);
+    const response = await fetch(CHIP_API_URL, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${CHIP_API_KEY}`,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        },
+        body: JSON.stringify(payload)
+    });
+
+    const resText = await response.text();
+    let resJson = {};
+    try {
+        resJson = JSON.parse(resText);
+    } catch {
+        throw new Error(`CHIP Asia API Ralat (${response.status}): ${resText.slice(0, 200)}`);
+    }
+
+    if (!response.ok || !resJson.checkout_url) {
+        const errMsg = resJson.message || resJson.detail || JSON.stringify(resJson);
+        throw new Error(`CHIP Asia Gateway Ralat (${response.status}): ${errMsg}`);
+    }
+
+    return {
+        ...resJson,
+        invoiceRef,
+        checkout_url: resJson.checkout_url
+    };
+}
+
+// -------------------------------------------------------------
 // PANGGILAN HITPAY PAYMENT REQUEST API (ASLI FETCH)
 // -------------------------------------------------------------
 async function createHitPayPaymentRequest({ userKey, phone, pushName, planCode = 'WA', days = 30, amount = '11.99', purpose, redirectUrl }) {
@@ -1362,7 +1461,7 @@ function verifyHitPaySignature(rawBuffer, headers, parsedBody) {
 // -------------------------------------------------------------
 // FUNGSI PUSAT PENGAKTIFAN BAYARAN BERJAYA (WEBHOOK & AUTO-SYNC)
 // -------------------------------------------------------------
-async function processCompletedPayment({ paymentId, referenceNumber, customerName, realName = '', paymentType, amountPaid, feeAmount = null }) {
+async function processCompletedPayment({ paymentId, referenceNumber, customerName, realName = '', paymentType, amountPaid, feeAmount = null, invoiceRef = '' }) {
     if (!referenceNumber || !referenceNumber.includes('|')) {
         return { success: false, reason: 'invalid_reference' };
     }
@@ -1578,7 +1677,8 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
 
         const fin = computeHitPayFeeAndNet(txAmount, feeAmount);
         recordTransaction({
-            paymentId: paymentId || `HITPAY_${Date.now()}`,
+            paymentId: paymentId || `PAY_${Date.now()}`,
+            invoiceRef: invoiceRef || '',
             buyerName: formatTitleCaseName(targetUser.name || finalName, targetUser.phone),
             buyerPhone: targetUser.phone,
             planCode,
@@ -1587,7 +1687,7 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             feeAmount: fin.fee,
             netAmount: fin.net,
             timestamp: Date.now(),
-            method: paymentType || 'HitPay Online Gateway'
+            method: paymentType || 'CHIP Asia Gateway'
         });
 
         const activePlanExpiry = (planCode === 'TT' || planCode === 'UPGRADE_TT')
@@ -1601,12 +1701,12 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             : (planCode === 'UPGRADE_TT'
                 ? 'TikTok 1080p 60fps HD (Upgrade Selari WA)'
                 : (planCode === 'TT' ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD'));
+        const invoiceLine = invoiceRef ? `\n• No. Invois: *${invoiceRef}*` : '';
 
         const welcomeTutorialMessage =
 `✓ *Pembayaran berjaya & akaun anda kini active.*
 
-Terima kasih kerana melanggan *${BOT_NAME}*.
-
+Terima kasih kerana melanggan *${BOT_NAME}*.${invoiceLine}
 • Pelan: *${planLabel}* (+${days} Hari)
 • Tamat tempoh: *${formattedExpiryDate}*
 • Code referral anda: *${targetUser.refCode}*
@@ -2107,7 +2207,7 @@ const PWA_MANIFEST = {
 };
 
 const PWA_SW = `
-const CACHE_NAME = 'statusclear-telemetry-v7';
+const CACHE_NAME = 'statusclear-telemetry-v8';
 const ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -2950,13 +3050,13 @@ const PWA_HTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- TAB 3: HITPAY PAYMENTS & PAYOUTS -->
+    <!-- TAB 3: CHIP ASIA PAYMENTS & PAYOUTS -->
     <div id="tab-hitpay" class="tab-content">
       <div class="bento-card" style="padding: 16px 20px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <div>
-            <span style="font-size: 14px; font-weight: 700;">HitPay Gateway</span>
-            <div style="font-size: 11px; color: #8E9387; margin-top: 2px;" id="hitpay-sync-time">Live API Sync</div>
+            <span style="font-size: 14px; font-weight: 700;">CHIP Asia Gateway</span>
+            <div style="font-size: 11px; color: #8E9387; margin-top: 2px;" id="hitpay-sync-time">Live Webhook & Records</div>
           </div>
           <div style="display: flex; align-items: center; gap: 8px;">
             <span style="font-size: 10px; font-weight: 700; color: #C6FF00; background: rgba(198,255,0,0.1); padding: 4px 10px; border-radius: 999px;" id="hitpay-status-pill">LIVE</span>
@@ -2968,17 +3068,17 @@ const PWA_HTML = `<!DOCTYPE html>
 
       <div class="grid-3">
         <div class="mini-card">
-          <span class="mini-label">Gross (All)</span>
+          <span class="mini-label">Gross Sales</span>
           <span class="mini-val" id="hitpay-gross-rev" style="font-size: 15px;">RM 0.00</span>
           <span style="font-size: 10px; color: #8E9387;">Total Collected</span>
         </div>
         <div class="mini-card">
-          <span class="mini-label">Net (Bersih)</span>
+          <span class="mini-label">Net Revenue</span>
           <span class="mini-val" id="hitpay-net-rev" style="font-size: 15px; color: #C6FF00;">RM 0.00</span>
-          <span style="font-size: 10px; color: #8E9387;">After HitPay Fee</span>
+          <span style="font-size: 10px; color: #8E9387;">After CHIP Fee</span>
         </div>
         <div class="mini-card">
-          <span class="mini-label">HitPay Fees</span>
+          <span class="mini-label">CHIP Fees</span>
           <span class="mini-val" id="hitpay-total-fees" style="font-size: 15px; color: #FF9F43;">RM 0.00</span>
           <span style="font-size: 10px; color: #8E9387;">Gateway Fee</span>
         </div>
@@ -3210,7 +3310,7 @@ const PWA_HTML = `<!DOCTYPE html>
       const titles = {
         overview: 'Dashboard',
         users: 'Users & Referrals',
-        hitpay: 'HitPay Gateway',
+        hitpay: 'CHIP Asia Gateway',
         broadcast: 'WhatsApp Broadcast',
         system: 'System Telemetry'
       };
@@ -3768,12 +3868,13 @@ const PWA_HTML = `<!DOCTYPE html>
         const amtNum = parseFloat(t.amount);
         const amtStr = Number.isFinite(amtNum) ? amtNum.toFixed(2) : '0.00';
         const netLabel = t.netAmount != null ? (' • Net RM ' + escHtml(t.netAmount)) : '';
+        const invLabel = t.invoiceRef ? ('<strong style="color:#C6FF00;">' + escHtml(t.invoiceRef) + '</strong> • ') : '';
         html +=
           '<div class="tx-item">' +
             '<div>' +
               '<div class="tx-name">' + escHtml(t.buyerName || 'Customer') + '</div>' +
               '<div class="tx-date">' + escHtml(t.buyerPhone || '-') + ' • ' + escHtml(dateStr) + '</div>' +
-              '<div class="tx-pkg">' + escHtml(t.method || 'HitPay') + netLabel + '</div>' +
+              '<div class="tx-pkg">' + invLabel + escHtml(t.method || 'CHIP Asia') + netLabel + '</div>' +
             '</div>' +
             '<div>' +
               '<div class="tx-amount">RM ' + amtStr + '</div>' +
@@ -3922,8 +4023,8 @@ function ensureHttpServer() {
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
         const pathname = parsedUrl.pathname;
 
-        // PWA MONITOR ROOT ROUTE
-        if (req.method === 'GET' && pathname === '/') {
+        // PWA MONITOR ROOT & /admin ROUTE
+        if (req.method === 'GET' && (pathname === '/' || pathname === '/admin')) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(PWA_HTML);
             return;
@@ -3950,9 +4051,10 @@ function ensureHttpServer() {
                 status: 'ok',
                 bot: BOT_NAME,
                 uptime: Math.floor(process.uptime()),
+                chipConfigured: !!(CHIP_API_KEY && CHIP_BRAND_ID),
                 hitpayConfigured: !!HITPAY_API_KEY,
                 env: HITPAY_ENV,
-                webhookUrl: WEBHOOK_PUBLIC_URL
+                webhookUrl: `${PUBLIC_BASE_URL}/webhook/chip`
             }));
             return;
         }
@@ -4475,6 +4577,98 @@ function ensureHttpServer() {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: false, error: e.message }));
                 }
+            });
+            return;
+        }
+
+        // CHIP ASIA WEBHOOK ENDPOINT
+        if (req.method === 'POST' && pathname === '/webhook/chip') {
+            let chunks = [];
+            req.on('data', chunk => chunks.push(chunk));
+            req.on('end', async () => {
+                let parsedBody = {};
+                try {
+                    parsedBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                } catch {}
+
+                const purchaseObj = parsedBody.data || parsedBody;
+                const eventType = String(parsedBody.event_type || parsedBody.event || '').toLowerCase();
+                const status = String(purchaseObj.status || '').toLowerCase();
+                const reference = String(purchaseObj.reference || purchaseObj.purchase?.metadata?.invoiceRef || '').trim();
+                const meta = purchaseObj.purchase?.metadata || purchaseObj.metadata || {};
+
+                if (eventType !== 'purchase.paid' && status !== 'paid') {
+                    res.writeHead(200, { 'Content-Type': 'text/plain' });
+                    res.end('Ignored event');
+                    return;
+                }
+
+                if (!reference.startsWith('CS-') && meta.app !== 'clear_status') {
+                    res.writeHead(200, { 'Content-Type': 'text/plain' });
+                    res.end('Ignored non-Clear-Status purchase');
+                    return;
+                }
+
+                const purchaseId = purchaseObj.id || parsedBody.id;
+                const processed = loadProcessedPayments();
+                if (purchaseId && processed.has(purchaseId)) {
+                    console.log(`[CHIP Webhook] Idempotensi: Transaksi ${purchaseId} (${reference}) sudah diproses.`);
+                    res.writeHead(200, { 'Content-Type': 'text/plain' });
+                    res.end('Already processed');
+                    return;
+                }
+
+                const phone = String(meta.phone || purchaseObj.client?.phone || '').trim();
+                const planType = String(meta.planType || 'WA').toUpperCase();
+                const days = parseInt(meta.days, 10) || 30;
+                const referralCode = String(meta.referralCode || '').trim().toUpperCase();
+                const invoiceRef = reference || String(meta.invoiceRef || '');
+                const totalCents = purchaseObj.purchase?.total ?? purchaseObj.payment?.amount ?? purchaseObj.amount ?? 0;
+                const grossAmount = Number(((Number(totalCents) || 0) / 100).toFixed(2));
+                const paymentMethod = String(
+                    purchaseObj.transaction_data?.payment_method ||
+                    purchaseObj.payment?.payment_method ||
+                    'CHIP Asia'
+                );
+
+                const rawExplicitFee = purchaseObj.payment?.fee_amount ?? purchaseObj.transaction_data?.fee_amount ?? purchaseObj.fee_amount ?? null;
+                let chipFee;
+                if (rawExplicitFee != null && !isNaN(Number(rawExplicitFee))) {
+                    chipFee = Number((Number(rawExplicitFee) / 100).toFixed(2));
+                } else if (/fpx/i.test(paymentMethod)) {
+                    chipFee = 1.00;
+                } else {
+                    chipFee = Number((grossAmount * 0.01).toFixed(2));
+                }
+
+                if (referralCode && phone) {
+                    const usersPre = loadUsers();
+                    const uKey = phone.startsWith('tg_') ? phone : normalizeIdentifier(phone);
+                    const uRec = usersPre[uKey] || Object.values(usersPre).find(u => u.phone === uKey);
+                    if (uRec && !uRec.referredBy) {
+                        const referrer = Object.values(usersPre).find(u => u.refCode && u.refCode.toUpperCase() === referralCode);
+                        if (referrer && referrer.phone !== uRec.phone) {
+                            uRec.referredBy = referrer.phone;
+                            uRec.referredByCode = referrer.refCode;
+                            saveUsers(usersPre);
+                        }
+                    }
+                }
+
+                console.log(`[CHIP Webhook] Bayaran berjaya ${invoiceRef} (${purchaseId}) | ${phone} | ${planType} | RM${grossAmount.toFixed(2)} (Fee RM${chipFee.toFixed(2)})`);
+                await processCompletedPayment({
+                    paymentId: purchaseId,
+                    referenceNumber: `${phone}|${planType}|${days}`,
+                    customerName: purchaseObj.client?.full_name || '',
+                    realName: purchaseObj.client?.full_name || '',
+                    paymentType: `CHIP Asia (${paymentMethod})`,
+                    amountPaid: grossAmount,
+                    feeAmount: chipFee,
+                    invoiceRef
+                });
+
+                res.writeHead(200, { 'Content-Type': 'text/plain' });
+                res.end('CHIP webhook processed');
             });
             return;
         }
@@ -5503,14 +5697,16 @@ async function startBot() {
                         ? `${BOT_NAME} - Upgrade TikTok HD (${prorate.remainingDays} Hari Prorata)`
                         : `${BOT_NAME} - ${selectedPkg.title}`;
 
-                    const hitpayRes = await createHitPayPaymentRequest({
+                    const chipRes = await createChipCheckout({
                         userKey: phone,
                         phone: phone,
-                        pushName: msg.pushName || user?.name || phone,
-                        planCode: selectedPkg.planCode,
+                        formattedName: formatTitleCaseName(msg.pushName || user?.name, phone),
+                        planType: selectedPkg.planCode,
+                        planTitle: selectedPkg.title,
+                        amountRM: reqAmount,
                         days: reqDays,
-                        amount: reqAmount,
-                        purpose: reqPurpose
+                        platform: 'whatsapp',
+                        appliedRefCode: user?.referredByCode || ''
                     });
 
                     const shortNote = (isUpgradePlan && prorate.isShortRemaining)
@@ -5522,11 +5718,12 @@ async function startBot() {
 
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `✓ *PAUTAN PEMBAYARAN RASMI HITPAY*\n\n` +
+                            `✓ *PAUTAN PEMBAYARAN RASMI CHIP ASIA*\n\n` +
+                            `No. Invois: *${chipRes.invoiceRef}*\n` +
                             `${pkgSummaryLine}\n\n` +
                             `Sila tekan link selamat di bawah untuk membuat bayaran:\n` +
-                            `${hitpayRes.url}\n\n` +
-                            `Kaedah bayaran disokong: DuitNow QR, FPX Online Banking, eWallet (TNG / GrabPay / ShopeePay), serta Kad Debit & Kredit.\n\n` +
+                            `${chipRes.checkout_url}\n\n` +
+                            `Kaedah bayaran disokong: FPX Online Banking, DuitNow QR, eWallet & Kad Debit/Kredit.\n\n` +
                             `Akses anda akan diaktifkan secara automatik sebaik sahaja pembayaran selesai tanpa perlu menghantar resit.`
                     }, { quoted: msg });
 
@@ -6347,14 +6544,16 @@ async function handleTelegramMessage(tgMsg) {
                 ? `${BOT_NAME} (Telegram) - Upgrade TikTok HD (${prorate.remainingDays} Hari Prorata)`
                 : `${BOT_NAME} (Telegram) - ${selectedPkg.title}`;
 
-            const hitpayRes = await createHitPayPaymentRequest({
+            const chipRes = await createChipCheckout({
                 userKey: tgKey,
                 phone: tgKey,
-                pushName: fromName,
-                planCode: selectedPkg.planCode,
+                formattedName: formatTitleCaseName(fromName, tgKey),
+                planType: selectedPkg.planCode,
+                planTitle: selectedPkg.title,
+                amountRM: reqAmount,
                 days: reqDays,
-                amount: reqAmount,
-                purpose: reqPurpose
+                platform: 'telegram',
+                appliedRefCode: user?.referredByCode || ''
             });
             if (!isActive) user.status = 'WAITING';
             saveUsers(users);
@@ -6367,15 +6566,16 @@ async function handleTelegramMessage(tgMsg) {
                 : `Pakej: ${selectedPkg.title} (${selectedPkg.price} / ${selectedPkg.days} Hari)`;
 
             await sendTelegramMessage(chatId,
-                `✓ PAUTAN PEMBAYARAN RASMI HITPAY\n\n` +
+                `✓ PAUTAN PEMBAYARAN RASMI CHIP ASIA\n\n` +
+                `No. Invois: ${chipRes.invoiceRef}\n` +
                 `${pkgSummaryLine}\n\n` +
-                `Sila klik link di bawah untuk membuat bayaran (DuitNow QR, FPX, eWallet & Kad):\n` +
-                `${hitpayRes.url}\n\n` +
+                `Sila klik link di bawah untuk membuat bayaran (FPX, DuitNow QR, eWallet & Kad):\n` +
+                `${chipRes.checkout_url}\n\n` +
                 `Akses anda akan diaktifkan secara automatik sebaik sahaja transaksi selesai.`,
                 msgId
             );
         } catch (err) {
-            await sendTelegramMessage(chatId, `Maaf, terdapat ralat semasa menjana link HitPay: ${err.message}`, msgId);
+            await sendTelegramMessage(chatId, `Maaf, terdapat ralat semasa menjana link CHIP Asia: ${err.message}`, msgId);
         }
         return;
     }
