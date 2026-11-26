@@ -970,8 +970,8 @@ async function probeVideo(filePath, binPath) {
         const args = [
             '-v', 'error',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=duration,r_frame_rate,color_transfer,color_primaries,color_space',
-            '-show_entries', 'format=duration',
+            '-show_entries', 'stream=width,height,bit_rate,duration,r_frame_rate,color_transfer,color_primaries,color_space',
+            '-show_entries', 'format=duration,bit_rate',
             '-of', 'json',
             filePath
         ];
@@ -980,6 +980,9 @@ async function probeVideo(filePath, binPath) {
             let duration = 30;
             let fps = 30;
             let isHDR = false;
+            let width = 1080;
+            let height = 1920;
+            let bitRateBps = 0;
 
             if (!err && stdout) {
                 try {
@@ -990,6 +993,15 @@ async function probeVideo(filePath, binPath) {
                     if (!isNaN(parsedDur) && parsedDur > 0) {
                         duration = parsedDur;
                     }
+
+                    const parsedW = parseInt(vStream?.width, 10);
+                    const parsedH = parseInt(vStream?.height, 10);
+                    if (!isNaN(parsedW) && parsedW > 0) width = parsedW;
+                    if (!isNaN(parsedH) && parsedH > 0) height = parsedH;
+
+                    const rawBr = vStream?.bit_rate || info.format?.bit_rate;
+                    const parsedBr = parseInt(rawBr, 10);
+                    if (!isNaN(parsedBr) && parsedBr > 0) bitRateBps = parsedBr;
 
                     if (vStream?.r_frame_rate) {
                         const parts = vStream.r_frame_rate.split('/');
@@ -1017,7 +1029,9 @@ async function probeVideo(filePath, binPath) {
                     console.error('[Ralat Parse FFprobe]:', e);
                 }
             }
-            resolve({ duration, fps, isHDR });
+            const shortSide = Math.min(width, height);
+            const isPreCompressed = (shortSide < 1000 || (bitRateBps > 0 && bitRateBps < 2500000));
+            resolve({ duration, fps, isHDR, width, height, shortSide, bitRateBps, isPreCompressed });
         });
     });
 }
@@ -1121,13 +1135,11 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sou
     });
 }
 
-async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, isHDR, maxDurationSec = 90) {
+async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, isHDR, maxDurationSec = 90, isPreCompressed = false) {
     return new Promise((resolve, reject) => {
+        const targetFps = sourceFps >= 48 ? 60 : 30;
         const hasCas = checkCasSupport(binPath);
-        const scaleFilter = "scale='if(gt(iw,ih),-2,min(2160,iw))':'if(gt(iw,ih),min(2160,ih),-2)':flags=lanczos";
-        const sharpStage = hasCas
-            ? 'unsharp=3:3:0.35:3:3:0.0,cas=0.55'
-            : 'unsharp=3:3:0.35:3:3:0.0';
+        const sharpFilter = hasCas ? 'cas=strength=0.18' : 'unsharp=5:5:0.18:5:5:0.0';
 
         const filterParts = [];
         if (isHDR) {
@@ -1139,14 +1151,22 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             }
         }
 
+        if (isPreCompressed) {
+            filterParts.push('deblock=filter=strong:block=4');
+        }
+
         filterParts.push(
-            scaleFilter,
+            "scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)':flags=spline36",
             'setsar=1',
-            'hqdn3d=1.2:1.2:3:3',
-            sharpStage,
-            'eq=contrast=1.04:saturation=1.07:brightness=0.01',
-            'fps=60'
+            'hqdn3d=1.0:1.0:2.5:2.5',
+            'deband=1thr=0.015:2thr=0.015:3thr=0.015',
+            'eq=contrast=1.02:saturation=1.03',
+            sharpFilter
         );
+
+        if (targetFps === 60) {
+            filterParts.push('setpts=N/(60*TB)');
+        }
 
         const vfChain = filterParts.join(',');
         const args = ['-y', '-i', inputPath];
@@ -1161,31 +1181,37 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-dn',
             '-vf', vfChain,
             '-c:v', 'libx264',
+            '-preset', 'medium',
             '-profile:v', 'high',
-            '-level', '5.2',
-            '-preset', 'veryfast',
-            '-crf', '17',
-            '-maxrate', '25M',
-            '-bufsize', '50M',
-            '-g', '60',
-            '-keyint_min', '60',
-            '-sc_threshold', '0',
+            '-level', '4.2',
             '-pix_fmt', 'yuv420p',
+            '-b:v', '14500k',
+            '-minrate', '14000k',
+            '-maxrate', '15000k',
+            '-bufsize', '30000k',
+            '-refs', '3',
+            '-rc-lookahead', '40',
+            '-bf', '2',
+            '-g', String(targetFps),
+            '-keyint_min', String(targetFps),
+            '-sc_threshold', '0',
+            '-x264-params', 'cabac=1:deblock=-1:-1:aq-mode=3:aq-strength=0.90:psy-rd=0.95:0.08',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
             '-color_range', 'tv',
-            '-af', 'highpass=f=75,dynaudnorm=f=150:g=15',
+            '-fps_mode', 'cfr',
+            '-r', String(targetFps),
             '-c:a', 'aac',
-            '-b:a', '256k',
+            '-b:a', '128k',
             '-ac', '2',
-            '-ar', '48000',
+            '-ar', '44100',
             '-movflags', '+faststart',
             '-threads', '2',
             outputPath
         );
 
-        const proc = spawn(binPath, args);
+        const proc = spawn(binPath, args, { timeout: 180000 });
         let stderr = '';
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
         proc.on('close', (code) => {
@@ -6143,7 +6169,7 @@ async function startBot() {
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                         const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
-                        const outputPath = path.join(TEMP_DIR, targetMode === 'TT' ? `TikTok_4K60_${fileId}.mp4` : `status_clear_60fps_${fileId}.mp4`);
+                        const outputPath = path.join(TEMP_DIR, targetMode === 'TT' ? `TikTok_Master1080p_${fileId}.mp4` : `status_clear_60fps_${fileId}.mp4`);
 
                         try {
                             try {
@@ -6157,29 +6183,35 @@ async function startBot() {
                             const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
                             await pipeline(mediaStream, fs.createWriteStream(inputPath));
 
-                            const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
+                            const { duration: durationSec, fps: sourceFps, isHDR, isPreCompressed } = await probeVideo(inputPath, ffprobePath);
 
                             if (targetMode === 'TT') {
-                                console.log(`[FFmpeg TikTok] 4K60 Level 5.2 Single-Track MP4 | Audio 256k 48kHz | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Durasi: ${durationSec.toFixed(1)}s`);
-                                await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90);
+                                const ttTargetFps = sourceFps >= 48 ? 60 : 30;
+                                console.log(`[FFmpeg TikTok Master] 1080p${ttTargetFps} 14.5Mbps VBV | spline36 + deband + CAS 0.18 | PreCompressed: ${isPreCompressed} | HDR: ${isHDR} | Durasi: ${durationSec.toFixed(1)}s`);
+                                await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90, isPreCompressed);
 
                                 const ttSent = await safeSendMessage(sock, remoteJid, {
-                                    document: fs.readFileSync(outputPath),
+                                    document: { stream: fs.createReadStream(outputPath) },
                                     mimetype: 'video/mp4',
-                                    fileName: 'TikTok_4K60_' + Date.now() + '.mp4'
+                                    fileName: `TikTok_Master1080p_${Date.now()}.mp4`
                                 }, { quoted: msg });
                                 if (ttSent && ttSent.key && ttSent.key.id && ttSent.message) {
                                     storeCachedMessage(ttSent.key.id, ttSent.message);
                                 }
 
+                                const preCompNotice = isPreCompressed
+                                    ? `⚠️ *Nota Penting:* Video yang anda hantar tadi telah dimampatkan oleh WhatsApp sebelum sampai ke bot. Untuk ketajaman maksimum tanpa pecah, sentiasa tekan ikon klip (📎) > *Document* semasa menghantar video asal ke bot.\n\n`
+                                    : '';
+
                                 await sendCachedMessage(sock, remoteJid, {
                                     text:
-                                        `✓ *Video TikTok 4K 60fps HD siap diproses*\n\n` +
-                                        `*Panduan Upload Supaya Kualiti Kekal HD:*\n` +
-                                        `1. Simpan fail *TikTok_4K60* di atas ke Gallery / Files telefon anda.\n` +
-                                        `2. Buka *tiktok.com/upload* menggunakan pelayar (aktif *Desktop Mode* di telefon atau guna PC).\n` +
-                                        `3. Pastikan tetapan *Upload HD* diaktifkan (ON).\n` +
-                                        `4. Terus *Post* tanpa sebarang suntingan, filter, atau trim di dalam aplikasi TikTok.`
+                                        `${preCompNotice}` +
+                                        `✅ *Video TikTok Master 1080p (14.5 Mbps) Siap!*\n\n` +
+                                        `Ikut 4 langkah wajib ini supaya TikTok tidak pecahkan video anda:\n` +
+                                        `1. Simpan fail dokumen di atas ke *Files / Downloads* (jangan forward ke chat lain).\n` +
+                                        `2. Muat naik melalui pelayar *Chrome/Edge (Desktop Site)* di *https://www.tiktok.com/upload* ATAU hidupkan *Upload HD* pada skrin post aplikasi TikTok.\n` +
+                                        `3. *Jangan* tambah filter, teks, atau sticker dalam editor TikTok selepas pilih video.\n` +
+                                        `4. Pastikan *Data Saver* TikTok dimatikan (OFF) dan tunggu 2–3 minit selepas post untuk pemprosesan HD selesai.`
                                 });
 
                                 try {
@@ -6807,20 +6839,20 @@ async function handleTelegramMessage(tgMsg) {
             run: async () => {
                 const fileId = `tg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                 const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
-                const outputPath = path.join(TEMP_DIR, targetMode === 'TT' ? `TikTok_4K60_${fileId}.mp4` : `status_clear_60fps_${fileId}.mp4`);
+                const outputPath = path.join(TEMP_DIR, targetMode === 'TT' ? `TikTok_Master1080p_${fileId}.mp4` : `status_clear_60fps_${fileId}.mp4`);
                 try {
                     await downloadTelegramFile(fileObj.file_id, MAX_TG_BYTES, inputPath);
-                    const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
+                    const { duration: durationSec, fps: sourceFps, isHDR, isPreCompressed } = await probeVideo(inputPath, ffprobePath);
                     if (targetMode === 'TT') {
-                        await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90);
+                        await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90, isPreCompressed);
                         await sendTelegramMedia(chatId, 'document', outputPath, null, msgId);
                         await sendTelegramMessage(chatId,
-                            `✓ Video TikTok 4K 60fps HD siap diproses\n\n` +
-                            `Panduan Upload Supaya Kualiti Kekal HD:\n` +
-                            `1. Simpan fail TikTok_4K60 di atas ke Gallery / Files telefon anda.\n` +
-                            `2. Buka tiktok.com/upload menggunakan pelayar (aktif Desktop Mode di telefon atau guna PC).\n` +
-                            `3. Pastikan tetapan Upload HD diaktifkan (ON).\n` +
-                            `4. Terus Post tanpa sebarang suntingan, filter, atau trim di dalam aplikasi TikTok.`,
+                            `✅ Video TikTok Master 1080p (14.5 Mbps) Siap!\n\n` +
+                            `Ikut 4 langkah wajib ini supaya TikTok tidak pecahkan video anda:\n` +
+                            `1. Simpan fail dokumen di atas ke Files / Downloads (jangan forward ke chat lain).\n` +
+                            `2. Muat naik melalui pelayar Chrome/Edge (Desktop Site) di https://www.tiktok.com/upload ATAU hidupkan Upload HD pada skrin post aplikasi TikTok.\n` +
+                            `3. Jangan tambah filter, teks, atau sticker dalam editor TikTok selepas pilih video.\n` +
+                            `4. Pastikan Data Saver TikTok dimatikan (OFF) dan tunggu 2–3 minit selepas post untuk pemprosesan HD selesai.`,
                             msgId
                         );
                     } else {
