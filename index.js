@@ -5659,9 +5659,9 @@ async function startBot() {
 
                     if (fs.existsSync(START_BANNER_PATH)) {
                         await sendHumanReply(sock, remoteJid, {
-                            image: fs.readFileSync(START_BANNER_PATH),
-                            caption: welcomeCaption
+                            image: fs.readFileSync(START_BANNER_PATH)
                         }, { quoted: msg });
+                        await sendCachedMessage(sock, remoteJid, { text: welcomeCaption });
                     } else {
                         await sendHumanReply(sock, remoteJid, { text: welcomeCaption }, { quoted: msg });
                     }
@@ -6414,10 +6414,9 @@ async function handleTelegramMessage(tgMsg) {
 
             if (fs.existsSync(START_BANNER_PATH)) {
                 try {
-                    await sendTelegramMedia(chatId, 'photo', START_BANNER_PATH, tgWelcomeCaption, msgId);
-                } catch {
-                    await sendTelegramMessage(chatId, tgWelcomeCaption, msgId);
-                }
+                    await sendTelegramMedia(chatId, 'photo', START_BANNER_PATH, null, msgId);
+                } catch {}
+                await sendTelegramMessage(chatId, tgWelcomeCaption);
             } else {
                 await sendTelegramMessage(chatId, tgWelcomeCaption, msgId);
             }
