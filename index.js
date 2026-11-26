@@ -919,12 +919,18 @@ class RobustVideoQueue {
         }
 
         this.activeUsers.add(jobData.userId);
+        let position;
         if (isPriority) {
-            this.queue.unshift(jobData);
+            let insertIdx = 0;
+            while (insertIdx < this.queue.length && this.queue[insertIdx].priority) {
+                insertIdx++;
+            }
+            this.queue.splice(insertIdx, 0, jobData);
+            position = insertIdx + 1;
         } else {
             this.queue.push(jobData);
+            position = this.queue.length;
         }
-        const position = isPriority ? 1 : this.queue.length;
         this.processNext();
         return { success: true, position };
     }
