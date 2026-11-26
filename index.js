@@ -1156,7 +1156,7 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
         }
 
         filterParts.push(
-            "scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)':flags=spline36",
+            "scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)'",
             'setsar=1',
             'hqdn3d=1.0:1.0:2.5:2.5',
             'deband=1thr=0.015:2thr=0.015:3thr=0.015',
@@ -1181,7 +1181,7 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-dn',
             '-vf', vfChain,
             '-c:v', 'libx264',
-            '-preset', 'medium',
+            '-preset', 'fast',
             '-profile:v', 'high',
             '-level', '4.2',
             '-pix_fmt', 'yuv420p',
@@ -1189,8 +1189,8 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-minrate', '14000k',
             '-maxrate', '15000k',
             '-bufsize', '30000k',
-            '-refs', '3',
-            '-rc-lookahead', '40',
+            '-refs', '2',
+            '-rc-lookahead', '20',
             '-bf', '2',
             '-g', String(targetFps),
             '-keyint_min', String(targetFps),
@@ -1214,12 +1214,12 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
         const proc = spawn(binPath, args, { timeout: 180000 });
         let stderr = '';
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
-        proc.on('close', (code) => {
+        proc.on('close', (code, signal) => {
             if (code === 0 && fs.existsSync(outputPath)) {
                 incrementStat('videosProcessed');
                 resolve();
             } else {
-                reject(new Error(`FFmpeg TikTok ralat (kod ${code}): ${stderr.slice(-400)}`));
+                reject(new Error(`FFmpeg TikTok ralat (kod ${code ?? signal ?? 'unknown'}): ${stderr.slice(-400)}`));
             }
         });
         proc.on('error', reject);
@@ -6187,7 +6187,7 @@ async function startBot() {
 
                             if (targetMode === 'TT') {
                                 const ttTargetFps = sourceFps >= 48 ? 60 : 30;
-                                console.log(`[FFmpeg TikTok Master] 1080p${ttTargetFps} 14.5Mbps VBV | spline36 + deband + CAS 0.18 | PreCompressed: ${isPreCompressed} | HDR: ${isHDR} | Durasi: ${durationSec.toFixed(1)}s`);
+                                console.log(`[FFmpeg TikTok Master] 1080p${ttTargetFps} 14.5Mbps VBV | deband + CAS 0.18 | PreCompressed: ${isPreCompressed} | HDR: ${isHDR} | Durasi: ${durationSec.toFixed(1)}s`);
                                 await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90, isPreCompressed);
 
                                 const ttSent = await safeSendMessage(sock, remoteJid, {
