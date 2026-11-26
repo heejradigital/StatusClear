@@ -1298,7 +1298,6 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
         brand_id: CHIP_BRAND_ID,
         reference: invoiceRef,
         send_receipt: false,
-        payment_method_whitelist: ['duitnow_qr', 'fpx'],
         client: clientPayload,
         purchase: {
             currency: 'MYR',
