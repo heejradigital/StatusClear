@@ -820,6 +820,9 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 async function sendHumanReply(sock, targetJid, content, options = {}) {
     if (!sock || !targetJid) return null;
+    if (isPrimaryAdmin(null, targetJid)) {
+        return sendCachedMessage(sock, targetJid, content, options);
+    }
     try { await sock.sendPresenceUpdate('composing', targetJid); } catch {}
     const delayMs = 4000 + Math.floor(Math.random() * 1001);
     await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -907,16 +910,21 @@ class RobustVideoQueue {
     }
 
     enqueue(jobData) {
-        if (this.queue.length >= this.maxQueueSize) {
+        const isPriority = !!jobData.priority;
+        if (!isPriority && this.queue.length >= this.maxQueueSize) {
             return { success: false, reason: 'full' };
         }
-        if (this.activeUsers.has(jobData.userId)) {
+        if (!isPriority && this.activeUsers.has(jobData.userId)) {
             return { success: false, reason: 'duplicate' };
         }
 
         this.activeUsers.add(jobData.userId);
-        this.queue.push(jobData);
-        const position = this.queue.length;
+        if (isPriority) {
+            this.queue.unshift(jobData);
+        } else {
+            this.queue.push(jobData);
+        }
+        const position = isPriority ? 1 : this.queue.length;
         this.processNext();
         return { success: true, position };
     }
@@ -1097,7 +1105,7 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sou
     });
 }
 
-async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, isHDR) {
+async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, isHDR, maxDurationSec = 90) {
     return new Promise((resolve, reject) => {
         const hasCas = checkCasSupport(binPath);
         const scaleFilter = "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)':flags=lanczos";
@@ -1125,10 +1133,11 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
         );
 
         const vfChain = filterParts.join(',');
-        const args = [
-            '-y',
-            '-i', inputPath,
-            '-t', '90',
+        const args = ['-y', '-i', inputPath];
+        if (maxDurationSec > 0) {
+            args.push('-t', String(maxDurationSec));
+        }
+        args.push(
             '-vf', vfChain,
             '-c:v', 'libx264',
             '-profile:v', 'high',
@@ -1153,7 +1162,7 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-ac', '2',
             '-threads', '2',
             outputPath
-        ];
+        );
 
         const proc = spawn(binPath, args);
         let stderr = '';
@@ -4779,8 +4788,8 @@ async function startBot() {
             }
 
             const fromMe = msg.key.fromMe;
-            const isSuperAdmin = isPrimaryAdmin(phone, remoteJid);
-            const isAdmin = isAnyAdmin(phone, remoteJid, fromMe);
+            const isSuperAdmin = isPrimaryAdmin(phone, remoteJid) || isPrimaryAdmin(user?.phone, altJid);
+            const isAdmin = isAnyAdmin(phone, remoteJid, fromMe) || isSuperAdmin;
             const waActive = hasWaAccess(user, isSuperAdmin);
             const ttActive = hasTtAccess(user, isSuperAdmin);
             const isActive = waActive || ttActive;
@@ -5796,6 +5805,7 @@ async function startBot() {
                 const heicExt = docExt === '.heif' ? '.heif' : '.heic';
                 const enqueueResult = videoQueue.enqueue({
                     userId: remoteJid,
+                    priority: isSuperAdmin,
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                         const rawHeicPath = isHeicJob ? path.join(TEMP_DIR, `raw_${fileId}${heicExt}`) : null;
@@ -5916,6 +5926,7 @@ async function startBot() {
 
                 const enqueueResult = videoQueue.enqueue({
                     userId: remoteJid,
+                    priority: isSuperAdmin,
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                         const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
@@ -5937,7 +5948,7 @@ async function startBot() {
 
                             if (targetMode === 'TT') {
                                 console.log(`[FFmpeg TikTok] 1080p60 CRF 17 (15M maxrate) | Dual Sharpen + hqdn3d + Audio Norm | Sumber: ${sourceFps.toFixed(1)} FPS (${isHDR ? 'HDR Tone-Mapped' : 'SDR Asal'}) | Durasi: ${durationSec.toFixed(1)}s`);
-                                await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR);
+                                await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90);
 
                                 const ttSent = await safeSendMessage(sock, remoteJid, {
                                     document: fs.readFileSync(outputPath),
@@ -5958,7 +5969,7 @@ async function startBot() {
                                     });
                                 } catch {}
                             } else {
-                                if (durationSec > 180) {
+                                if (!isSuperAdmin && durationSec > 180) {
                                     await sendHumanReply(sock, remoteJid, {
                                         text:
                                             `HAD DURASI WHATSAPP STATUS HD (MAKS 180 SAAT)\n\n` +
@@ -6519,6 +6530,7 @@ async function handleTelegramMessage(tgMsg) {
         const heicExt = docExt === '.heif' ? '.heif' : '.heic';
         const enqueueResult = videoQueue.enqueue({
             userId: tgKey,
+            priority: isSuperAdmin,
             run: async () => {
                 const fileId = `tg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                 const rawHeicPath = isTgHeic ? path.join(TEMP_DIR, `raw_${fileId}${heicExt}`) : null;
@@ -6569,6 +6581,7 @@ async function handleTelegramMessage(tgMsg) {
         const targetMode = effectiveMode === 'TT' ? 'TT' : 'WA';
         const enqueueResult = videoQueue.enqueue({
             userId: tgKey,
+            priority: isSuperAdmin,
             run: async () => {
                 const fileId = `tg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                 const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
@@ -6577,14 +6590,14 @@ async function handleTelegramMessage(tgMsg) {
                     await downloadTelegramFile(fileObj.file_id, MAX_TG_BYTES, inputPath);
                     const { duration: durationSec, fps: sourceFps, isHDR } = await probeVideo(inputPath, ffprobePath);
                     if (targetMode === 'TT') {
-                        await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR);
+                        await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90);
                         await sendTelegramMedia(chatId, 'document', outputPath, null, msgId);
                         await sendTelegramMessage(chatId,
                             'Video TikTok 1080p 60fps HD siap diproses. Simpan fail di atas ke Gallery dan pastikan tetapan Allow high-quality uploads diaktifkan sebelum post di TikTok.',
                             msgId
                         );
                     } else {
-                        if (durationSec > 180) {
+                        if (!isSuperAdmin && durationSec > 180) {
                             await sendTelegramMessage(chatId,
                                 `HAD DURASI WHATSAPP STATUS HD (MAKS 180 SAAT)\n\nDurasi video anda ialah ${Math.round(durationSec)} saat. Mod WhatsApp Status HD menyokong video sehingga 180 saat (3 minit) dengan pemecahan automatik 60 saat.`,
                                 msgId
