@@ -1283,18 +1283,22 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
 
     const invoiceRef = generateClearStatusInvoiceRef();
     const numericPhone = String(phone || '').replace(/[^0-9]/g, '') || '60000000000';
-    const safeEmailUser = String(phone || numericPhone).replace(/[^a-zA-Z0-9._-]/g, '');
     const priceCents = Math.round((parseFloat(amountRM) || 0) * 100);
+
+    const clientPayload = {
+        full_name: formattedName || 'Pelanggan StatusClear',
+        phone: `+${numericPhone}`
+    };
+    const cleanEmail = String(userEmail || '').trim();
+    if (cleanEmail && cleanEmail.includes('@')) {
+        clientPayload.email = cleanEmail;
+    }
 
     const payload = {
         brand_id: CHIP_BRAND_ID,
         reference: invoiceRef,
         payment_method_whitelist: ['duitnow_qr'],
-        client: {
-            email: userEmail || `${safeEmailUser}@clearstatus.my`,
-            full_name: formattedName || 'Pelanggan StatusClear',
-            phone: `+${numericPhone}`
-        },
+        client: clientPayload,
         purchase: {
             currency: 'MYR',
             products: [
@@ -1343,10 +1347,15 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
         throw new Error(`CHIP Asia Gateway Ralat (${response.status}): ${errMsg}`);
     }
 
+    const rawCheckoutUrl = String(resJson.checkout_url);
+    const directQrUrl = rawCheckoutUrl.includes('?')
+        ? `${rawCheckoutUrl}&preferred=duitnow_qr`
+        : `${rawCheckoutUrl}?preferred=duitnow_qr`;
+
     return {
         ...resJson,
         invoiceRef,
-        checkout_url: resJson.checkout_url
+        checkout_url: directQrUrl
     };
 }
 
