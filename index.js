@@ -1283,20 +1283,21 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
 
     const invoiceRef = generateClearStatusInvoiceRef();
     const numericPhone = String(phone || '').replace(/[^0-9]/g, '') || '60000000000';
+    const safeEmailUser = String(phone || numericPhone).replace(/[^a-zA-Z0-9._-]/g, '') || numericPhone;
     const priceCents = Math.round((parseFloat(amountRM) || 0) * 100);
 
+    const cleanEmail = String(userEmail || '').trim();
+    const fallbackEmail = (process.env.CHIP_FALLBACK_EMAIL || '').trim() || `${safeEmailUser}@statusclear.my`;
     const clientPayload = {
+        email: (cleanEmail && cleanEmail.includes('@')) ? cleanEmail : fallbackEmail,
         full_name: formattedName || 'Pelanggan StatusClear',
         phone: `+${numericPhone}`
     };
-    const cleanEmail = String(userEmail || '').trim();
-    if (cleanEmail && cleanEmail.includes('@')) {
-        clientPayload.email = cleanEmail;
-    }
 
     const payload = {
         brand_id: CHIP_BRAND_ID,
         reference: invoiceRef,
+        send_receipt: false,
         payment_method_whitelist: ['duitnow_qr'],
         client: clientPayload,
         purchase: {
