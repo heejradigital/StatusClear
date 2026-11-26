@@ -1298,7 +1298,7 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
         brand_id: CHIP_BRAND_ID,
         reference: invoiceRef,
         send_receipt: false,
-        payment_method_whitelist: ['duitnow_qr'],
+        payment_method_whitelist: ['duitnow_qr', 'fpx'],
         client: clientPayload,
         purchase: {
             currency: 'MYR',
@@ -1348,15 +1348,10 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
         throw new Error(`CHIP Asia Gateway Ralat (${response.status}): ${errMsg}`);
     }
 
-    const rawCheckoutUrl = String(resJson.checkout_url);
-    const directQrUrl = rawCheckoutUrl.includes('?')
-        ? `${rawCheckoutUrl}&preferred=duitnow_qr`
-        : `${rawCheckoutUrl}?preferred=duitnow_qr`;
-
     return {
         ...resJson,
         invoiceRef,
-        checkout_url: directQrUrl
+        checkout_url: resJson.checkout_url
     };
 }
 
