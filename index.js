@@ -1235,6 +1235,7 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-color_range', 'tv',
             '-fps_mode', 'cfr',
             '-r', String(targetFps),
+            '-af', 'aresample=44100:async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo',
             '-c:a', 'aac',
             '-b:a', '128k',
             '-ac', '2',
