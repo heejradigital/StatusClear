@@ -1289,7 +1289,7 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
     const payload = {
         brand_id: CHIP_BRAND_ID,
         reference: invoiceRef,
-        payment_method_whitelist: ['duitnow_qr', 'fpx'],
+        payment_method_whitelist: ['duitnow_qr'],
         client: {
             email: userEmail || `${safeEmailUser}@clearstatus.my`,
             full_name: formattedName || 'Pelanggan StatusClear',
