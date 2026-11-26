@@ -1135,7 +1135,35 @@ async function transcode60fpsVideo(inputPath, outputPath, binPath, vBitrate, sou
     });
 }
 
+function cleanupStaleTempMedia(maxAgeMs = 15 * 60 * 1000) {
+    const now = Date.now();
+    const dirsToSweep = Array.from(new Set([
+        TEMP_DIR,
+        '/tmp',
+        path.join(DATA_DIR, 'temp')
+    ].filter(Boolean)));
+    const mediaRe = /^(input_|raw_|TikTok_|tiktok_|status_clear_)|\.(mp4|mov|m4v|mkv|avi|webm|3gp|jpg|jpeg|heic|heif)$/i;
+
+    for (const dir of dirsToSweep) {
+        try {
+            if (!fs.existsSync(dir)) continue;
+            const entries = fs.readdirSync(dir);
+            for (const name of entries) {
+                if (!mediaRe.test(name)) continue;
+                const fullPath = path.join(dir, name);
+                try {
+                    const st = fs.statSync(fullPath);
+                    if (st.isFile() && (now - st.mtimeMs) > maxAgeMs) {
+                        fs.unlinkSync(fullPath);
+                    }
+                } catch {}
+            }
+        } catch {}
+    }
+}
+
 async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, isHDR, maxDurationSec = 90, isPreCompressed = false) {
+    cleanupStaleTempMedia(15 * 60 * 1000);
     return new Promise((resolve, reject) => {
         const targetFps = sourceFps >= 48 ? 60 : 30;
         const hasCas = checkCasSupport(binPath);
@@ -1169,7 +1197,12 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
         }
 
         const vfChain = filterParts.join(',');
-        const args = ['-y', '-i', inputPath];
+        const args = [
+            '-y',
+            '-fflags', '+genpts+igndts',
+            '-err_detect', 'ignore_err',
+            '-i', inputPath
+        ];
         if (maxDurationSec > 0) {
             args.push('-t', String(maxDurationSec));
         }
@@ -1206,7 +1239,7 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-b:a', '128k',
             '-ac', '2',
             '-ar', '44100',
-            '-movflags', '+faststart',
+            '-max_muxing_queue_size', '4096',
             '-threads', '2',
             outputPath
         );
@@ -1219,7 +1252,14 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
                 incrementStat('videosProcessed');
                 resolve();
             } else {
-                reject(new Error(`FFmpeg TikTok ralat (kod ${code ?? signal ?? 'unknown'}): ${stderr.slice(-400)}`));
+                const matchedLines = stderr
+                    .split(/\r?\n/)
+                    .filter(line => /error|invalid|no space|failed|unable/i.test(line))
+                    .slice(-8)
+                    .join(' | ');
+                const tail = stderr.slice(-500);
+                const detail = matchedLines ? `${matchedLines} || ${tail}` : tail;
+                reject(new Error(`FFmpeg TikTok ralat (kod ${code ?? signal ?? 'unknown'}): ${detail}`));
             }
         });
         proc.on('error', reject);
