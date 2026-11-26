@@ -262,10 +262,7 @@ const PUBLIC_BASE_URL = (
 const START_BANNER_PATH = path.join(__dirname, 'assets', 'start-banner.jpg');
 
 const PACKAGES = {
-    '1': { key: '1', planCode: 'WA', title: 'WhatsApp Status HD Sahaja', price: 'RM11.99', amount: '11.99', days: 30 },
-    '2': { key: '2', planCode: 'TT', title: 'TikTok 1080p 60fps HD Sahaja', price: 'RM15.99', amount: '15.99', days: 30 },
-    '3': { key: '3', planCode: 'COMBO', title: 'Combo WhatsApp + TikTok HD', price: 'RM20.99', amount: '20.99', days: 30 },
-    '4': { key: '4', planCode: 'UPGRADE_TT', title: 'Upgrade Tambah TikTok HD (Ahli WA Aktif)', price: 'RM12.99', amount: '12.99', days: 30, requiresWa: true }
+    '1': { key: '1', planCode: 'WA', title: 'WhatsApp Status HD', price: 'RM11.99', amount: '11.99', days: 30 }
 };
 
 function calculateProratedUpgrade(waExpiredAt) {
@@ -283,21 +280,12 @@ function calculateProratedUpgrade(waExpiredAt) {
 }
 
 const PACKAGE_TEMPLATE =
-`*SENARAI PELAN LANGGANAN (${BOT_NAME}):*
+`*PELAN LANGGANAN (${BOT_NAME}):*
 
-*1. WhatsApp Status HD Sahaja* — *RM11.99 / 30 Hari*
-   └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status.
+*1. WhatsApp Status HD* — *RM11.99 / 30 Hari*
+   └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status tanpa pecah.
 
-*2. TikTok 1080p 120fps HD Sahaja* — *RM15.99 / 30 Hari*
-   └ Termasuk *Mod TT* (1080p 120fps SDR) + *Mod TTHDR* (1080p 120fps 10-bit HDR10+ Glow).
-
-*3. Combo WhatsApp + TikTok HD* — *RM20.99 / 30 Hari*
-   └ Akses penuh WhatsApp Status HD + *Mod TT* (1080p 120fps SDR) + *Mod TTHDR* (1080p 120fps 10-bit HDR10+ Glow).
-
-*4. Upgrade Tambah TikTok HD* — *RM12.99 / 30 Hari (Prorata ikut baki hari WA)*
-   └ Khas untuk ahli WhatsApp HD active; buka akses *Mod TT* (1080p 120fps SDR) & *Mod TTHDR* (1080p 120fps 10-bit HDR10+ Glow) ikut baki hari WA anda (min RM3.00).
-
-Balas nombor *1, 2, 3, atau 4* untuk jana link pembayaran automatik (FPX, DuitNow QR, eWallet & Kad).`;
+Balas nombor *1* untuk jana link pembayaran automatik (FPX, DuitNow QR, eWallet & Kad).`;
 
 // -------------------------------------------------------------
 // SISTEM PENJANAAN KOD REFERRAL PINTAR (CORE NAME + 3 DIGITS)
@@ -5752,18 +5740,14 @@ async function startBot() {
                 } else if (waActive) {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditukar ke *TTHDR (TikTok 10-bit HDR10+ Glow 120fps)*, namun akaun anda buat masa ini hanya mempunyai langganan *WhatsApp Status HD* yang active.\n\n` +
-                            `*TTHDR (TikTok 10-bit HDR10+ Glow 120fps)* termasuk sekali dalam pelan *TikTok* dan *Combo*.\n` +
-                            `• Balas *4* untuk upgrade tambah akses *TikTok + TTHDR (RM12.99/bulan prorata ikut baki hari WA)*\n` +
-                            `• Atau balas *WA* untuk kembali ke mod WhatsApp Status HD.`
+                            `Maaf, pelan *TikTok / TTHDR* ditutup sementara untuk pendaftaran baharu.\n\n` +
+                            `Akaun anda kini aktif untuk *WhatsApp Status HD*. Balas *WA* untuk kembali ke mod WhatsApp Status HD.`
                     }, { quoted: msg });
                 } else {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditetapkan ke *TTHDR (TikTok 10-bit HDR10+ Glow 120fps)*, namun anda belum mempunyai langganan active.\n\n` +
-                            `*TTHDR (TikTok 10-bit HDR10+ Glow 120fps)* termasuk dalam pelan *TikTok* dan *Combo*:\n` +
-                            `• Balas *2* untuk langgan *TikTok HD + TTHDR (RM15.99/bulan)*\n` +
-                            `• Balas *3* untuk *Combo WA + TT + TTHDR (RM20.99/bulan)*.`
+                            `Maaf, pelan *TikTok / TTHDR* ditutup sementara untuk pendaftaran baharu.\n\n` +
+                            `Buat masa ini hanya pelan *WhatsApp Status HD (RM11.99 / 30 Hari)* dibuka. Balas *1* untuk melanggan.`
                     }, { quoted: msg });
                 }
                 continue;
@@ -5788,14 +5772,14 @@ async function startBot() {
                 } else if (waActive) {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditukar ke *TikTok Crystal 1080p 120fps*, namun akaun anda buat masa ini hanya mempunyai langganan *WhatsApp Status HD* yang active.\n\n` +
-                            `Balas *4* untuk upgrade tambah akses *TikTok HD + TTHDR (RM12.99/bulan prorata ikut baki hari WA)*, atau balas *WA* untuk kembali ke mod WhatsApp Status.`
+                            `Maaf, pelan *TikTok HD* ditutup sementara untuk pendaftaran baharu.\n\n` +
+                            `Akaun anda kini aktif untuk *WhatsApp Status HD*. Balas *WA* untuk kembali ke mod WhatsApp Status HD.`
                     }, { quoted: msg });
                 } else {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditetapkan ke *TikTok Crystal 1080p 120fps*, namun anda belum mempunyai langganan active.\n\n` +
-                            `Balas *2* untuk langgan *TikTok HD + TTHDR (RM15.99/bulan)* atau *3* untuk *Combo WA + TT + TTHDR (RM20.99/bulan)*.`
+                            `Maaf, pelan *TikTok HD* ditutup sementara untuk pendaftaran baharu.\n\n` +
+                            `Buat masa ini hanya pelan *WhatsApp Status HD (RM11.99 / 30 Hari)* dibuka. Balas *1* untuk melanggan.`
                     }, { quoted: msg });
                 }
                 continue;
@@ -5814,8 +5798,7 @@ async function startBot() {
                         text:
                             `✓ *MOD WHATSAPP STATUS HD AKTIF*\n\n` +
                             `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil *WhatsApp Status HD (60fps + QHD+)*.\n\n` +
-                            `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
-                            `• Taip *TT* untuk TikTok Master 1080p, *TTHDR* untuk TikTok HDR10+ Glow, atau *MODE* untuk senarai mod.`
+                            `• Status WhatsApp HD: Aktif sehingga ${waExp}`
                     }, { quoted: msg });
                 } else if (ttActive) {
                     await sendHumanReply(sock, remoteJid, {
@@ -5827,7 +5810,7 @@ async function startBot() {
                     await sendHumanReply(sock, remoteJid, {
                         text:
                             `Mod pilihan anda ditetapkan ke *WhatsApp Status HD*, namun anda belum mempunyai langganan active.\n\n` +
-                            `Balas *1* untuk langgan *WhatsApp Status HD (RM11.99/bulan)* atau *3* untuk *Combo WA + TT + TTHDR (RM20.99/bulan)*.`
+                            `Balas *1* untuk langgan *WhatsApp Status HD (RM11.99 / 30 Hari)*.`
                     }, { quoted: msg });
                 }
                 continue;
@@ -6063,7 +6046,7 @@ async function startBot() {
                     saveUsers(users);
 
                     const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 untuk langgan RM11.99)');
-                    const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : (waActive ? 'Tidak Active (Balas 4 untuk upgrade prorata RM12.99/30h)' : 'Tidak Active (Balas 2 untuk langgan RM15.99)'));
+                    const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : 'Tiada');
                     const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
                     const currentModeLabel = currentMode === 'TTHDR'
                         ? 'TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)'
@@ -6074,11 +6057,10 @@ async function startBot() {
                             `✓ *SELAMAT KEMBALI KE ${BOT_NAME}*\n\n` +
                             `• Mod Pemprosesan Semasa: *${currentModeLabel}*\n` +
                             `• Langganan WhatsApp HD: ${waStr}\n` +
-                            `• Langganan TikTok (TT + TTHDR): ${ttStr}\n` +
+                            (ttActive ? `• Langganan TikTok (TT + TTHDR): ${ttStr}\n` : '') +
                             `• Kod Referral Peribadi: *${user.refCode}*\n\n` +
                             `Panduan Ringkas:\n` +
                             `• Hantar video atau foto anda sebagai *file / document* (Lampiran > Document > Galeri) supaya kualiti asal kekal terpelihara.\n` +
-                            `• Taip *MODE* untuk pilih mod, atau taip terus *WA*, *TT* (1080p 120fps SDR), atau *TTHDR* (1080p 120fps 10-bit HDR10+ Glow) — boleh juga letak caption WA/TT/TTHDR pada document.\n` +
                             `• Guna arahan */link ${user.refCode}* di Telegram jika mahu pautkan langganan anda.\n\n` +
                             `Ganjaran Referral: Ajak 3 rakan melanggan menggunakan kod *${user.refCode}* untuk tebus 1 bulan percuma secara automatik.`
                     }, { quoted: msg });
@@ -6092,14 +6074,12 @@ async function startBot() {
 
                     const welcomeCaption =
                         `${headerLine}\n\n` +
-                        `Naik taraf kualiti video *60fps/120fps* & gambar *QHD+* anda untuk WhatsApp Status dan TikTok tanpa pecah.\n\n` +
-                        `*Pilih Pelan Anda (30 Hari):*\n` +
-                        `*1.* *WhatsApp Status HD* — *RM11.99*\n` +
-                        `*2.* *TikTok HD (Mod TT 1080p 120fps SDR + Mod TTHDR 1080p 120fps 10-bit HDR10+ Glow)* — *RM15.99*\n` +
-                        `*3.* *Combo WhatsApp + TikTok (WA + Mod TT 120fps + Mod TTHDR 120fps 10-bit HDR10+ Glow)* — *RM20.99* _(Pilihan Terbaik)_\n` +
-                        `*4.* *Upgrade TikTok HD (Mod TT 120fps + Mod TTHDR 120fps)* — *RM12.99* _(Prorata ikut baki hari WA)_\n\n` +
+                        `Naik taraf kualiti video *60fps* & gambar *QHD+* anda untuk *WhatsApp Status* tanpa pecah.\n\n` +
+                        `*Pelan Langganan (30 Hari):*\n` +
+                        `*1.* *WhatsApp Status HD* — *RM11.99 / 30 Hari*\n` +
+                        `   └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status.\n\n` +
                         `*Cara Langgan:*\n` +
-                        `• Balas nombor *1, 2, 3, atau 4* untuk jana link bayaran *CHIP Asia* automatik (DuitNow QR, FPX, eWallet & Kad).\n` +
+                        `• Balas nombor *1* untuk jana link bayaran *CHIP Asia* automatik (DuitNow QR, FPX, eWallet & Kad).\n` +
                         `• Ada *kod referral* rakan? Hantar kod tersebut terus di sini.\n` +
                         `• Akses diaktifkan *serta-merta* selepas bayaran selesai.`;
 
@@ -6220,16 +6200,11 @@ async function startBot() {
             }
 
             if ((effectiveMode === 'TT' || effectiveMode === 'TTHDR') && !ttActive) {
-                const isHdrReq = effectiveMode === 'TTHDR';
                 await sendHumanReply(sock, remoteJid, {
-                    text: isHdrReq
-                        ? `AKSES TIKTOK HDR10+ GLOW DIPERLUKAN\n\n` +
-                          `Mod *TTHDR (TikTok HDR10+ Glow 10-bit HEVC)* termasuk dalam pelan *TikTok* dan *Combo*. Pelan anda buat masa ini hanya meliputi *WhatsApp Status HD*.\n\n` +
-                          `• Balas *4* untuk upgrade tambah akses *TikTok + TTHDR* (*kadar asas RM12.99/bulan, prorata ikut baki hari WA anda*)\n` +
-                          `• Atau balas *WA* dan hantar semula fail anda untuk memproses dalam mod WhatsApp Status HD.`
-                        : `AKSES TIKTOK HD DIPERLUKAN\n\n` +
-                          `Pelan anda buat masa ini hanya meliputi *WhatsApp Status HD*. Untuk memproses video dalam mod *TikTok Master 1080p* atau *TTHDR (HDR10+ Glow)*, sila balas *4* untuk upgrade tambah akses TikTok HD (*kadar asas RM12.99/bulan, prorata ikut baki hari WA anda*).\n\n` +
-                          `Jika anda mahu memproses untuk WhatsApp Status, balas *WA* dan hantar semula file anda.`
+                    text:
+                        `PELAN TIKTOK DITUTUP SEMENTARA\n\n` +
+                        `Maaf, pelan *TikTok / TTHDR* ditutup sementara untuk pendaftaran baharu. Pelan anda buat masa ini meliputi *WhatsApp Status HD*.\n\n` +
+                        `Sila balas *WA* dan hantar semula fail anda untuk memproses dalam mod *WhatsApp Status HD*.`
                 }, { quoted: msg });
                 continue;
             }
@@ -6238,8 +6213,7 @@ async function startBot() {
                 await sendHumanReply(sock, remoteJid, {
                     text:
                         `AKSES WHATSAPP STATUS HD DIPERLUKAN\n\n` +
-                        `Pelan anda buat masa ini hanya meliputi *TikTok HD (TT + TTHDR)*. Untuk memproses media bagi *WhatsApp Status HD*, sila balas *1* (*RM11.99/bulan*) atau *3* untuk *Combo WA + TT + TTHDR (RM20.99/bulan)*.\n\n` +
-                        `Jika anda mahu memproses video untuk TikTok, balas *TT* atau *TTHDR* (atau sertakan caption *TT*/*TTHDR* pada document anda).`
+                        `Untuk memproses media bagi *WhatsApp Status HD*, sila balas *1* untuk melanggan *WhatsApp Status HD (RM11.99 / 30 Hari)*.`
                 }, { quoted: msg });
                 continue;
             }
@@ -6755,18 +6729,12 @@ async function handleTelegramMessage(tgMsg) {
             );
         } else if (waActive) {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditukar ke TTHDR (TikTok 10-bit HDR10+ Glow 120fps), namun pelan active anda kini hanya WhatsApp Status HD.\n\n` +
-                `TTHDR (TikTok 10-bit HDR10+ Glow 120fps) termasuk sekali dalam pelan TikTok dan Combo.\n` +
-                `• Balas 4 untuk upgrade tambah TikTok + TTHDR (RM12.99/bulan prorata ikut baki hari WA)\n` +
-                `• Atau hantar /wa untuk kembali ke mod WhatsApp Status HD.`,
+                `Maaf, pelan TikTok / TTHDR ditutup sementara untuk pendaftaran baharu.\n\nAkaun anda kini aktif untuk WhatsApp Status HD. Hantar /wa untuk kembali ke mod WhatsApp Status HD.`,
                 msgId
             );
         } else {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditetapkan ke TTHDR (TikTok 10-bit HDR10+ Glow 120fps), namun anda belum mempunyai langganan active.\n\n` +
-                `TTHDR (TikTok 10-bit HDR10+ Glow 120fps) termasuk dalam pelan TikTok dan Combo:\n` +
-                `• Balas 2 untuk TikTok HD + TTHDR (RM15.99/bulan)\n` +
-                `• Balas 3 untuk Combo WA + TT + TTHDR (RM20.99/bulan).`,
+                `Maaf, pelan TikTok / TTHDR ditutup sementara untuk pendaftaran baharu.\n\nBuat masa ini hanya pelan WhatsApp Status HD (RM11.99 / 30 Hari) dibuka. Balas 1 untuk melanggan.`,
                 msgId
             );
         }
@@ -6788,12 +6756,12 @@ async function handleTelegramMessage(tgMsg) {
             );
         } else if (waActive) {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditukar ke TikTok Crystal 1080p 120fps, namun pelan active anda kini hanya WhatsApp Status HD.\n\nBalas 4 untuk upgrade tambah TikTok HD + TTHDR (RM12.99/bulan prorata ikut baki hari WA), atau /wa untuk kembali ke mod WhatsApp.`,
+                `Maaf, pelan TikTok HD ditutup sementara untuk pendaftaran baharu.\n\nAkaun anda kini aktif untuk WhatsApp Status HD. Hantar /wa untuk kembali ke mod WhatsApp.`,
                 msgId
             );
         } else {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditetapkan ke TikTok Crystal 1080p 120fps, namun anda belum mempunyai langganan active.\n\nBalas 2 untuk TikTok HD + TTHDR (RM15.99/bulan) atau 3 untuk Combo WA + TT + TTHDR (RM20.99/bulan).`,
+                `Maaf, pelan TikTok HD ditutup sementara untuk pendaftaran baharu.\n\nBuat masa ini hanya pelan WhatsApp Status HD (RM11.99 / 30 Hari) dibuka. Balas 1 untuk melanggan.`,
                 msgId
             );
         }
@@ -6809,18 +6777,17 @@ async function handleTelegramMessage(tgMsg) {
             await sendTelegramMessage(chatId,
                 `✓ MOD WHATSAPP STATUS HD AKTIF\n\n` +
                 `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil WhatsApp Status HD (60fps + QHD+).\n\n` +
-                `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
-                `• Hantar /tt untuk TikTok Master 1080p, /tthdr untuk TikTok HDR10+ Glow, atau /mode untuk senarai mod.`,
+                `• Status WhatsApp HD: Aktif sehingga ${waExp}`,
                 msgId
             );
         } else if (ttActive) {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditukar ke WhatsApp Status HD, namun pelan active anda kini hanya TikTok HD.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99/bulan), atau /tt /tthdr untuk kembali ke mod TikTok.`,
+                `Mod pilihan ditukar ke WhatsApp Status HD, namun pelan active anda kini hanya TikTok HD.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99 / 30 Hari), atau /tt /tthdr untuk kembali ke mod TikTok.`,
                 msgId
             );
         } else {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditetapkan ke WhatsApp Status HD, namun anda belum mempunyai langganan active.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99/bulan) atau 3 untuk Combo WA + TT + TTHDR (RM20.99/bulan).`,
+                `Mod pilihan ditetapkan ke WhatsApp Status HD, namun anda belum mempunyai langganan active.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99 / 30 Hari).`,
                 msgId
             );
         }
@@ -6952,7 +6919,7 @@ async function handleTelegramMessage(tgMsg) {
             saveUsers(users);
 
             const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 - RM11.99)');
-            const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : (waActive ? 'Tidak Active (Balas 4 untuk upgrade prorata RM12.99/30h)' : 'Tidak Active (Balas 2 - RM15.99)'));
+            const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : 'Tiada');
             const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
             const currentModeLabel = currentMode === 'TTHDR'
                 ? 'TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)'
@@ -6962,11 +6929,10 @@ async function handleTelegramMessage(tgMsg) {
                 `✓ SELAMAT KEMBALI KE ${BOT_NAME} (TELEGRAM)\n\n` +
                 `• Mod Semasa: ${currentModeLabel}\n` +
                 `• WhatsApp Status HD: ${waStr}\n` +
-                `• TikTok HD (TT + TTHDR): ${ttStr}\n` +
+                (ttActive ? `• TikTok HD (TT + TTHDR): ${ttStr}\n` : '') +
                 `• Kod Referral: ${user.refCode}\n\n` +
                 `Panduan Ringkas:\n` +
                 `• Hantar video atau foto sebagai File (tanpa compression, maks 20 MB mengikut had Telegram Bot API).\n` +
-                `• Taip /mode untuk pilih mod, atau /wa, /tt (1080p 120fps SDR), /tthdr (1080p 120fps 10-bit HDR10+ Glow).\n` +
                 `• Ada langganan WhatsApp sedia ada? Taip /link <KOD_REFERRAL_WA_ANDA>.`,
                 msgId
             );
@@ -6979,14 +6945,12 @@ async function handleTelegramMessage(tgMsg) {
 
             const tgWelcomeCaption =
                 `${tgHeader}\n\n` +
-                `Naik taraf kualiti video 60fps/120fps & gambar QHD+ anda untuk WhatsApp Status dan TikTok tanpa pecah.\n\n` +
-                `Pilih Pelan Anda (30 Hari):\n` +
-                `1. WhatsApp Status HD — RM11.99\n` +
-                `2. TikTok HD (Mod TT 1080p 120fps SDR + Mod TTHDR 1080p 120fps 10-bit HDR10+ Glow) — RM15.99\n` +
-                `3. Combo WhatsApp + TikTok (WA + Mod TT 120fps + Mod TTHDR 120fps 10-bit HDR10+ Glow) — RM20.99 (Pilihan Terbaik)\n` +
-                `4. Upgrade TikTok HD (Mod TT 120fps + Mod TTHDR 120fps) — RM12.99 (Prorata ikut baki hari WA)\n\n` +
+                `Naik taraf kualiti video 60fps & gambar QHD+ anda untuk WhatsApp Status tanpa pecah.\n\n` +
+                `Pelan Langganan (30 Hari):\n` +
+                `1. WhatsApp Status HD — RM11.99 / 30 Hari\n` +
+                `   └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status.\n\n` +
                 `Cara Langgan:\n` +
-                `• Balas nombor 1, 2, 3, atau 4 untuk jana link bayaran CHIP Asia automatik.\n` +
+                `• Balas nombor 1 untuk jana link bayaran CHIP Asia automatik.\n` +
                 `• Sudah melanggan di WhatsApp? Hantar /link <KOD_REFERRAL_ANDA>.\n` +
                 `• Akses diaktifkan serta-merta selepas bayaran selesai.`;
 
@@ -7079,18 +7043,15 @@ async function handleTelegramMessage(tgMsg) {
     else if (/\b(WA|WHATSAPP)\b/.test(captionUpper)) effectiveMode = 'WA';
 
     if ((effectiveMode === 'TT' || effectiveMode === 'TTHDR') && !ttActive) {
-        const isHdrReq = effectiveMode === 'TTHDR';
         await sendTelegramMessage(chatId,
-            isHdrReq
-                ? `Mod TTHDR (TikTok HDR10+ Glow 10-bit HEVC) termasuk dalam pelan TikTok dan Combo. Pelan anda kini hanya meliputi WhatsApp Status HD.\n\nBalas 4 untuk upgrade TikTok + TTHDR (kadar asas RM12.99/bulan prorata ikut baki hari WA), atau hantar /wa untuk proses mod WhatsApp.`
-                : `Pelan anda kini hanya meliputi WhatsApp Status HD. Balas 4 untuk upgrade TikTok HD + TTHDR (kadar asas RM12.99/bulan prorata ikut baki hari WA), atau hantar /wa untuk proses mod WhatsApp.`,
+            `Maaf, pelan TikTok / TTHDR ditutup sementara untuk pendaftaran baharu. Pelan anda kini meliputi WhatsApp Status HD.\n\nHantar /wa untuk proses mod WhatsApp Status HD.`,
             msgId
         );
         return;
     }
     if (effectiveMode === 'WA' && !waActive) {
         await sendTelegramMessage(chatId,
-            `Pelan anda kini hanya meliputi TikTok HD (TT + TTHDR). Balas 1 untuk WhatsApp Status HD (RM11.99/bulan) atau 3 untuk Combo (RM20.99/bulan), atau hantar /tt atau /tthdr untuk proses mod TikTok.`,
+            `Untuk memproses media bagi WhatsApp Status HD, sila balas 1 untuk melanggan WhatsApp Status HD (RM11.99 / 30 Hari).`,
             msgId
         );
         return;
