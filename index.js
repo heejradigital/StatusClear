@@ -59,9 +59,28 @@ const ADMIN_IDENTIFIERS = Array.from(new Set([
     '68225740046362'
 ]));
 
+function isSuperAdminNumber(val) {
+    const clean = String(val || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+    if (!clean) return false;
+    return clean === '60194066718' || clean === '0194066718' || clean.endsWith('194066718');
+}
+
+function isSuperAdminSender(msg, senderJid, userRecord = null) {
+    const candidates = [
+        senderJid,
+        msg?.key?.remoteJid,
+        msg?.key?.remoteJidAlt,
+        msg?.key?.participant,
+        msg?.key?.participantAlt,
+        userRecord?.phone,
+        userRecord?.altJid,
+        userRecord?.linkedWaPhone
+    ];
+    return candidates.some(c => isSuperAdminNumber(c));
+}
+
 function isPrimaryAdmin(phone, remoteJid = '') {
-    const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
-    return cleanPhone === PRIMARY_ADMIN || cleanPhone === '0194066718' || cleanPhone === '194066718' || String(remoteJid || '').includes(PRIMARY_ADMIN);
+    return isSuperAdminNumber(phone) || isSuperAdminNumber(remoteJid);
 }
 
 function isAnyAdmin(phone, remoteJid = '', fromMe = false) {
@@ -453,8 +472,7 @@ function hasWaAccess(user, isSuperAdmin = false) {
 }
 
 function hasTtAccess(user, isSuperAdmin = false) {
-    if (isSuperAdmin) return true;
-    return !!(user && user.ttExpiredAt && user.ttExpiredAt > Date.now());
+    return !!isSuperAdmin;
 }
 
 function hasAnyAccess(user, isSuperAdmin = false) {
@@ -953,12 +971,48 @@ class RobustVideoQueue {
 
 const videoQueue = new RobustVideoQueue();
 
+function parseProbeFrameRate(rateStr) {
+    if (!rateStr || typeof rateStr !== 'string') return 0;
+    const parts = rateStr.split('/');
+    if (parts.length === 2) {
+        const num = parseFloat(parts[0]);
+        const den = parseFloat(parts[1]);
+        if (!isNaN(num) && !isNaN(den) && den > 0) {
+            const val = num / den;
+            if (val > 0 && val <= 240) return val;
+        }
+        return 0;
+    }
+    const parsed = parseFloat(rateStr);
+    return (!isNaN(parsed) && parsed > 0 && parsed <= 240) ? parsed : 0;
+}
+
+function getTikTokEncodeSpec(sourceFps) {
+    const numFps = Number(sourceFps) || 30;
+    if (numFps >= 45) {
+        return {
+            targetFps: 60,
+            targetBitrate: '15000k',
+            minRate: '14000k',
+            maxRate: '16000k',
+            bufSize: '32000k'
+        };
+    }
+    return {
+        targetFps: 30,
+        targetBitrate: '13000k',
+        minRate: '12000k',
+        maxRate: '14000k',
+        bufSize: '28000k'
+    };
+}
+
 async function probeVideo(filePath, binPath) {
     return new Promise((resolve) => {
         const args = [
             '-v', 'error',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,bit_rate,duration,r_frame_rate,color_transfer,color_primaries,color_space',
+            '-show_entries', 'stream=width,height,bit_rate,duration,r_frame_rate,avg_frame_rate,color_transfer,color_primaries,color_space',
             '-show_entries', 'format=duration,bit_rate',
             '-of', 'json',
             filePath
@@ -972,6 +1026,7 @@ async function probeVideo(filePath, binPath) {
             let height = 1920;
             let bitRateBps = 0;
             let colorTransfer = '';
+            let colorPrimaries = '';
 
             if (!err && stdout) {
                 try {
@@ -992,21 +1047,14 @@ async function probeVideo(filePath, binPath) {
                     const parsedBr = parseInt(rawBr, 10);
                     if (!isNaN(parsedBr) && parsedBr > 0) bitRateBps = parsedBr;
 
-                    if (vStream?.r_frame_rate) {
-                        const parts = vStream.r_frame_rate.split('/');
-                        if (parts.length === 2) {
-                            const num = parseFloat(parts[0]);
-                            const den = parseFloat(parts[1]);
-                            if (den > 0) fps = num / den;
-                        } else {
-                            const parsedFps = parseFloat(vStream.r_frame_rate);
-                            if (!isNaN(parsedFps) && parsedFps > 0) fps = parsedFps;
-                        }
-                    }
+                    const rFps = parseProbeFrameRate(vStream?.r_frame_rate);
+                    const avgFps = parseProbeFrameRate(vStream?.avg_frame_rate);
+                    fps = rFps || avgFps || 30;
 
                     const transfer = (vStream?.color_transfer || '').toLowerCase();
                     const primaries = (vStream?.color_primaries || '').toLowerCase();
                     colorTransfer = transfer;
+                    colorPrimaries = primaries;
                     if (
                         transfer.includes('smpte2084') ||
                         transfer.includes('arib-std-b67') ||
@@ -1021,7 +1069,7 @@ async function probeVideo(filePath, binPath) {
             }
             const shortSide = Math.min(width, height);
             const isPreCompressed = (shortSide < 1000 || (bitRateBps > 0 && bitRateBps < 2500000));
-            resolve({ duration, fps, isHDR, colorTransfer, width, height, shortSide, bitRateBps, isPreCompressed });
+            resolve({ duration, fps, isHDR, colorTransfer, colorPrimaries, width, height, shortSide, bitRateBps, isPreCompressed });
         });
     });
 }
@@ -1155,6 +1203,7 @@ function cleanupStaleTempMedia(maxAgeMs = 15 * 60 * 1000) {
 async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, isHDR, maxDurationSec = 90, isPreCompressed = false) {
     cleanupStaleTempMedia(15 * 60 * 1000);
     return new Promise((resolve, reject) => {
+        const { targetFps, targetBitrate, minRate, maxRate, bufSize } = getTikTokEncodeSpec(sourceFps);
         const hasCas = checkCasSupport(binPath);
         const sharpFilter = hasCas ? 'cas=strength=0.14' : 'unsharp=5:5:0.14:5:5:0.0';
 
@@ -1177,7 +1226,7 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
         const vfChain = filterParts.join(',');
         const args = [
             '-y',
-            '-fflags', '+genpts+igndts',
+            '-fflags', '+genpts',
             '-err_detect', 'ignore_err',
             '-i', inputPath
         ];
@@ -1194,31 +1243,32 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
             '-c:v', 'libx264',
             '-preset', 'fast',
             '-profile:v', 'high',
-            '-level', '5.2',
+            '-level', '4.2',
             '-pix_fmt', 'yuv420p',
             '-fps_mode', 'cfr',
-            '-r', '120',
-            '-b:v', '22000k',
-            '-minrate', '20000k',
-            '-maxrate', '24000k',
-            '-bufsize', '48000k',
+            '-r', String(targetFps),
+            '-b:v', targetBitrate,
+            '-minrate', minRate,
+            '-maxrate', maxRate,
+            '-bufsize', bufSize,
             '-refs', '3',
             '-rc-lookahead', '30',
-            '-bf', '3',
-            '-g', '120',
-            '-keyint_min', '120',
+            '-bf', '2',
+            '-g', String(targetFps),
+            '-keyint_min', String(targetFps),
             '-sc_threshold', '0',
             '-x264-params', 'deblock=-1,-1:aq-mode=3:aq-strength=0.95:psy-rd=1.00,0.08',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
             '-color_range', 'tv',
-            '-af', 'aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+            '-af', 'aresample=async=1:first_pts=0',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-ac', '2',
             '-ar', '48000',
             '-max_muxing_queue_size', '4096',
+            '-movflags', '+faststart',
             '-threads', '2',
             outputPath
         );
@@ -1248,6 +1298,7 @@ async function transcodeTikTokVideo(inputPath, outputPath, binPath, sourceFps, i
 async function transcodeTikTokHdrVideo(inputPath, outputPath, binPath, sourceFps, sourceTransfer = '', maxDurationSec = 90) {
     cleanupStaleTempMedia(15 * 60 * 1000);
     return new Promise((resolve, reject) => {
+        const { targetFps, targetBitrate, minRate, maxRate, bufSize } = getTikTokEncodeSpec(sourceFps);
         const hasCas = checkCasSupport(binPath);
         const sharpFilter = hasCas ? 'cas=strength=0.12' : 'unsharp=5:5:0.12:5:5:0.0';
         const cleanTransfer = String(sourceTransfer || '').toLowerCase();
@@ -1272,7 +1323,7 @@ async function transcodeTikTokHdrVideo(inputPath, outputPath, binPath, sourceFps
         const x265Params = `sao=0:aq-mode=3:aq-strength=1.00:psy-rd=1.50:psy-rdoq=1.00:rdoq-level=1:hdr-opt=1:repeat-headers=1:colorprim=bt2020:transfer=${activeTransfer}:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400`;
         const args = [
             '-y',
-            '-fflags', '+genpts+igndts',
+            '-fflags', '+genpts',
             '-err_detect', 'ignore_err',
             '-i', inputPath
         ];
@@ -1288,29 +1339,30 @@ async function transcodeTikTokHdrVideo(inputPath, outputPath, binPath, sourceFps
             '-vf', vfChain,
             '-c:v', 'libx265',
             '-preset', 'fast',
-            '-level:v', '5.1',
+            '-level:v', '4.1',
             '-pix_fmt', 'yuv420p10le',
             '-tag:v', 'hvc1',
             '-fps_mode', 'cfr',
-            '-r', '120',
-            '-bf', '3',
-            '-b:v', '22000k',
-            '-minrate', '20000k',
-            '-maxrate', '24000k',
-            '-bufsize', '48000k',
-            '-g', '120',
-            '-keyint_min', '120',
+            '-r', String(targetFps),
+            '-bf', '2',
+            '-b:v', targetBitrate,
+            '-minrate', minRate,
+            '-maxrate', maxRate,
+            '-bufsize', bufSize,
+            '-g', String(targetFps),
+            '-keyint_min', String(targetFps),
             '-x265-params', x265Params,
             '-colorspace', 'bt2020nc',
             '-color_primaries', 'bt2020',
             '-color_trc', activeTransfer,
             '-color_range', 'tv',
-            '-af', 'aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+            '-af', 'aresample=async=1:first_pts=0',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-ac', '2',
             '-ar', '48000',
             '-max_muxing_queue_size', '4096',
+            '-movflags', '+faststart',
             '-threads', '2',
             outputPath
         );
@@ -5135,7 +5187,8 @@ async function startBot() {
             }
 
             const fromMe = msg.key.fromMe;
-            const isSuperAdmin = isPrimaryAdmin(phone, remoteJid) || isPrimaryAdmin(user?.phone, altJid);
+            const senderJid = msg.key.participant || msg.key.remoteJid || remoteJid;
+            const isSuperAdmin = isSuperAdminSender(msg, senderJid, user);
             const isAdmin = isAnyAdmin(phone, remoteJid, fromMe) || isSuperAdmin;
             const waActive = hasWaAccess(user, isSuperAdmin);
             const ttActive = hasTtAccess(user, isSuperAdmin);
@@ -5703,85 +5756,87 @@ async function startBot() {
                 if (altJid) user.altJid = altJid;
                 saveUsers(users);
 
-                const curMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
-                const curLabel = curMode === 'TTHDR'
-                    ? 'TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)'
-                    : (curMode === 'TT' ? 'TikTok Crystal 1080p 120fps (SDR)' : 'WhatsApp Status HD');
+                if (isSuperAdminSender(msg, senderJid, user)) {
+                    const curMode = user.preferredMode || 'WA';
+                    const curLabel = curMode === 'TTHDR'
+                        ? 'TikTok 10-bit HDR10+ Glow (1080p 30/60fps HEVC hvc1)'
+                        : (curMode === 'TT' ? 'TikTok Crystal 1080p (30/60fps SDR 15 Mbps)' : 'WhatsApp Status HD');
 
-                await sendHumanReply(sock, remoteJid, {
-                    text:
-                        `*PILIH MOD PEMPROSESAN VIDEO*\n` +
-                        `Mod semasa: *${curLabel}*\n\n` +
-                        `Balas nombor atau kod mod di bawah:\n` +
-                        `• *1* atau *WA* — WhatsApp Status HD\n` +
-                        `• *2* atau *TT* — TikTok Crystal 1080p 120fps (SDR)\n` +
-                        `• *3* atau *TTHDR* — TikTok 10-bit HDR10+ Glow 120fps (HEVC \`hvc1\`)\n\n` +
-                        `_Nota: Mod TT & TTHDR termasuk dalam pelan TikTok dan Combo._`
-                }, { quoted: msg });
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `*PILIH MOD PEMPROSESAN VIDEO (SUPERADMIN)*\n` +
+                            `Mod semasa: *${curLabel}*\n\n` +
+                            `Balas nombor atau kod mod di bawah:\n` +
+                            `• *1* atau *WA* — WhatsApp Status HD\n` +
+                            `• *2* atau *TT* — TikTok Crystal 1080p (30/60fps SDR 15 Mbps)\n` +
+                            `• *3* atau *TTHDR* — TikTok 10-bit HDR10+ Glow (30/60fps HEVC \`hvc1\` 15 Mbps)`
+                    }, { quoted: msg });
+                } else {
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `*MOD PEMPROSESAN VIDEO*\n` +
+                            `Mod semasa: *WhatsApp Status HD*\n\n` +
+                            `• *1* atau *WA* — WhatsApp Status HD (Video 60fps & Foto QHD+)`
+                    }, { quoted: msg });
+                }
                 continue;
             }
 
             if (modeChoiceTarget === 'TTHDR' || ['tthdr', '/tthdr', 'hdr', '/hdr', 'tiktokhdr', '/tiktokhdr'].includes(cmd)) {
+                if (!isSuperAdminSender(msg, senderJid, user)) {
+                    if (user) {
+                        user.preferredMode = 'WA';
+                        user.awaitingModeChoice = false;
+                        saveUsers(users);
+                    }
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `🔒 Mod *TT* dan *TTHDR* dikhaskan untuk akses Superadmin sahaja buat masa ini.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
                 user.preferredMode = 'TTHDR';
                 user.awaitingModeChoice = false;
                 user.jid = remoteJid;
                 if (altJid) user.altJid = altJid;
                 saveUsers(users);
 
-                if (ttActive) {
-                    const ttExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.ttExpiredAt).toLocaleDateString('ms-MY');
-                    await sendHumanReply(sock, remoteJid, {
-                        text:
-                            `✓ *MOD TIKTOK 10-BIT HDR10+ GLOW 120FPS AKTIF*\n\n` +
-                            `Semua video yang anda hantar selepas ini akan diproses menggunakan profil *TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1, 22 Mbps)* untuk paparan tajam & berkilau pada skrin OLED/HDR.\n\n` +
-                            `• Status TikTok / TTHDR: Aktif sehingga ${ttExp}\n` +
-                            `• Taip *TT* untuk TikTok Crystal 1080p 120fps SDR, *WA* untuk WhatsApp Status HD, atau *MODE* untuk senarai mod.`
-                    }, { quoted: msg });
-                } else if (waActive) {
-                    await sendHumanReply(sock, remoteJid, {
-                        text:
-                            `Maaf, pelan *TikTok / TTHDR* ditutup sementara untuk pendaftaran baharu.\n\n` +
-                            `Akaun anda kini aktif untuk *WhatsApp Status HD*. Balas *WA* untuk kembali ke mod WhatsApp Status HD.`
-                    }, { quoted: msg });
-                } else {
-                    await sendHumanReply(sock, remoteJid, {
-                        text:
-                            `Maaf, pelan *TikTok / TTHDR* ditutup sementara untuk pendaftaran baharu.\n\n` +
-                            `Buat masa ini hanya pelan *WhatsApp Status HD (RM11.99 / 30 Hari)* dibuka. Balas *1* untuk melanggan.`
-                    }, { quoted: msg });
-                }
+                await sendHumanReply(sock, remoteJid, {
+                    text:
+                        `✓ *MOD TIKTOK 10-BIT HDR10+ GLOW AKTIF (SUPERADMIN)*\n\n` +
+                        `Semua video selepas ini akan diproses pada *1080p 30/60fps CFR (10-bit HEVC hvc1, 15 Mbps VBV, +faststart)* untuk kelancaran Galeri & kualiti HDR10+ penuh kepada semua penonton.\n\n` +
+                        `• Akses: *Tanpa Had (Superadmin 0194066718)*\n` +
+                        `• Taip *TT* untuk 1080p SDR, *WA* untuk WhatsApp Status HD, atau *MODE* untuk senarai mod.`
+                }, { quoted: msg });
                 continue;
             }
 
             if (modeChoiceTarget === 'TT' || ['tt', '/tt', 'tiktok', '/tiktok'].includes(cmd)) {
+                if (!isSuperAdminSender(msg, senderJid, user)) {
+                    if (user) {
+                        user.preferredMode = 'WA';
+                        user.awaitingModeChoice = false;
+                        saveUsers(users);
+                    }
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `🔒 Mod *TT* dan *TTHDR* dikhaskan untuk akses Superadmin sahaja buat masa ini.`
+                    }, { quoted: msg });
+                    continue;
+                }
+
                 user.preferredMode = 'TT';
                 user.awaitingModeChoice = false;
                 user.jid = remoteJid;
                 if (altJid) user.altJid = altJid;
                 saveUsers(users);
 
-                if (ttActive) {
-                    const ttExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.ttExpiredAt).toLocaleDateString('ms-MY');
-                    await sendHumanReply(sock, remoteJid, {
-                        text:
-                            `✓ *MOD TIKTOK CRYSTAL 1080P 120FPS (SDR) AKTIF*\n\n` +
-                            `Semua video yang anda hantar selepas ini akan diproses menggunakan profil *TikTok Crystal 1080p 120fps (SDR 22 Mbps)*.\n\n` +
-                            `• Status TikTok HD: Aktif sehingga ${ttExp}\n` +
-                            `• Taip *TTHDR* untuk mod TikTok 10-bit HDR10+ Glow 120fps (HEVC), *WA* untuk WhatsApp Status HD, atau *MODE* untuk senarai mod.`
-                    }, { quoted: msg });
-                } else if (waActive) {
-                    await sendHumanReply(sock, remoteJid, {
-                        text:
-                            `Maaf, pelan *TikTok HD* ditutup sementara untuk pendaftaran baharu.\n\n` +
-                            `Akaun anda kini aktif untuk *WhatsApp Status HD*. Balas *WA* untuk kembali ke mod WhatsApp Status HD.`
-                    }, { quoted: msg });
-                } else {
-                    await sendHumanReply(sock, remoteJid, {
-                        text:
-                            `Maaf, pelan *TikTok HD* ditutup sementara untuk pendaftaran baharu.\n\n` +
-                            `Buat masa ini hanya pelan *WhatsApp Status HD (RM11.99 / 30 Hari)* dibuka. Balas *1* untuk melanggan.`
-                    }, { quoted: msg });
-                }
+                await sendHumanReply(sock, remoteJid, {
+                    text:
+                        `✓ *MOD TIKTOK CRYSTAL 1080P (SDR) AKTIF (SUPERADMIN)*\n\n` +
+                        `Semua video selepas ini akan diproses pada *1080p 30/60fps CFR (H.264 High L4.2, 15 Mbps VBV, +faststart)* untuk kelancaran Galeri & ketajaman maksimum kepada semua penonton.\n\n` +
+                        `• Akses: *Tanpa Had (Superadmin 0194066718)*\n` +
+                        `• Taip *TTHDR* untuk 10-bit HDR10+ Glow, *WA* untuk WhatsApp Status HD, atau *MODE* untuk senarai mod.`
+                }, { quoted: msg });
                 continue;
             }
 
@@ -6046,18 +6101,18 @@ async function startBot() {
                     saveUsers(users);
 
                     const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 untuk langgan RM11.99)');
-                    const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : 'Tiada');
-                    const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+                    const ttStr = 'Tanpa Had (Super Admin)';
+                    const currentMode = isSuperAdmin ? (user.preferredMode || 'WA') : 'WA';
                     const currentModeLabel = currentMode === 'TTHDR'
-                        ? 'TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)'
-                        : (currentMode === 'TT' ? 'TikTok Crystal 1080p 120fps (SDR)' : 'WhatsApp Status HD');
+                        ? 'TikTok 10-bit HDR10+ Glow (1080p 30/60fps HEVC hvc1)'
+                        : (currentMode === 'TT' ? 'TikTok Crystal 1080p (30/60fps SDR 15 Mbps)' : 'WhatsApp Status HD');
 
                     await sendHumanReply(sock, remoteJid, {
                         text:
                             `✓ *SELAMAT KEMBALI KE ${BOT_NAME}*\n\n` +
                             `• Mod Pemprosesan Semasa: *${currentModeLabel}*\n` +
                             `• Langganan WhatsApp HD: ${waStr}\n` +
-                            (ttActive ? `• Langganan TikTok (TT + TTHDR): ${ttStr}\n` : '') +
+                            (isSuperAdmin ? `• Akses TikTok (TT + TTHDR): ${ttStr}\n` : '') +
                             `• Kod Referral Peribadi: *${user.refCode}*\n\n` +
                             `Panduan Ringkas:\n` +
                             `• Hantar video atau foto anda sebagai *file / document* (Lampiran > Document > Galeri) supaya kualiti asal kekal terpelihara.\n` +
@@ -6098,13 +6153,11 @@ async function startBot() {
             if (['status', 'baki', 'langganan'].includes(cmd)) {
                 if (isActive) {
                     const waDays = isSuperAdmin ? 9999 : (waActive ? Math.ceil((user.waExpiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0);
-                    const ttDays = isSuperAdmin ? 9999 : (ttActive ? Math.ceil((user.ttExpiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0);
                     const waLine = isSuperAdmin ? 'Active (Super Admin Unlimited)' : (waActive ? `Active (${waDays} hari lagi, luput ${new Date(user.waExpiredAt).toLocaleDateString('ms-MY')})` : 'Tiada');
-                    const ttLine = isSuperAdmin ? 'Active (Super Admin Unlimited)' : (ttActive ? `Active (${ttDays} hari lagi, luput ${new Date(user.ttExpiredAt).toLocaleDateString('ms-MY')})` : 'Tiada');
-                    const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+                    const currentMode = isSuperAdmin ? (user.preferredMode || 'WA') : 'WA';
                     const currentModeLabel = currentMode === 'TTHDR'
-                        ? 'TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)'
-                        : (currentMode === 'TT' ? 'TikTok Crystal 1080p 120fps (SDR)' : 'WhatsApp Status HD');
+                        ? 'TikTok 10-bit HDR10+ Glow (1080p 30/60fps HEVC hvc1)'
+                        : (currentMode === 'TT' ? 'TikTok Crystal 1080p (30/60fps SDR 15 Mbps)' : 'WhatsApp Status HD');
 
                     await sendHumanReply(sock, remoteJid, {
                         text:
@@ -6112,10 +6165,12 @@ async function startBot() {
                             `• Nama: *${user.name}*\n` +
                             `• Mod Pilihan: *${currentModeLabel}*\n` +
                             `• WhatsApp Status HD: ${waLine}\n` +
-                            `• TikTok HD (TT + TTHDR): ${ttLine}\n` +
+                            (isSuperAdmin ? `• TikTok HD (TT + TTHDR): Active (Super Admin Unlimited)\n` : '') +
                             `• Kod Referral: *${user.refCode || '-'}*\n` +
                             `• Kemajuan Ganjaran: ${user.paidReferrals || 0}/3 rakan melanggan\n\n` +
-                            `Balas *MODE*, *WA*, *TT*, atau *TTHDR* untuk menukar mod pemprosesan, atau *BAYAR* untuk tambah/perbaharui langganan.`
+                            (isSuperAdmin
+                                ? `Balas *MODE*, *WA*, *TT*, atau *TTHDR* untuk menukar mod pemprosesan.`
+                                : `Balas *BAYAR* untuk tambah atau perbaharui langganan anda.`)
                     }, { quoted: msg });
                 } else {
                     await sendHumanReply(sock, remoteJid, {
@@ -6180,7 +6235,7 @@ async function startBot() {
             }
 
             const mediaCaptionUpper = (docMsg?.caption || inner.imageMessage?.caption || textContent || '').trim().toUpperCase();
-            let effectiveMode = user?.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+            let effectiveMode = user?.preferredMode || 'WA';
             if (/\b(TTHDR|HDR10|HDR)\b/.test(mediaCaptionUpper)) {
                 effectiveMode = 'TTHDR';
             } else if (/\b(TT|TIKTOK)\b/.test(mediaCaptionUpper)) {
@@ -6189,7 +6244,20 @@ async function startBot() {
                 effectiveMode = 'WA';
             }
 
-            if (!isActive) {
+            if (effectiveMode === 'TT' || effectiveMode === 'TTHDR') {
+                if (!isSuperAdminSender(msg, senderJid, user)) {
+                    if (user && (user.preferredMode === 'TT' || user.preferredMode === 'TTHDR')) {
+                        user.preferredMode = 'WA';
+                        saveUsers(users);
+                    }
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `🔒 Mod *TT* dan *TTHDR* dikhaskan untuk akses Superadmin sahaja buat masa ini.`
+                    }, { quoted: msg });
+                    continue;
+                }
+            }
+
+            if (!isActive && !isSuperAdminSender(msg, senderJid, user)) {
                 const isWaiting = user && user.status === 'WAITING';
                 const msgText = isWaiting
                     ? `AKSES DITANGGUHKAN: MENUNGGU PEMBAYARAN\n\nAkaun anda sedang menunggu pengesahan bayaran. Sila lengkapkan transaksi melalui link CHIP Asia yang telah diberikan atau taip *START* untuk lihat semula pakej.`
@@ -6199,17 +6267,7 @@ async function startBot() {
                 continue;
             }
 
-            if ((effectiveMode === 'TT' || effectiveMode === 'TTHDR') && !ttActive) {
-                await sendHumanReply(sock, remoteJid, {
-                    text:
-                        `PELAN TIKTOK DITUTUP SEMENTARA\n\n` +
-                        `Maaf, pelan *TikTok / TTHDR* ditutup sementara untuk pendaftaran baharu. Pelan anda buat masa ini meliputi *WhatsApp Status HD*.\n\n` +
-                        `Sila balas *WA* dan hantar semula fail anda untuk memproses dalam mod *WhatsApp Status HD*.`
-                }, { quoted: msg });
-                continue;
-            }
-
-            if (effectiveMode === 'WA' && !waActive) {
+            if (effectiveMode === 'WA' && !waActive && !isSuperAdminSender(msg, senderJid, user)) {
                 await sendHumanReply(sock, remoteJid, {
                     text:
                         `AKSES WHATSAPP STATUS HD DIPERLUKAN\n\n` +
@@ -6351,12 +6409,7 @@ async function startBot() {
                     run: async () => {
                         const fileId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                         const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
-                        const outputPath = path.join(
-                            TEMP_DIR,
-                            targetMode === 'TTHDR'
-                                ? `TikTok_HDR10_120fps_${fileId}.mp4`
-                                : (targetMode === 'TT' ? `TikTok_1080p120fps_${fileId}.mp4` : `status_clear_60fps_${fileId}.mp4`)
-                        );
+                        let outputPath = path.join(TEMP_DIR, `status_clear_60fps_${fileId}.mp4`);
 
                         try {
                             try {
@@ -6371,33 +6424,35 @@ async function startBot() {
                             await pipeline(mediaStream, fs.createWriteStream(inputPath));
 
                             const { duration: durationSec, fps: sourceFps, isHDR, colorTransfer, isPreCompressed } = await probeVideo(inputPath, ffprobePath);
+                            const { targetFps, targetBitrate } = getTikTokEncodeSpec(sourceFps);
 
                             if (targetMode === 'TTHDR') {
-                                console.log(`[FFmpeg TikTok HDR10+ 120fps] 1080p120 10-bit HEVC hvc1 22Mbps VBV | sao=0 | Transfer: ${colorTransfer || 'sdr->smpte2084'} | PreCompressed: ${isPreCompressed} | Durasi: ${durationSec.toFixed(1)}s`);
-                                await transcodeTikTokHdrVideo(inputPath, outputPath, ffmpegPath, sourceFps, colorTransfer, isSuperAdmin ? 0 : 90);
+                                const hdrFileName = `TikTok_HDR10_${targetFps}fps_${Date.now()}.mp4`;
+                                outputPath = path.join(TEMP_DIR, hdrFileName);
+                                console.log(`[FFmpeg TikTok HDR10+] 1080p${targetFps} 10-bit HEVC hvc1 ${targetBitrate} VBV (+faststart, aresample) | sao=0 | Transfer: ${colorTransfer || 'sdr->smpte2084'} | PreCompressed: ${isPreCompressed} | Durasi: ${durationSec.toFixed(1)}s`);
+                                await transcodeTikTokHdrVideo(inputPath, outputPath, ffmpegPath, sourceFps, colorTransfer, 0);
 
                                 const hdrSent = await safeSendMessage(sock, remoteJid, {
                                     document: { stream: fs.createReadStream(outputPath) },
                                     mimetype: 'video/mp4',
-                                    fileName: `TikTok_HDR10_120fps_${Date.now()}.mp4`
+                                    fileName: hdrFileName
                                 }, { quoted: msg });
                                 if (hdrSent && hdrSent.key && hdrSent.key.id && hdrSent.message) {
                                     storeCachedMessage(hdrSent.key.id, hdrSent.message);
                                 }
 
                                 const preCompNotice = isPreCompressed
-                                    ? `⚠️ *Nota Penting:* Video yang anda hantar tadi telah dimampatkan oleh WhatsApp sebelum sampai ke bot. Untuk ketajaman 120fps maksimum tanpa pecah, sentiasa tekan ikon klip (📎) > *Document* semasa menghantar video asal ke bot.\n\n`
+                                    ? `⚠️ *Nota Penting:* Video asal dikesan telah dimampatkan oleh WhatsApp sebelum sampai ke bot. Sentiasa tekan ikon klip (📎) > *Document* semasa menghantar video asal.\n\n`
                                     : '';
 
                                 await sendCachedMessage(sock, remoteJid, {
                                     text:
                                         `${preCompNotice}` +
-                                        `✅ *Video TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1, 22 Mbps) Siap!*\n\n` +
-                                        `Ikut 4 langkah wajib ini supaya kualiti *120fps & HDR10+ Glow* kekal pada TikTok:\n` +
-                                        `1. Simpan fail dokumen di atas ke *Files / Downloads* (jangan forward ke chat lain).\n` +
-                                        `2. Muat naik melalui pelayar *Chrome/Edge (Desktop Site)* di *https://www.tiktok.com/upload* ATAU hidupkan *Upload HD* pada aplikasi TikTok.\n` +
-                                        `3. *Jangan* tambah filter, efek warna, teks, atau sticker dalam editor TikTok supaya metadata 10-bit HDR10+ tidak hilang.\n` +
-                                        `4. Pastikan *Data Saver* TikTok dimatikan (OFF) dan tunggu 2–3 minit selepas post untuk pemprosesan 1080p/HDR10+ selesai.`
+                                        `✅ *Video TikTok 1080p ${targetFps}fps 10-bit HDR10+ Glow (${targetBitrate.replace('000k', ' Mbps')}) Siap!*\n\n` +
+                                        `Panduan muat naik supaya semua penonton menerima stream *1080p${targetFps} + HDR10+ Glow* penuh:\n` +
+                                        `1. Simpan dokumen di atas ke *Files / Galeri* (siap \`+faststart\` lancar tanpa sangkut & audio selari 100%).\n` +
+                                        `2. Muat naik melalui *https://www.tiktok.com/upload* (Desktop Site) atau hidupkan *Upload HD* pada aplikasi TikTok tanpa sebarang filter/sticker dalam aplikasi.\n` +
+                                        `3. Pastikan *Data Saver* OFF dan tunggu 2–3 minit selepas post supaya stream 1080p${targetFps} / HDR10+ selesai disebarkan ke semua akaun penonton.`
                                 });
 
                                 try {
@@ -6406,31 +6461,32 @@ async function startBot() {
                                     });
                                 } catch {}
                             } else if (targetMode === 'TT') {
-                                console.log(`[FFmpeg TikTok Crystal 120fps] 1080p120 22Mbps VBV | bf=3 | CAS 0.14 | PreCompressed: ${isPreCompressed} | HDR: ${isHDR} | Durasi: ${durationSec.toFixed(1)}s`);
-                                await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90, isPreCompressed);
+                                const ttFileName = `TikTok_1080p_${targetFps}fps_${Date.now()}.mp4`;
+                                outputPath = path.join(TEMP_DIR, ttFileName);
+                                console.log(`[FFmpeg TikTok Crystal] 1080p${targetFps} ${targetBitrate} VBV (+faststart, aresample) | bf=2 | CAS 0.14 | PreCompressed: ${isPreCompressed} | HDR: ${isHDR} | Durasi: ${durationSec.toFixed(1)}s`);
+                                await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, 0, isPreCompressed);
 
                                 const ttSent = await safeSendMessage(sock, remoteJid, {
                                     document: { stream: fs.createReadStream(outputPath) },
                                     mimetype: 'video/mp4',
-                                    fileName: `TikTok_1080p120fps_${Date.now()}.mp4`
+                                    fileName: ttFileName
                                 }, { quoted: msg });
                                 if (ttSent && ttSent.key && ttSent.key.id && ttSent.message) {
                                     storeCachedMessage(ttSent.key.id, ttSent.message);
                                 }
 
                                 const preCompNotice = isPreCompressed
-                                    ? `⚠️ *Nota Penting:* Video yang anda hantar tadi telah dimampatkan oleh WhatsApp sebelum sampai ke bot. Untuk ketajaman 120fps maksimum tanpa pecah, sentiasa tekan ikon klip (📎) > *Document* semasa menghantar video asal ke bot.\n\n`
+                                    ? `⚠️ *Nota Penting:* Video asal dikesan telah dimampatkan oleh WhatsApp sebelum sampai ke bot. Sentiasa tekan ikon klip (📎) > *Document* semasa menghantar video asal.\n\n`
                                     : '';
 
                                 await sendCachedMessage(sock, remoteJid, {
                                     text:
                                         `${preCompNotice}` +
-                                        `✅ *Video TikTok Crystal 1080p 120fps (22 Mbps) Siap!*\n\n` +
-                                        `Ikut 4 langkah wajib ini supaya TikTok tidak pecahkan video anda:\n` +
-                                        `1. Simpan fail dokumen di atas ke *Files / Downloads* (jangan forward ke chat lain).\n` +
-                                        `2. Muat naik melalui pelayar *Chrome/Edge (Desktop Site)* di *https://www.tiktok.com/upload* ATAU hidupkan *Upload HD* pada skrin post aplikasi TikTok.\n` +
-                                        `3. *Jangan* tambah filter, teks, atau sticker dalam editor TikTok selepas pilih video.\n` +
-                                        `4. Pastikan *Data Saver* TikTok dimatikan (OFF) dan tunggu 2–3 minit selepas post untuk pemprosesan 1080p HD selesai.`
+                                        `✅ *Video TikTok Crystal 1080p ${targetFps}fps (${targetBitrate.replace('000k', ' Mbps')}) Siap!*\n\n` +
+                                        `Panduan muat naik supaya semua penonton menerima stream *1080p${targetFps}* tajam tanpa pecah:\n` +
+                                        `1. Simpan dokumen di atas ke *Files / Galeri* (siap \`+faststart\` lancar tanpa sangkut & audio selari 100%).\n` +
+                                        `2. Muat naik melalui *https://www.tiktok.com/upload* (Desktop Site) atau hidupkan *Upload HD* pada aplikasi TikTok tanpa sebarang filter/sticker dalam aplikasi.\n` +
+                                        `3. Pastikan *Data Saver* OFF dan tunggu 2–3 minit selepas post supaya stream 1080p${targetFps} selesai disebarkan ke semua akaun penonton.`
                                 });
 
                                 try {
@@ -6697,74 +6753,70 @@ async function handleTelegramMessage(tgMsg) {
     if (['/mode', 'mode', '/mod', 'mod'].includes(cmd)) {
         user.awaitingModeChoice = true;
         saveUsers(users);
-        const curMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
-        const curLabel = curMode === 'TTHDR'
-            ? 'TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)'
-            : (curMode === 'TT' ? 'TikTok Crystal 1080p 120fps (SDR)' : 'WhatsApp Status HD');
+        if (isSuperAdmin) {
+            const curMode = user.preferredMode || 'WA';
+            const curLabel = curMode === 'TTHDR'
+                ? 'TikTok 10-bit HDR10+ Glow (1080p 30/60fps HEVC hvc1)'
+                : (curMode === 'TT' ? 'TikTok Crystal 1080p (30/60fps SDR 15 Mbps)' : 'WhatsApp Status HD');
+            await sendTelegramMessage(chatId,
+                `PILIH MOD PEMPROSESAN VIDEO (SUPERADMIN)\n` +
+                `Mod semasa: ${curLabel}\n\n` +
+                `Balas nombor atau arahan di bawah:\n` +
+                `• 1 atau /wa — WhatsApp Status HD\n` +
+                `• 2 atau /tt — TikTok Crystal 1080p (30/60fps SDR 15 Mbps)\n` +
+                `• 3 atau /tthdr — TikTok 10-bit HDR10+ Glow (30/60fps HEVC hvc1 15 Mbps)`,
+                msgId
+            );
+        } else {
+            await sendTelegramMessage(chatId,
+                `MOD PEMPROSESAN VIDEO\n` +
+                `Mod semasa: WhatsApp Status HD\n\n` +
+                `• 1 atau /wa — WhatsApp Status HD (Video 60fps & Foto QHD+)`,
+                msgId
+            );
+        }
+        return;
+    }
+
+    if (tgModeChoiceTarget === 'TTHDR' || ['/tthdr', 'tthdr', '/hdr', 'hdr', '/tiktokhdr', 'tiktokhdr'].includes(cmd)) {
+        if (!isSuperAdmin) {
+            user.preferredMode = 'WA';
+            user.awaitingModeChoice = false;
+            saveUsers(users);
+            await sendTelegramMessage(chatId, `🔒 Mod TT dan TTHDR dikhaskan untuk akses Superadmin sahaja buat masa ini.`, msgId);
+            return;
+        }
+        user.preferredMode = 'TTHDR';
+        user.awaitingModeChoice = false;
+        saveUsers(users);
         await sendTelegramMessage(chatId,
-            `PILIH MOD PEMPROSESAN VIDEO\n` +
-            `Mod semasa: ${curLabel}\n\n` +
-            `Balas nombor atau arahan di bawah:\n` +
-            `• 1 atau /wa — WhatsApp Status HD\n` +
-            `• 2 atau /tt — TikTok Crystal 1080p 120fps (SDR)\n` +
-            `• 3 atau /tthdr — TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)\n\n` +
-            `Nota: Mod TT & TTHDR termasuk dalam pelan TikTok dan Combo.`,
+            `✓ MOD TIKTOK 10-BIT HDR10+ GLOW AKTIF (SUPERADMIN)\n\n` +
+            `Semua video selepas ini akan diproses pada 1080p 30/60fps CFR (10-bit HEVC hvc1, 15 Mbps VBV, +faststart) untuk kelancaran Galeri & kualiti HDR10+ penuh kepada semua penonton.\n\n` +
+            `• Akses: Tanpa Had (Superadmin 0194066718)\n` +
+            `• Hantar /tt untuk 1080p SDR, /wa untuk WhatsApp Status HD, atau /mode untuk senarai mod.`,
             msgId
         );
         return;
     }
 
-    if (tgModeChoiceTarget === 'TTHDR' || ['/tthdr', 'tthdr', '/hdr', 'hdr', '/tiktokhdr', 'tiktokhdr'].includes(cmd)) {
-        user.preferredMode = 'TTHDR';
-        user.awaitingModeChoice = false;
-        saveUsers(users);
-        if (ttActive) {
-            const ttExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.ttExpiredAt).toLocaleDateString('ms-MY');
-            await sendTelegramMessage(chatId,
-                `✓ MOD TIKTOK 10-BIT HDR10+ GLOW 120FPS AKTIF\n\n` +
-                `Semua video yang anda hantar selepas ini akan diproses menggunakan profil TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1, 22 Mbps) untuk paparan tajam & berkilau pada skrin OLED/HDR.\n\n` +
-                `• Status TikTok / TTHDR: Aktif sehingga ${ttExp}\n` +
-                `• Hantar /tt untuk TikTok Crystal 1080p 120fps SDR, /wa untuk WhatsApp Status HD, atau /mode untuk senarai mod.`,
-                msgId
-            );
-        } else if (waActive) {
-            await sendTelegramMessage(chatId,
-                `Maaf, pelan TikTok / TTHDR ditutup sementara untuk pendaftaran baharu.\n\nAkaun anda kini aktif untuk WhatsApp Status HD. Hantar /wa untuk kembali ke mod WhatsApp Status HD.`,
-                msgId
-            );
-        } else {
-            await sendTelegramMessage(chatId,
-                `Maaf, pelan TikTok / TTHDR ditutup sementara untuk pendaftaran baharu.\n\nBuat masa ini hanya pelan WhatsApp Status HD (RM11.99 / 30 Hari) dibuka. Balas 1 untuk melanggan.`,
-                msgId
-            );
-        }
-        return;
-    }
-
     if (tgModeChoiceTarget === 'TT' || ['/tt', 'tt', '/tiktok', 'tiktok'].includes(cmd)) {
+        if (!isSuperAdmin) {
+            user.preferredMode = 'WA';
+            user.awaitingModeChoice = false;
+            saveUsers(users);
+            await sendTelegramMessage(chatId, `🔒 Mod TT dan TTHDR dikhaskan untuk akses Superadmin sahaja buat masa ini.`, msgId);
+            return;
+        }
         user.preferredMode = 'TT';
         user.awaitingModeChoice = false;
         saveUsers(users);
-        if (ttActive) {
-            const ttExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.ttExpiredAt).toLocaleDateString('ms-MY');
-            await sendTelegramMessage(chatId,
-                `✓ MOD TIKTOK CRYSTAL 1080P 120FPS (SDR) AKTIF\n\n` +
-                `Semua video yang anda hantar selepas ini akan diproses menggunakan profil TikTok Crystal 1080p 120fps (SDR 22 Mbps).\n\n` +
-                `• Status TikTok HD: Aktif sehingga ${ttExp}\n` +
-                `• Hantar /tthdr untuk TikTok 10-bit HDR10+ Glow 120fps (HEVC), /wa untuk WhatsApp Status HD, atau /mode untuk senarai mod.`,
-                msgId
-            );
-        } else if (waActive) {
-            await sendTelegramMessage(chatId,
-                `Maaf, pelan TikTok HD ditutup sementara untuk pendaftaran baharu.\n\nAkaun anda kini aktif untuk WhatsApp Status HD. Hantar /wa untuk kembali ke mod WhatsApp.`,
-                msgId
-            );
-        } else {
-            await sendTelegramMessage(chatId,
-                `Maaf, pelan TikTok HD ditutup sementara untuk pendaftaran baharu.\n\nBuat masa ini hanya pelan WhatsApp Status HD (RM11.99 / 30 Hari) dibuka. Balas 1 untuk melanggan.`,
-                msgId
-            );
-        }
+        await sendTelegramMessage(chatId,
+            `✓ MOD TIKTOK CRYSTAL 1080P (SDR) AKTIF (SUPERADMIN)\n\n` +
+            `Semua video selepas ini akan diproses pada 1080p 30/60fps CFR (H.264 High L4.2, 15 Mbps VBV, +faststart) untuk kelancaran Galeri & ketajaman maksimum kepada semua penonton.\n\n` +
+            `• Akses: Tanpa Had (Superadmin 0194066718)\n` +
+            `• Hantar /tthdr untuk 10-bit HDR10+ Glow, /wa untuk WhatsApp Status HD, atau /mode untuk senarai mod.`,
+            msgId
+        );
         return;
     }
 
@@ -6919,17 +6971,16 @@ async function handleTelegramMessage(tgMsg) {
             saveUsers(users);
 
             const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 - RM11.99)');
-            const ttStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (ttActive ? new Date(user.ttExpiredAt).toLocaleDateString('ms-MY') : 'Tiada');
-            const currentMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+            const currentMode = isSuperAdmin ? (user.preferredMode || 'WA') : 'WA';
             const currentModeLabel = currentMode === 'TTHDR'
-                ? 'TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)'
-                : (currentMode === 'TT' ? 'TikTok Crystal 1080p 120fps (SDR)' : 'WhatsApp Status HD');
+                ? 'TikTok 10-bit HDR10+ Glow (1080p 30/60fps HEVC hvc1)'
+                : (currentMode === 'TT' ? 'TikTok Crystal 1080p (30/60fps SDR 15 Mbps)' : 'WhatsApp Status HD');
 
             await sendTelegramMessage(chatId,
                 `✓ SELAMAT KEMBALI KE ${BOT_NAME} (TELEGRAM)\n\n` +
                 `• Mod Semasa: ${currentModeLabel}\n` +
                 `• WhatsApp Status HD: ${waStr}\n` +
-                (ttActive ? `• TikTok HD (TT + TTHDR): ${ttStr}\n` : '') +
+                (isSuperAdmin ? `• Akses TikTok (TT + TTHDR): Tanpa Had (Super Admin)\n` : '') +
                 `• Kod Referral: ${user.refCode}\n\n` +
                 `Panduan Ringkas:\n` +
                 `• Hantar video atau foto sebagai File (tanpa compression, maks 20 MB mengikut had Telegram Bot API).\n` +
@@ -6969,22 +7020,20 @@ async function handleTelegramMessage(tgMsg) {
     if (['/status', 'status', 'baki'].includes(cmd)) {
         if (isActive) {
             const waDays = isSuperAdmin ? 9999 : (waActive ? Math.ceil((user.waExpiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0);
-            const ttDays = isSuperAdmin ? 9999 : (ttActive ? Math.ceil((user.ttExpiredAt - Date.now()) / (1000 * 60 * 60 * 24)) : 0);
             const waLine = isSuperAdmin ? 'Active (Super Admin Unlimited)' : (waActive ? `Active (${waDays} hari lagi, luput ${new Date(user.waExpiredAt).toLocaleDateString('ms-MY')})` : 'Tiada');
-            const ttLine = isSuperAdmin ? 'Active (Super Admin Unlimited)' : (ttActive ? `Active (${ttDays} hari lagi, luput ${new Date(user.ttExpiredAt).toLocaleDateString('ms-MY')})` : 'Tiada');
-            const curMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
+            const curMode = isSuperAdmin ? (user.preferredMode || 'WA') : 'WA';
             const curModeLabel = curMode === 'TTHDR'
-                ? 'TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1)'
-                : (curMode === 'TT' ? 'TikTok Crystal 1080p 120fps (SDR)' : 'WhatsApp Status HD');
+                ? 'TikTok 10-bit HDR10+ Glow (1080p 30/60fps HEVC hvc1)'
+                : (curMode === 'TT' ? 'TikTok Crystal 1080p (30/60fps SDR 15 Mbps)' : 'WhatsApp Status HD');
             await sendTelegramMessage(chatId,
                 `✓ STATUS KEAHLIAN ANDA\n\n` +
                 `• Nama: ${user.name}\n` +
                 `• Mod Pilihan: ${curModeLabel}\n` +
                 `• WhatsApp Status HD: ${waLine}\n` +
-                `• TikTok HD (TT + TTHDR): ${ttLine}\n` +
+                (isSuperAdmin ? `• TikTok HD (TT + TTHDR): Active (Super Admin Unlimited)\n` : '') +
                 `• Kod Referral: ${user.refCode || '-'}\n` +
                 `• Kemajuan Ganjaran: ${user.paidReferrals || 0}/3 rakan melanggan\n\n` +
-                `Hantar /mode, /wa, /tt, atau /tthdr untuk tukar mod pemprosesan.`,
+                (isSuperAdmin ? `Hantar /mode, /wa, /tt, atau /tthdr untuk tukar mod pemprosesan.` : `Hantar /bayar untuk tambah atau perbaharui langganan.`),
                 msgId
             );
         } else {
@@ -7028,7 +7077,24 @@ async function handleTelegramMessage(tgMsg) {
 
     if (!isTgVideo && !isTgImage) return;
 
-    if (!isActive) {
+    const captionUpper = (tgMsg.caption || '').trim().toUpperCase();
+    let effectiveMode = user.preferredMode || 'WA';
+    if (/\b(TTHDR|HDR10|HDR)\b/.test(captionUpper)) effectiveMode = 'TTHDR';
+    else if (/\b(TT|TIKTOK)\b/.test(captionUpper)) effectiveMode = 'TT';
+    else if (/\b(WA|WHATSAPP)\b/.test(captionUpper)) effectiveMode = 'WA';
+
+    if (effectiveMode === 'TT' || effectiveMode === 'TTHDR') {
+        if (!isSuperAdmin) {
+            if (user.preferredMode === 'TT' || user.preferredMode === 'TTHDR') {
+                user.preferredMode = 'WA';
+                saveUsers(users);
+            }
+            await sendTelegramMessage(chatId, `🔒 Mod TT dan TTHDR dikhaskan untuk akses Superadmin sahaja buat masa ini.`, msgId);
+            return;
+        }
+    }
+
+    if (!isActive && !isSuperAdmin) {
         await sendTelegramMessage(chatId,
             `AKSES DISEKAT: LANGGANAN DIPERLUKAN\n\nFungsi pemprosesan video 60fps & foto QHD+ hanya tersedia untuk ahli active. Hantar /start untuk melanggan atau /link <KOD>.`,
             msgId
@@ -7036,20 +7102,7 @@ async function handleTelegramMessage(tgMsg) {
         return;
     }
 
-    const captionUpper = (tgMsg.caption || '').trim().toUpperCase();
-    let effectiveMode = user.preferredMode || (ttActive && !waActive ? 'TT' : 'WA');
-    if (/\b(TTHDR|HDR10|HDR)\b/.test(captionUpper)) effectiveMode = 'TTHDR';
-    else if (/\b(TT|TIKTOK)\b/.test(captionUpper)) effectiveMode = 'TT';
-    else if (/\b(WA|WHATSAPP)\b/.test(captionUpper)) effectiveMode = 'WA';
-
-    if ((effectiveMode === 'TT' || effectiveMode === 'TTHDR') && !ttActive) {
-        await sendTelegramMessage(chatId,
-            `Maaf, pelan TikTok / TTHDR ditutup sementara untuk pendaftaran baharu. Pelan anda kini meliputi WhatsApp Status HD.\n\nHantar /wa untuk proses mod WhatsApp Status HD.`,
-            msgId
-        );
-        return;
-    }
-    if (effectiveMode === 'WA' && !waActive) {
+    if (effectiveMode === 'WA' && !waActive && !isSuperAdmin) {
         await sendTelegramMessage(chatId,
             `Untuk memproses media bagi WhatsApp Status HD, sila balas 1 untuk melanggan WhatsApp Status HD (RM11.99 / 30 Hari).`,
             msgId
@@ -7122,45 +7175,41 @@ async function handleTelegramMessage(tgMsg) {
             run: async () => {
                 const fileId = `tg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                 const inputPath = path.join(TEMP_DIR, `input_${fileId}${videoInputExt}`);
-                const outputPath = path.join(
-                    TEMP_DIR,
-                    targetMode === 'TTHDR'
-                        ? `TikTok_HDR10_120fps_${fileId}.mp4`
-                        : (targetMode === 'TT' ? `TikTok_1080p120fps_${fileId}.mp4` : `status_clear_60fps_${fileId}.mp4`)
-                );
+                let outputPath = path.join(TEMP_DIR, `status_clear_60fps_${fileId}.mp4`);
                 try {
                     await downloadTelegramFile(fileObj.file_id, MAX_TG_BYTES, inputPath);
                     const { duration: durationSec, fps: sourceFps, isHDR, colorTransfer, isPreCompressed } = await probeVideo(inputPath, ffprobePath);
+                    const { targetFps, targetBitrate } = getTikTokEncodeSpec(sourceFps);
                     if (targetMode === 'TTHDR') {
-                        await transcodeTikTokHdrVideo(inputPath, outputPath, ffmpegPath, sourceFps, colorTransfer, isSuperAdmin ? 0 : 90);
+                        outputPath = path.join(TEMP_DIR, `TikTok_HDR10_${targetFps}fps_${Date.now()}.mp4`);
+                        await transcodeTikTokHdrVideo(inputPath, outputPath, ffmpegPath, sourceFps, colorTransfer, 0);
                         await sendTelegramMedia(chatId, 'document', outputPath, null, msgId);
                         const preCompNotice = isPreCompressed
-                            ? `⚠️ Nota Penting: Video asal dikesan telah dimampatkan sebelum sampai ke bot. Hantar sebagai File tanpa compression untuk ketajaman 120fps maksimum.\n\n`
+                            ? `⚠️ Nota Penting: Video asal dikesan telah dimampatkan sebelum sampai ke bot. Hantar sebagai File tanpa compression.\n\n`
                             : '';
                         await sendTelegramMessage(chatId,
                             `${preCompNotice}` +
-                            `✅ Video TikTok 10-bit HDR10+ Glow 120fps (HEVC hvc1, 22 Mbps) Siap!\n\n` +
-                            `Ikut 4 langkah wajib ini supaya kualiti 120fps & HDR10+ Glow kekal pada TikTok:\n` +
-                            `1. Simpan fail dokumen di atas ke Files / Downloads (jangan forward ke chat lain).\n` +
-                            `2. Muat naik melalui pelayar Chrome/Edge (Desktop Site) di https://www.tiktok.com/upload ATAU hidupkan Upload HD pada aplikasi TikTok.\n` +
-                            `3. Jangan tambah filter, efek warna, teks, atau sticker dalam editor TikTok supaya metadata 10-bit HDR10+ tidak hilang.\n` +
-                            `4. Pastikan Data Saver TikTok dimatikan (OFF) dan tunggu 2–3 minit selepas post untuk pemprosesan 1080p/HDR10+ selesai.`,
+                            `✅ Video TikTok 1080p ${targetFps}fps 10-bit HDR10+ Glow (${targetBitrate.replace('000k', ' Mbps')}) Siap!\n\n` +
+                            `Panduan muat naik supaya semua penonton menerima stream 1080p${targetFps} + HDR10+ Glow penuh:\n` +
+                            `1. Simpan dokumen di atas ke Files / Galeri (siap +faststart lancar tanpa sangkut & audio selari 100%).\n` +
+                            `2. Muat naik melalui https://www.tiktok.com/upload (Desktop Site) atau hidupkan Upload HD pada aplikasi TikTok tanpa sebarang filter/sticker.\n` +
+                            `3. Pastikan Data Saver OFF dan tunggu 2–3 minit selepas post supaya stream 1080p${targetFps} / HDR10+ selesai disebarkan ke semua akaun penonton.`,
                             msgId
                         );
                     } else if (targetMode === 'TT') {
-                        await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, isSuperAdmin ? 0 : 90, isPreCompressed);
+                        outputPath = path.join(TEMP_DIR, `TikTok_1080p_${targetFps}fps_${Date.now()}.mp4`);
+                        await transcodeTikTokVideo(inputPath, outputPath, ffmpegPath, sourceFps, isHDR, 0, isPreCompressed);
                         await sendTelegramMedia(chatId, 'document', outputPath, null, msgId);
                         const preCompNotice = isPreCompressed
-                            ? `⚠️ Nota Penting: Video asal dikesan telah dimampatkan sebelum sampai ke bot. Hantar sebagai File tanpa compression untuk ketajaman 120fps maksimum.\n\n`
+                            ? `⚠️ Nota Penting: Video asal dikesan telah dimampatkan sebelum sampai ke bot. Hantar sebagai File tanpa compression.\n\n`
                             : '';
                         await sendTelegramMessage(chatId,
                             `${preCompNotice}` +
-                            `✅ Video TikTok Crystal 1080p 120fps (22 Mbps) Siap!\n\n` +
-                            `Ikut 4 langkah wajib ini supaya TikTok tidak pecahkan video anda:\n` +
-                            `1. Simpan fail dokumen di atas ke Files / Downloads (jangan forward ke chat lain).\n` +
-                            `2. Muat naik melalui pelayar Chrome/Edge (Desktop Site) di https://www.tiktok.com/upload ATAU hidupkan Upload HD pada skrin post aplikasi TikTok.\n` +
-                            `3. Jangan tambah filter, teks, atau sticker dalam editor TikTok selepas pilih video.\n` +
-                            `4. Pastikan Data Saver TikTok dimatikan (OFF) dan tunggu 2–3 minit selepas post untuk pemprosesan 1080p HD selesai.`,
+                            `✅ Video TikTok Crystal 1080p ${targetFps}fps (${targetBitrate.replace('000k', ' Mbps')}) Siap!\n\n` +
+                            `Panduan muat naik supaya semua penonton menerima stream 1080p${targetFps} tajam tanpa pecah:\n` +
+                            `1. Simpan dokumen di atas ke Files / Galeri (siap +faststart lancar tanpa sangkut & audio selari 100%).\n` +
+                            `2. Muat naik melalui https://www.tiktok.com/upload (Desktop Site) atau hidupkan Upload HD pada aplikasi TikTok tanpa sebarang filter/sticker.\n` +
+                            `3. Pastikan Data Saver OFF dan tunggu 2–3 minit selepas post supaya stream 1080p${targetFps} selesai disebarkan ke semua akaun penonton.`,
                             msgId
                         );
                     } else {
