@@ -6529,15 +6529,21 @@ async function startBot() {
                             const sizeKB = (sizeBytes / 1024).toFixed(1);
                             const sharpNote = hasCas ? 'CAS 0.35 (Kontras Adaptif)' : 'Lanczos Sharp Resample';
 
+                            const imgSent = await safeSendMessage(sock, remoteJid, {
+                                image: { stream: fs.createReadStream(outputPath) }
+                            }, { quoted: msg });
+                            if (imgSent && imgSent.key && imgSent.key.id && imgSent.message) {
+                                storeCachedMessage(imgSent.key.id, imgSent.message);
+                            }
+
                             await sendCachedMessage(sock, remoteJid, {
-                                image: { stream: fs.createReadStream(outputPath) },
-                                caption:
+                                text:
                                     `✓ *PENGOPTIMUMAN FOTO SELESAI*\n\n` +
                                     `Foto anda telah ditingkatkan ke resolusi 2560px (QHD+) dengan penalaan ${sharpNote} & kawalan anti-mampatan WhatsApp Status.\n\n` +
                                     `• Saiz File: ${sizeKB} KB (Zon Selamat)\n` +
                                     `• Profil Kualiti: JPEG Q=${usedQ}\n\n` +
-                                    `Anda boleh terus muat naik foto ini ke WhatsApp Status anda.`
-                            }, { quoted: msg });
+                                    `Terus tekan *Forward* pada gambar di atas ke *My Status* (atau simpan ke Galeri tanpa menambah teks/sticker dalam editor WhatsApp).`
+                            });
 
                             try {
                                 await sock.sendMessage(remoteJid, {
@@ -6734,9 +6740,9 @@ async function startBot() {
                                             await transcodeWaSplitPart(inputPath, partPath, ffmpegPath, probeInfo, startSec, clipDur);
 
                                             const partSent = await safeSendMessage(sock, remoteJid, {
-                                                document: { stream: fs.createReadStream(partPath) },
+                                                video: { stream: fs.createReadStream(partPath) },
                                                 mimetype: 'video/mp4',
-                                                fileName: partFileName
+                                                hd: true
                                             }, { quoted: msg });
                                             if (partSent && partSent.key && partSent.key.id && partSent.message) {
                                                 storeCachedMessage(partSent.key.id, partSent.message);
@@ -6751,7 +6757,7 @@ async function startBot() {
                                     await sendCachedMessage(sock, remoteJid, {
                                         text:
                                             `${waPreCompNotice}` +
-                                            `✅ *Siap! Video dipotong kepada ${totalParts} bahagian HD (29.5s setiap satu).* Simpan semua dokumen di atas ke Galeri dan muat naik ke WhatsApp Status mengikut turutan *Part 1 ➔ Part ${totalParts}* tanpa menambah teks/sticker dalam editor WhatsApp.`
+                                            `✅ *Siap! Video dipotong kepada ${totalParts} bahagian HD (29.5s setiap satu).* Terus tekan *Forward* pada video di atas mengikut turutan (*Part 1 ➔ Part ${totalParts}*) ke *My Status* (atau simpan ke Galeri) tanpa menambah teks/sticker dalam editor WhatsApp.`
                                     });
                                 } else {
                                     const isShortSplitFallback = (targetMode === 'WASPLIT');
@@ -6763,9 +6769,9 @@ async function startBot() {
                                     console.log(`[FFmpeg WA Status] 720p${waFps} @ ${finalKbps}k (<14.5MB Cap) | Audio: ${audioCopied ? 'copy' : 'aac 128k aresample'} | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
 
                                     const waSent = await safeSendMessage(sock, remoteJid, {
-                                        document: { stream: fs.createReadStream(outputPath) },
+                                        video: { stream: fs.createReadStream(outputPath) },
                                         mimetype: 'video/mp4',
-                                        fileName: waFileName
+                                        hd: true
                                     }, { quoted: msg });
                                     if (waSent && waSent.key && waSent.key.id && waSent.message) {
                                         storeCachedMessage(waSent.key.id, waSent.message);
@@ -6779,8 +6785,8 @@ async function startBot() {
                                         text:
                                             `${waPreCompNotice}${shortFallbackNote}` +
                                             `✅ *Video WhatsApp Status HD (720p ${waFps}fps) Siap!*\n\n` +
-                                            `1. Simpan dokumen di atas ke *Galeri / Files*.\n` +
-                                            `2. Muat naik terus ke *WhatsApp Status* tanpa menambah teks, sticker, atau lagu dalam editor WhatsApp (supaya WhatsApp tidak memampatkan semula video anda).\n` +
+                                            `1. Terus tekan *Forward* pada video di atas dan pilih *My Status* (atau simpan ke Galeri).\n` +
+                                            `2. *Jangan* tambah teks, sticker, atau lagu dalam editor WhatsApp supaya kualiti HD kekal tajam tanpa mampatan semula.\n` +
                                             `• _Video panjang >30s? Taip *WASPLIT* untuk potong automatik 29.5s HD._`
                                     });
                                 }
@@ -7426,8 +7432,9 @@ async function handleTelegramMessage(tgMsg) {
                     const { sizeBytes, hasCas, usedQ } = await enhanceQhdPhoto(inputPath, outputPath, ffmpegPath);
                     const sizeKB = (sizeBytes / 1024).toFixed(1);
                     const sharpNote = hasCas ? 'CAS 0.35 (Kontras Adaptif)' : 'Lanczos Sharp Resample';
-                    await sendTelegramMedia(chatId, 'photo', outputPath,
-                        `✓ PENGOPTIMUMAN FOTO SELESAI\nResolusi: 2560px QHD+ | ${sharpNote} | ${sizeKB} KB (JPEG Q=${usedQ})`,
+                    await sendTelegramMedia(chatId, 'photo', outputPath, null, msgId);
+                    await sendTelegramMessage(chatId,
+                        `✓ PENGOPTIMUMAN FOTO SELESAI\nResolusi: 2560px QHD+ | ${sharpNote} | ${sizeKB} KB (JPEG Q=${usedQ})\n\nSimpan gambar di atas ke Galeri dan muat naik terus ke WhatsApp Status tanpa menambah teks/sticker.`,
                         msgId
                     );
                 } catch (err) {
@@ -7527,14 +7534,14 @@ async function handleTelegramMessage(tgMsg) {
                                 generatedParts.push(partPath);
                                 try {
                                     await transcodeWaSplitPart(inputPath, partPath, ffmpegPath, probeInfo, startSec, clipDur);
-                                    await sendTelegramMedia(chatId, 'document', partPath, null, msgId);
+                                    await sendTelegramMedia(chatId, 'video', partPath, null, msgId);
                                 } finally {
                                     if (fs.existsSync(partPath)) { try { fs.unlinkSync(partPath); } catch {} }
                                 }
                             }
                             incrementStat('videosProcessed');
                             await sendTelegramMessage(chatId,
-                                `${waPreCompNotice}✅ Siap! Video dipotong kepada ${totalParts} bahagian HD (29.5s setiap satu). Simpan semua dokumen di atas ke Galeri dan muat naik ke WhatsApp Status mengikut turutan Part 1 ➔ Part ${totalParts} tanpa menambah teks/sticker dalam editor WhatsApp.`,
+                                `${waPreCompNotice}✅ Siap! Video dipotong kepada ${totalParts} bahagian HD (29.5s setiap satu). Simpan video di atas ke Galeri dan muat naik ke WhatsApp Status mengikut turutan Part 1 ➔ Part ${totalParts} tanpa menambah teks/sticker dalam editor WhatsApp.`,
                                 msgId
                             );
                         } else {
@@ -7543,12 +7550,12 @@ async function handleTelegramMessage(tgMsg) {
                             const waFileName = `WA_Status720p_${waFps}fps_${Date.now()}.mp4`;
                             outputPath = path.join(TEMP_DIR, waFileName);
                             await transcodeWaStatusVideo(inputPath, outputPath, ffmpegPath, probeInfo);
-                            await sendTelegramMedia(chatId, 'document', outputPath, null, msgId);
+                            await sendTelegramMedia(chatId, 'video', outputPath, null, msgId);
                             const shortFallbackNote = isShortSplitFallback
                                 ? `ℹ️ Video anda sudah bawah 30 saat (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video penuh HD tanpa perlu dipotong.\n\n`
                                 : '';
                             await sendTelegramMessage(chatId,
-                                `${waPreCompNotice}${shortFallbackNote}✅ Video WhatsApp Status HD (720p ${waFps}fps) Siap!\n\n1. Simpan dokumen di atas ke Galeri / Files.\n2. Muat naik terus ke WhatsApp Status tanpa menambah teks, sticker, atau lagu dalam editor WhatsApp (supaya WhatsApp tidak memampatkan semula video anda).\n• Video panjang >30s? Hantar /wasplit untuk potong automatik 29.5s HD.`,
+                                `${waPreCompNotice}${shortFallbackNote}✅ Video WhatsApp Status HD (720p ${waFps}fps) Siap!\n\n1. Simpan video di atas ke Galeri.\n2. Muat naik terus ke WhatsApp Status tanpa menambah teks, sticker, atau lagu dalam editor WhatsApp (supaya WhatsApp tidak memampatkan semula video anda).\n• Video panjang >30s? Hantar /wasplit untuk potong automatik 29.5s HD.`,
                                 msgId
                             );
                         }
