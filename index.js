@@ -276,12 +276,12 @@ const PUBLIC_BASE_URL = (
 ).replace(/\/+$/, '').trim();
 
 // -------------------------------------------------------------
-// TEMPLAT PAKEJ LANGGANAN RASMI (WA, TT, COMBO & UPGRADE)
+// TEMPLAT PAKEJ LANGGANAN RASMI (WHATSAPP STATUS HD SAHAJA)
 // -------------------------------------------------------------
 const START_BANNER_PATH = path.join(__dirname, 'assets', 'start-banner.jpg');
 
 const PACKAGES = {
-    '1': { key: '1', planCode: 'WA', title: 'WhatsApp Status HD', price: 'RM11.99', amount: '11.99', days: 30 }
+    '1': { key: '1', planCode: 'WA', title: 'WhatsApp Status HD (30 Hari)', price: 'RM11.99', amount: '11.99', days: 30 }
 };
 
 function calculateProratedUpgrade(waExpiredAt) {
@@ -299,12 +299,14 @@ function calculateProratedUpgrade(waExpiredAt) {
 }
 
 const PACKAGE_TEMPLATE =
-`*PELAN LANGGANAN (${BOT_NAME}):*
+`*PAKEJ WHATSAPP STATUS HD — RM11.99 / 30 Hari*
+✅ Video HD 60fps lancar & gambar 2560px tajam
+✅ Sokong format .mov, .heic & semua jenis fail
+✅ Auto-potong video panjang ikut had Status
+✅ Tanpa had penggunaan selama 30 hari
+✅ Pengaktifan automatik 24/7 selepas bayar
 
-*1. WhatsApp Status HD* — *RM11.99 / 30 Hari*
-   └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status tanpa pecah.
-
-Balas nombor *1* untuk jana link pembayaran automatik (FPX, DuitNow QR, eWallet & Kad).`;
+Balas *1* atau *Start* untuk dapatkan pautan bayaran CHIP In Asia sekarang.`;
 
 // -------------------------------------------------------------
 // SISTEM PENJANAAN KOD REFERRAL PINTAR (CORE NAME + 3 DIGITS)
@@ -1748,7 +1750,7 @@ function getWhatsAppReturnUrl(status = 'success') {
     return `https://wa.me/${botWaNumber}?text=${encodeURIComponent('Pembayaran dibatalkan')}`;
 }
 
-async function createChipCheckout({ userKey, phone, formattedName, userEmail = '', planType = 'WA', planTitle = 'WhatsApp Status HD', amountRM = '11.99', days = 30, platform = 'whatsapp', appliedRefCode = '' }) {
+async function createChipCheckout({ userKey, phone, formattedName, userEmail = '', planType = 'WA', planTitle = 'WhatsApp Status HD (30 Hari)', amountRM = '11.99', days = 30, platform = 'whatsapp', appliedRefCode = '' }) {
     if (!CHIP_BRAND_ID || !CHIP_API_KEY) {
         throw new Error('CHIP_BRAND_ID atau CHIP_API_KEY belum dikonfigurasikan di Environment Variables.');
     }
@@ -1756,13 +1758,16 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
     const invoiceRef = generateClearStatusInvoiceRef();
     const numericPhone = String(phone || '').replace(/[^0-9]/g, '') || '60000000000';
     const safeEmailUser = String(phone || numericPhone).replace(/[^a-zA-Z0-9._-]/g, '') || numericPhone;
-    const priceCents = Math.round((parseFloat(amountRM) || 0) * 100);
+    const priceCents = Math.round((parseFloat(amountRM) || 11.99) * 100);
+    const fullProductName = String(planTitle || 'WhatsApp Status HD (30 Hari)').startsWith('Clear Status -')
+        ? String(planTitle)
+        : `Clear Status - ${planTitle || 'WhatsApp Status HD (30 Hari)'}`;
 
     const cleanEmail = String(userEmail || '').trim();
     const fallbackEmail = (process.env.CHIP_FALLBACK_EMAIL || '').trim() || `${safeEmailUser}@statusclear.my`;
     const clientPayload = {
         email: (cleanEmail && cleanEmail.includes('@')) ? cleanEmail : fallbackEmail,
-        full_name: formattedName || 'Pelanggan StatusClear',
+        full_name: formattedName || 'Pelanggan Clear Status',
         phone: `+${numericPhone}`
     };
 
@@ -1775,7 +1780,7 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
             currency: 'MYR',
             products: [
                 {
-                    name: `Clear Status - ${planTitle}`,
+                    name: fullProductName,
                     price: priceCents,
                     quantity: 1
                 }
@@ -2168,49 +2173,42 @@ async function processCompletedPayment({ paymentId, referenceNumber, customerNam
             method: paymentType || 'CHIP Asia Gateway'
         });
 
-        const activePlanExpiry = (planCode === 'TT' || planCode === 'UPGRADE_TT')
-            ? targetUser.ttExpiredAt
-            : targetUser.waExpiredAt || targetUser.expiredAt;
+        const activePlanExpiry = targetUser.waExpiredAt || targetUser.expiredAt;
         const formattedExpiryDate = new Date(activePlanExpiry).toLocaleDateString('ms-MY', {
             day: '2-digit', month: '2-digit', year: 'numeric'
         });
-        const planLabel = planCode === 'COMBO'
-            ? 'Combo WhatsApp + TikTok HD'
-            : (planCode === 'UPGRADE_TT'
-                ? 'TikTok 1080p 60fps HD (Upgrade Selari WA)'
-                : (planCode === 'TT' ? 'TikTok 1080p 60fps HD' : 'WhatsApp Status HD'));
-        const invoiceLine = invoiceRef ? `\n• No. Invois: *${invoiceRef}*` : '';
+        const planLabel = 'WhatsApp Status HD';
 
         const welcomeTutorialMessage =
-`✓ *Pembayaran berjaya & akaun anda kini active.*
+`✅ *Pendaftaran Berjaya! Akaun Clear Status anda kini AKTIF selama ${days} hari.*
 
-Terima kasih kerana melanggan *${BOT_NAME}*.${invoiceLine}
-• Pelan: *${planLabel}* (+${days} Hari)
-• Tamat tempoh: *${formattedExpiryDate}*
-• Code referral anda: *${targetUser.refCode}*
+*CARA GUNA (SANGAT MUDAH):*
 
-*Cara guna bot supaya kualiti tidak pecah:*
-1. Tekan ikon klip kertas / (+) di ruang chat.
-2. Pilih *Document* (elakkan pilih Gallery/Photos terus).
-3. Pilih *video* atau *gambar* asal anda dan tekan *Send*.
-4. Tunggu bot siap proses dan muat turun file HD tersebut.
+1️⃣ *Hantar Fail Guna DOCUMENT*
+Tekan ikon klip *(📎)* atau *(+)* ➔ pilih *Document* ➔ pilih video atau gambar asal anda.
+⚠️ *PENTING:* Jangan hantar guna ikon *Camera* atau *Gallery*, nanti WhatsApp mampatkan fail awal-awal dan gambar jadi pecah.
 
-• Tukar mod bila-bila masa: taip *WA* (WhatsApp Status HD) atau *TT* (TikTok 1080p 60fps).
-• Kongsi code *${targetUser.refCode}* — setiap *3 rakan* yang melanggan, anda dapat *+30 hari percuma*.`;
+2️⃣ *Tunggu Bot Generate*
+Tunggu sebentar sehingga bot selesai memproses fail anda kepada kualiti HD sebenar.
+
+3️⃣ *Terus Forward ke Status*
+Apabila fail siap dihantar oleh bot, terus tekan *Forward* ke *Status* WhatsApp anda, tulis *caption* seperti biasa, dan *post*!
+
+Sila hantar fail pertama anda sebagai *Document* sekarang 👇`;
 
         if (!isTgUser && currentSock) {
             const targetJid = targetUser.jid || targetUser.altJid || `${targetUser.phone}@s.whatsapp.net`;
             try {
                 await sendHumanReply(currentSock, targetJid, { text: welcomeTutorialMessage });
-                console.log(`[HITPAY -> WA] Sent welcome & tutorial to ${targetJid}`);
+                console.log(`[CHIP -> WA] Sent activation & 3-step guide to ${targetJid}`);
             } catch (waErr) {
-                console.error(`[HITPAY -> WA] Ralat penghantaran ke ${targetJid}:`, waErr.message);
+                console.error(`[CHIP -> WA] Ralat penghantaran ke ${targetJid}:`, waErr.message);
                 if (targetJid !== `${targetUser.phone}@s.whatsapp.net`) {
                     try {
                         await sendHumanReply(currentSock, `${targetUser.phone}@s.whatsapp.net`, { text: welcomeTutorialMessage });
-                        console.log(`[HITPAY -> WA] Sent welcome & tutorial fallback to ${targetUser.phone}@s.whatsapp.net`);
+                        console.log(`[CHIP -> WA] Sent activation & 3-step guide fallback to ${targetUser.phone}@s.whatsapp.net`);
                     } catch (fallbackErr) {
-                        console.error(`[HITPAY -> WA] Fallback juga gagal:`, fallbackErr.message);
+                        console.error(`[CHIP -> WA] Fallback juga gagal:`, fallbackErr.message);
                     }
                 }
             }
@@ -2223,11 +2221,11 @@ Terima kasih kerana melanggan *${BOT_NAME}*.${invoiceLine}
         if (currentSock) {
             await notifyAdmins(
                 currentSock,
-                `✓ *Notifikasi Jualan HitPay*\n\n` +
+                `✓ *Notifikasi Jualan Clear Status*\n\n` +
                 `• Pelanggan: *${targetUser.name}* (${targetUser.phone})\n` +
-                `• Pelan: *${planLabel}* (${planCode}, +${days} Hari)\n` +
+                `• Pelan: *${planLabel}* (+${days} Hari)\n` +
                 `• Jumlah: *RM ${txAmount}*\n` +
-                `• Kaedah: ${paymentType || 'HitPay Online Gateway'}\n` +
+                `• Kaedah: ${paymentType || 'CHIP In Asia'}\n` +
                 `• Tamat tempoh: ${formattedExpiryDate}\n` +
                 `• Code referral: *${targetUser.refCode}*${referralRewardMsg}`
             );
@@ -6056,12 +6054,13 @@ async function startBot() {
             }
 
             // ---------------------------------------------------------
-            // 1B. TUKAR MOD PEMPROSESAN (WA / WASPLIT / TT / TTHDR) & PAUTAN SILANG PLATFORM (/link)
+            // 1B. TUKAR MOD PEMPROSESAN (WA / WASPLIT) & PAUTAN SILANG PLATFORM (/link)
             // ---------------------------------------------------------
             const cleanText = textContent.trim();
-            const isModeReply = !!(user && user.awaitingModeChoice && ['1', '2', '3', '4'].includes(cleanText));
+            const cleanModeNum = cleanText.replace(/\.$/, '');
+            const isModeReply = !!(user && (user.awaitingModeChoice || user.pendingVideoMode) && ['1', '2', '3', '4'].includes(cleanModeNum));
             const modeChoiceTarget = isModeReply
-                ? (cleanText === '1' ? 'WA' : (cleanText === '2' ? 'WASPLIT' : (cleanText === '3' ? 'TT' : 'TTHDR')))
+                ? (cleanModeNum === '1' ? 'WA' : (cleanModeNum === '2' ? 'WASPLIT' : (cleanModeNum === '3' ? 'TT' : 'TTHDR')))
                 : null;
 
             if (['mode', '/mode', 'mod', '/mod'].includes(cmd)) {
@@ -6206,17 +6205,11 @@ async function startBot() {
                             `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
                             `• Taip *WASPLIT* untuk mod Auto-Potong HD, atau *MODE* untuk senarai mod.`
                     }, { quoted: msg });
-                } else if (ttActive) {
-                    await sendHumanReply(sock, remoteJid, {
-                        text:
-                            `Mod pilihan anda ditukar ke *WhatsApp Status HD*, namun akaun anda buat masa ini hanya mempunyai langganan *TikTok HD* yang active.\n\n` +
-                            `Balas *1* untuk langgan *WhatsApp Status HD (RM11.99/bulan)*, atau balas *TT* / *TTHDR* untuk kembali ke mod TikTok.`
-                    }, { quoted: msg });
                 } else {
                     await sendHumanReply(sock, remoteJid, {
                         text:
                             `Mod pilihan anda ditetapkan ke *WhatsApp Status HD (Video Penuh)*, namun anda belum mempunyai langganan active.\n\n` +
-                            `Balas *1* untuk langgan *WhatsApp Status HD (RM11.99 / 30 Hari)*.`
+                            `Balas *1* atau *Start* untuk dapatkan pautan bayaran *WhatsApp Status HD (RM11.99 / 30 Hari)*.`
                     }, { quoted: msg });
                 }
                 continue;
@@ -6275,29 +6268,28 @@ async function startBot() {
                 saveUsers(users);
 
                 const waStr = mergedWa > nowMs ? new Date(mergedWa).toLocaleDateString('ms-MY') : 'Tiada';
-                const ttStr = mergedTt > nowMs ? new Date(mergedTt).toLocaleDateString('ms-MY') : 'Tiada';
                 await sendHumanReply(sock, remoteJid, {
                     text:
                         `✓ *AKAUN BERJAYA DIPAUTKAN*\n\n` +
                         `Langganan anda kini diselaraskan merentasi platform:\n` +
-                        `• WhatsApp Status HD: ${waStr}\n` +
-                        `• TikTok 1080p 60fps HD: ${ttStr}`
+                        `• WhatsApp Status HD: ${waStr}`
                 }, { quoted: msg });
                 continue;
             }
 
             // ---------------------------------------------------------
-            // 2. PEMILIHAN PAKEJ INTERAKTIF (1, 2, 3, 4) ➔ HITPAY TERUS
+            // 2. BALASAN '1' / '1.' ➔ PAUTAN CHIP IN ASIA SEGERA (RM11.99)
             // ---------------------------------------------------------
-            const selectedPkg = PACKAGES[cleanText];
-            if (selectedPkg) {
-                if (selectedPkg.requiresWa && !waActive) {
+            const trimmedLower = cleanText.toLowerCase();
+            if (trimmedLower === '1' || trimmedLower === '1.') {
+                if (waActive || isSuperAdmin) {
+                    const activeExpStr = isSuperAdmin
+                        ? 'Tanpa Had (Super Admin)'
+                        : new Date(user.waExpiredAt).toLocaleDateString('ms-MY', { day: '2-digit', month: '2-digit', year: 'numeric' });
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Pakej *4 (Upgrade TikTok HD RM12.99 prorata)* khas untuk ahli yang sudah mempunyai langganan *WhatsApp Status HD* active.\n\n` +
-                            `Sila pilih salah satu pakej berikut:\n` +
-                            `• Balas *2* untuk *TikTok 1080p 60fps HD Sahaja (RM15.99/bulan)*\n` +
-                            `• Balas *3* untuk *Combo WhatsApp + TikTok HD (RM20.99/bulan)*`
+                            `✅ *Akaun Clear Status anda masih AKTIF* (Tamat: *${activeExpStr}*).\n\n` +
+                            `Sila hantar video atau gambar asal anda menggunakan *Document* (*📎* ➔ *Document*) untuk diproses ke kualiti HD sebenar.`
                     }, { quoted: msg });
                     continue;
                 }
@@ -6309,42 +6301,23 @@ async function startBot() {
                 } catch {}
 
                 try {
-                    const isUpgradePlan = selectedPkg.planCode === 'UPGRADE_TT';
-                    const prorate = isUpgradePlan ? calculateProratedUpgrade(user?.waExpiredAt) : null;
-                    const reqDays = isUpgradePlan ? prorate.remainingDays : selectedPkg.days;
-                    const reqAmount = isUpgradePlan ? prorate.amount : selectedPkg.amount;
-                    const reqPurpose = isUpgradePlan
-                        ? `${BOT_NAME} - Upgrade TikTok HD (${prorate.remainingDays} Hari Prorata)`
-                        : `${BOT_NAME} - ${selectedPkg.title}`;
-
                     const chipRes = await createChipCheckout({
                         userKey: phone,
                         phone: phone,
                         formattedName: formatTitleCaseName(msg.pushName || user?.name, phone),
-                        planType: selectedPkg.planCode,
-                        planTitle: selectedPkg.title,
-                        amountRM: reqAmount,
-                        days: reqDays,
+                        planType: 'WA',
+                        planTitle: 'WhatsApp Status HD (30 Hari)',
+                        amountRM: '11.99',
+                        days: 30,
                         platform: 'whatsapp',
                         appliedRefCode: user?.referredByCode || ''
                     });
 
-                    const shortNote = (isUpgradePlan && prorate.isShortRemaining)
-                        ? `\nNota: Baki WA anda kurang daripada 5 hari — anda juga boleh balas *3* untuk *Combo (RM20.99)* bagi mendapatkan 30 hari penuh untuk kedua-dua mod.\n`
-                        : '';
-                    const pkgSummaryLine = isUpgradePlan
-                        ? `Pakej: *${selectedPkg.title}*\nBaki Tempoh WA: *${prorate.remainingDays} hari* | Harga Prorata: *${prorate.priceLabel}* (Tamat serentak dengan WA anda)${shortNote}`
-                        : `Pakej: *${selectedPkg.title}* (${selectedPkg.price} / ${selectedPkg.days} Hari)`;
-
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `✓ *PAUTAN PEMBAYARAN RASMI CHIP ASIA*\n\n` +
-                            `No. Invois: *${chipRes.invoiceRef}*\n` +
-                            `${pkgSummaryLine}\n\n` +
-                            `Sila tekan link selamat di bawah untuk membuat bayaran:\n` +
+                            `Baik! Ini pautan bayaran *Clear Status — WhatsApp Status HD (RM11.99 / 30 Hari)* anda 👇\n\n` +
                             `${chipRes.checkout_url}\n\n` +
-                            `Kaedah bayaran disokong: FPX Online Banking, DuitNow QR, eWallet & Kad Debit/Kredit.\n\n` +
-                            `Akses anda akan diaktifkan secara automatik sebaik sahaja pembayaran selesai tanpa perlu menghantar resit.`
+                            `✅ Boleh bayar terus guna *DuitNow QR* atau *Online Banking (FPX)*. Akaun akan aktif secara automatik selama 30 hari sejurus pembayaran berjaya!`
                     }, { quoted: msg });
 
                     if (user) {
@@ -6361,9 +6334,9 @@ async function startBot() {
                     } catch {}
 
                 } catch (err) {
-                    console.error(`[HITPAY] Ralat semasa memproses pembayaran untuk ${phone}:`, err.message);
+                    console.error(`[CHIP ASIA] Ralat semasa memproses pembayaran untuk ${phone}:`, err.message);
                     await sendHumanReply(sock, remoteJid, {
-                        text: `Maaf, terdapat ralat semasa menjana pautan HitPay: ${err.message}. Sila cuba sebentar lagi atau hubungi pentadbir.`
+                        text: `Maaf, terdapat ralat semasa menjana pautan CHIP In Asia: ${err.message}. Sila cuba sebentar lagi atau hubungi pentadbir.`
                     }, { quoted: msg });
                 }
                 continue;
@@ -6390,15 +6363,35 @@ async function startBot() {
                 }
 
                 user.referredBy = matchedReferrer.phone;
+                user.referredByCode = matchedReferrer.refCode;
                 user.status = 'WAITING';
                 user.jid = remoteJid;
                 if (altJid) user.altJid = altJid;
                 saveUsers(users);
 
+                let refCheckoutBlock = `${PACKAGE_TEMPLATE}`;
+                try {
+                    const chipRes = await createChipCheckout({
+                        userKey: phone,
+                        phone: phone,
+                        formattedName: formatTitleCaseName(msg.pushName || user?.name, phone),
+                        planType: 'WA',
+                        planTitle: 'WhatsApp Status HD (30 Hari)',
+                        amountRM: '11.99',
+                        days: 30,
+                        platform: 'whatsapp',
+                        appliedRefCode: matchedReferrer.refCode || ''
+                    });
+                    refCheckoutBlock =
+                        `*PAKEJ WHATSAPP STATUS HD — RM11.99 / 30 Hari*\n\n` +
+                        `👇 *Klik pautan CHIP In Asia di bawah untuk aktifkan akaun anda sekarang:*\n` +
+                        `${chipRes.checkout_url}`;
+                } catch {}
+
                 const confirmCaption =
                     `✓ *KOD REFERRAL DISAHKAN*\n\n` +
                     `Anda dijemput oleh *${matchedReferrer.name}* (${matchedReferrer.refCode}).\n\n` +
-                    `${PACKAGE_TEMPLATE}`;
+                    `${refCheckoutBlock}`;
 
                 await sendHumanReply(sock, remoteJid, { text: confirmCaption }, { quoted: msg });
 
@@ -6411,7 +6404,7 @@ async function startBot() {
                             text:
                                 `✓ *KOD REFERRAL ANDA DIGUNAKAN*\n\n` +
                                 `Hai *${matchedReferrer.name}*, rakan anda *${friendName}* (${phone}) baru sahaja memasukkan kod referral anda (*${matchedReferrer.refCode}*).\n\n` +
-                                `Status: Rakan anda sedang memilih pakej langganan. Anda akan dimaklumkan sebaik sahaja pembayaran mereka selesai.`
+                                `Status: Rakan anda sedang membuat pembayaran langganan. Anda akan dimaklumkan sebaik sahaja pembayaran mereka selesai.`
                         });
                         console.log(`[REFERRAL NOTI] Penaja ${matchedReferrer.phone} diberitahu tentang ${phone} menggunakan kod.`);
                     } catch (notiErr) {
@@ -6423,19 +6416,40 @@ async function startBot() {
             }
 
             // ---------------------------------------------------------
-            // 4. PEMBAYARAN TERUS (BAYAR / PAKEJ)
+            // 4. PEMBAYARAN TERUS (BAYAR / PAKEJ / RENEW)
             // ---------------------------------------------------------
-            if (['bayar', '/bayar', 'pakej', 'beli', 'qr', 'upgrade', '/upgrade'].includes(cmd) || upperText === 'BAYAR' || upperText === 'PAKEJ') {
-                if (!isActive) user.status = 'WAITING';
-                user.jid = remoteJid;
-                if (altJid) user.altJid = altJid;
-                saveUsers(users);
+            if (['bayar', '/bayar', 'pakej', 'beli', 'qr', 'renew', '/renew', 'sambung', 'upgrade', '/upgrade'].includes(cmd) || upperText === 'BAYAR' || upperText === 'PAKEJ') {
+                if (!isActive && user) user.status = 'WAITING';
+                if (user) {
+                    user.jid = remoteJid;
+                    if (altJid) user.altJid = altJid;
+                    saveUsers(users);
+                }
 
-                await sendHumanReply(sock, remoteJid, {
-                    text:
-                        `MAKLUMAT PAKEJ LANGGANAN (${BOT_NAME})\n\n` +
-                        `${PACKAGE_TEMPLATE}`
-                }, { quoted: msg });
+                try {
+                    const chipRes = await createChipCheckout({
+                        userKey: phone,
+                        phone: phone,
+                        formattedName: formatTitleCaseName(msg.pushName || user?.name, phone),
+                        planType: 'WA',
+                        planTitle: 'WhatsApp Status HD (30 Hari)',
+                        amountRM: '11.99',
+                        days: 30,
+                        platform: 'whatsapp',
+                        appliedRefCode: user?.referredByCode || ''
+                    });
+
+                    await sendHumanReply(sock, remoteJid, {
+                        text:
+                            `Baik! Ini pautan bayaran *Clear Status — WhatsApp Status HD (RM11.99 / 30 Hari)* anda 👇\n\n` +
+                            `${chipRes.checkout_url}\n\n` +
+                            `✅ Boleh bayar terus guna *DuitNow QR* atau *Online Banking (FPX)*. Akaun akan aktif secara automatik selama 30 hari sejurus pembayaran berjaya!`
+                    }, { quoted: msg });
+                } catch (err) {
+                    await sendHumanReply(sock, remoteJid, {
+                        text: `Maaf, terdapat ralat semasa menjana pautan CHIP In Asia: ${err.message}.`
+                    }, { quoted: msg });
+                }
                 continue;
             }
 
@@ -6443,16 +6457,19 @@ async function startBot() {
             // 5. ALIRAN START ONBOARDING & STATUS PENGGUNA
             // ---------------------------------------------------------
             if (['start', '/start', 'mula', 'menu', 'bantuan', 'help'].includes(cmd) || upperText === 'START') {
-                user.jid = remoteJid;
-                if (altJid) user.altJid = altJid;
+                if (user) {
+                    user.jid = remoteJid;
+                    if (altJid) user.altJid = altJid;
+                }
 
                 if (isActive) {
                     if (!user.refCode) user.refCode = generateReferralCode(user.name, users);
                     user.refSentToExisting = true;
                     saveUsers(users);
 
-                    const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 untuk langgan RM11.99)');
-                    const ttStr = 'Tanpa Had (Super Admin)';
+                    const waStr = isSuperAdmin
+                        ? 'Tanpa Had (Super Admin)'
+                        : new Date(user.waExpiredAt).toLocaleDateString('ms-MY', { day: '2-digit', month: '2-digit', year: 'numeric' });
                     const currentMode = isSuperAdmin ? (user.preferredMode || 'WA') : (user.preferredMode === 'WASPLIT' ? 'WASPLIT' : 'WA');
                     const currentModeLabel = currentMode === 'TTHDR'
                         ? 'TikTok 10-bit HDR10+ Glow (Superadmin)'
@@ -6462,35 +6479,53 @@ async function startBot() {
 
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `✓ *SELAMAT KEMBALI KE ${BOT_NAME}*\n\n` +
-                            `• Mod Pemprosesan Semasa: *${currentModeLabel}*\n` +
-                            `• Langganan WhatsApp HD: ${waStr}\n` +
-                            (isSuperAdmin ? `• Akses TikTok (TT + TTHDR): ${ttStr}\n` : '') +
-                            `• Kod Referral Peribadi: *${user.refCode}*\n\n` +
-                            `Panduan Ringkas:\n` +
-                            `• Hantar video atau foto anda sebagai *file / document* (Lampiran > Document > Galeri) supaya kualiti asal kekal terpelihara.\n` +
-                            `• Taip *MODE* untuk pilih antara *WA* (Video Penuh) atau *WASPLIT* (Auto-Potong 60s HD).\n` +
-                            `• Guna arahan */link ${user.refCode}* di Telegram jika mahu pautkan langganan anda.\n\n` +
-                            `Ganjaran Referral: Ajak 3 rakan melanggan menggunakan kod *${user.refCode}* untuk tebus 1 bulan percuma secara automatik.`
+                            `✅ *Akaun Clear Status anda AKTIF* (Tamat: *${waStr}*)\n` +
+                            `• Mod Semasa: *${currentModeLabel}*\n` +
+                            `• Kod Referral: *${user.refCode}*\n\n` +
+                            `*CARA GUNA RINGKAS:*\n` +
+                            `1️⃣ Tekan ikon klip *(📎)* ➔ pilih *Document* ➔ hantar video atau gambar asal.\n` +
+                            `2️⃣ Tunggu sebentar sehingga bot selesai memproses kualiti HD sebenar.\n` +
+                            `3️⃣ Terus tekan *Forward* ke *Status* WhatsApp anda & *post*!\n\n` +
+                            `• Taip *MODE* untuk tukar antara *WA* (Video Penuh) atau *WASPLIT* (Auto-Potong 60s HD).`
                     }, { quoted: msg });
                 } else {
-                    saveUsers(users);
-                    const lastExp = Math.max(user?.waExpiredAt || 0, user?.ttExpiredAt || 0, user?.expiredAt || 0);
-                    const isExpired = lastExp > 0 && lastExp <= Date.now();
-                    const headerLine = isExpired
-                        ? `*LANGGANAN ANDA TELAH TAMAT (${new Date(lastExp).toLocaleDateString('ms-MY')})*`
-                        : `*SELAMAT DATANG KE ${BOT_NAME.toUpperCase()}*`;
+                    if (user) {
+                        user.status = 'WAITING';
+                        saveUsers(users);
+                    }
 
-                    const welcomeCaption =
-                        `${headerLine}\n\n` +
-                        `Naik taraf kualiti video *60fps* & gambar *QHD+* anda untuk *WhatsApp Status* tanpa pecah.\n\n` +
-                        `*Pelan Langganan (30 Hari):*\n` +
-                        `*1.* *WhatsApp Status HD* — *RM11.99 / 30 Hari*\n` +
-                        `   └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status.\n\n` +
-                        `*Cara Langgan:*\n` +
-                        `• Balas nombor *1* untuk jana link bayaran *CHIP Asia* automatik (DuitNow QR, FPX, eWallet & Kad).\n` +
-                        `• Ada *kod referral* rakan? Hantar kod tersebut terus di sini.\n` +
-                        `• Akses diaktifkan *serta-merta* selepas bayaran selesai.`;
+                    let checkoutUrl = '';
+                    try {
+                        const chipRes = await createChipCheckout({
+                            userKey: phone,
+                            phone: phone,
+                            formattedName: formatTitleCaseName(msg.pushName || user?.name, phone),
+                            planType: 'WA',
+                            planTitle: 'WhatsApp Status HD (30 Hari)',
+                            amountRM: '11.99',
+                            days: 30,
+                            platform: 'whatsapp',
+                            appliedRefCode: user?.referredByCode || ''
+                        });
+                        checkoutUrl = chipRes.checkout_url;
+                    } catch (chipErr) {
+                        console.error(`[START CHIP ERROR] ${phone}:`, chipErr.message);
+                    }
+
+                    const welcomeCaption = checkoutUrl
+                        ? `Selamat datang ke *Clear Status* ✨\n\n` +
+                          `Muat naik video & gambar ke WhatsApp Status tanpa pecah, kabur, atau patah-patah.\n\n` +
+                          `*PAKEJ WHATSAPP STATUS HD — RM11.99 / 30 Hari*\n` +
+                          `✅ Video HD 60fps lancar & gambar 2560px tajam\n` +
+                          `✅ Sokong format .mov, .heic & semua jenis fail\n` +
+                          `✅ Auto-potong video panjang ikut had Status\n` +
+                          `✅ Tanpa had penggunaan selama 30 hari\n` +
+                          `✅ Pengaktifan automatik 24/7 selepas bayar\n\n` +
+                          `👇 *Klik pautan CHIP In Asia di bawah untuk aktifkan akaun anda sekarang:*\n` +
+                          `${checkoutUrl}`
+                        : `Selamat datang ke *Clear Status* ✨\n\n` +
+                          `Muat naik video & gambar ke WhatsApp Status tanpa pecah, kabur, atau patah-patah.\n\n` +
+                          `${PACKAGE_TEMPLATE}`;
 
                     if (fs.existsSync(START_BANNER_PATH)) {
                         await sendHumanReply(sock, remoteJid, {
@@ -7154,9 +7189,10 @@ async function handleTelegramMessage(tgMsg) {
     const isActive = waActive || ttActive;
     const cleanPkgTemplate = PACKAGE_TEMPLATE.replace(/\*/g, '');
 
-    const isTgModeReply = !!(user && user.awaitingModeChoice && ['1', '2', '3', '4'].includes(textContent) && !tgMsg.document && !tgMsg.video && !tgMsg.photo);
+    const cleanTgModeNum = textContent.trim().replace(/\.$/, '');
+    const isTgModeReply = !!(user && (user.awaitingModeChoice || user.pendingVideoMode) && ['1', '2', '3', '4'].includes(cleanTgModeNum) && !tgMsg.document && !tgMsg.video && !tgMsg.photo);
     const tgModeChoiceTarget = isTgModeReply
-        ? (textContent === '1' ? 'WA' : (textContent === '2' ? 'WASPLIT' : (textContent === '3' ? 'TT' : 'TTHDR')))
+        ? (cleanTgModeNum === '1' ? 'WA' : (cleanTgModeNum === '2' ? 'WASPLIT' : (cleanTgModeNum === '3' ? 'TT' : 'TTHDR')))
         : null;
 
     if (['/mode', 'mode', '/mod', 'mod'].includes(cmd)) {
@@ -7273,14 +7309,9 @@ async function handleTelegramMessage(tgMsg) {
                 `• Hantar /wasplit untuk mod Auto-Potong HD, atau /mode untuk senarai mod.`,
                 msgId
             );
-        } else if (ttActive) {
-            await sendTelegramMessage(chatId,
-                `Mod pilihan ditukar ke WhatsApp Status HD, namun pelan active anda kini hanya TikTok HD.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99 / 30 Hari), atau /tt /tthdr untuk kembali ke mod TikTok.`,
-                msgId
-            );
         } else {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditetapkan ke WhatsApp Status HD (Video Penuh), namun anda belum mempunyai langganan active.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99 / 30 Hari).`,
+                `Mod pilihan ditetapkan ke WhatsApp Status HD (Video Penuh), namun anda belum mempunyai langganan active.\n\nBalas 1 atau /start untuk dapatkan pautan bayaran WhatsApp Status HD (RM11.99 / 30 Hari).`,
                 msgId
             );
         }
@@ -7332,76 +7363,78 @@ async function handleTelegramMessage(tgMsg) {
         saveUsers(users);
 
         const waStr = mergedWa > nowMs ? new Date(mergedWa).toLocaleDateString('ms-MY') : 'Tiada';
-        const ttStr = mergedTt > nowMs ? new Date(mergedTt).toLocaleDateString('ms-MY') : 'Tiada';
         await sendTelegramMessage(chatId,
             `✓ AKAUN BERJAYA DIPAUTKAN\n\n` +
             `Langganan anda kini diselaraskan antara WhatsApp dan Telegram:\n` +
-            `• WhatsApp Status HD: ${waStr}\n` +
-            `• TikTok 1080p 60fps HD: ${ttStr}`,
+            `• WhatsApp Status HD: ${waStr}`,
             msgId
         );
         return;
     }
 
-    const selectedPkg = PACKAGES[textContent];
-    if (selectedPkg && !tgMsg.document && !tgMsg.video && !tgMsg.photo) {
-        if (selectedPkg.requiresWa && !waActive) {
+    const tgTrimmedLower = textContent.trim().toLowerCase();
+    if ((tgTrimmedLower === '1' || tgTrimmedLower === '1.') && !tgMsg.document && !tgMsg.video && !tgMsg.photo) {
+        if (waActive || isSuperAdmin) {
+            const activeExpStr = isSuperAdmin
+                ? 'Tanpa Had (Super Admin)'
+                : new Date(user.waExpiredAt).toLocaleDateString('ms-MY', { day: '2-digit', month: '2-digit', year: 'numeric' });
             await sendTelegramMessage(chatId,
-                `Pakej 4 (Upgrade TikTok HD RM12.99 prorata) khas untuk ahli yang sudah mempunyai langganan WhatsApp Status HD active.\n\n` +
-                `Sila pilih:\n• Balas 2 untuk TikTok 1080p 60fps HD Sahaja (RM15.99/bulan)\n• Balas 3 untuk Combo WhatsApp + TikTok HD (RM20.99/bulan)`,
+                `✅ Akaun Clear Status anda masih AKTIF (Tamat: ${activeExpStr}).\n\nSila hantar video atau gambar asal anda sebagai File tanpa compression untuk diproses ke kualiti HD sebenar.`,
                 msgId
             );
             return;
         }
         try {
-            const isUpgradePlan = selectedPkg.planCode === 'UPGRADE_TT';
-            const prorate = isUpgradePlan ? calculateProratedUpgrade(user?.waExpiredAt) : null;
-            const reqDays = isUpgradePlan ? prorate.remainingDays : selectedPkg.days;
-            const reqAmount = isUpgradePlan ? prorate.amount : selectedPkg.amount;
-            const reqPurpose = isUpgradePlan
-                ? `${BOT_NAME} (Telegram) - Upgrade TikTok HD (${prorate.remainingDays} Hari Prorata)`
-                : `${BOT_NAME} (Telegram) - ${selectedPkg.title}`;
-
             const chipRes = await createChipCheckout({
                 userKey: tgKey,
                 phone: tgKey,
                 formattedName: formatTitleCaseName(fromName, tgKey),
-                planType: selectedPkg.planCode,
-                planTitle: selectedPkg.title,
-                amountRM: reqAmount,
-                days: reqDays,
+                planType: 'WA',
+                planTitle: 'WhatsApp Status HD (30 Hari)',
+                amountRM: '11.99',
+                days: 30,
                 platform: 'telegram',
                 appliedRefCode: user?.referredByCode || ''
             });
             if (!isActive) user.status = 'WAITING';
             saveUsers(users);
 
-            const shortNote = (isUpgradePlan && prorate.isShortRemaining)
-                ? `\nNota: Baki WA anda kurang daripada 5 hari — anda juga boleh balas 3 untuk Combo (RM20.99) bagi mendapatkan 30 hari penuh untuk kedua-dua mod.\n`
-                : '';
-            const pkgSummaryLine = isUpgradePlan
-                ? `Pakej: ${selectedPkg.title}\nBaki Tempoh WA: ${prorate.remainingDays} hari | Harga Prorata: ${prorate.priceLabel} (Tamat serentak dengan WA anda)${shortNote}`
-                : `Pakej: ${selectedPkg.title} (${selectedPkg.price} / ${selectedPkg.days} Hari)`;
-
             await sendTelegramMessage(chatId,
-                `✓ PAUTAN PEMBAYARAN RASMI CHIP ASIA\n\n` +
-                `No. Invois: ${chipRes.invoiceRef}\n` +
-                `${pkgSummaryLine}\n\n` +
-                `Sila klik link di bawah untuk membuat bayaran (FPX, DuitNow QR, eWallet & Kad):\n` +
+                `Baik! Ini pautan bayaran Clear Status — WhatsApp Status HD (RM11.99 / 30 Hari) anda 👇\n\n` +
                 `${chipRes.checkout_url}\n\n` +
-                `Akses anda akan diaktifkan secara automatik sebaik sahaja transaksi selesai.`,
+                `✅ Boleh bayar terus guna DuitNow QR atau Online Banking (FPX). Akaun akan aktif secara automatik selama 30 hari sejurus pembayaran berjaya!`,
                 msgId
             );
         } catch (err) {
-            await sendTelegramMessage(chatId, `Maaf, terdapat ralat semasa menjana link CHIP Asia: ${err.message}`, msgId);
+            await sendTelegramMessage(chatId, `Maaf, terdapat ralat semasa menjana link CHIP In Asia: ${err.message}`, msgId);
         }
         return;
     }
 
-    if (['/bayar', 'bayar', '/pakej', 'pakej', '/upgrade', 'upgrade'].includes(cmd)) {
+    if (['/bayar', 'bayar', '/pakej', 'pakej', '/renew', 'renew', '/upgrade', 'upgrade'].includes(cmd)) {
         if (!isActive) user.status = 'WAITING';
         saveUsers(users);
-        await sendTelegramMessage(chatId, `MAKLUMAT PAKEJ LANGGANAN (${BOT_NAME})\n\n${cleanPkgTemplate}`, msgId);
+        try {
+            const chipRes = await createChipCheckout({
+                userKey: tgKey,
+                phone: tgKey,
+                formattedName: formatTitleCaseName(fromName, tgKey),
+                planType: 'WA',
+                planTitle: 'WhatsApp Status HD (30 Hari)',
+                amountRM: '11.99',
+                days: 30,
+                platform: 'telegram',
+                appliedRefCode: user?.referredByCode || ''
+            });
+            await sendTelegramMessage(chatId,
+                `Baik! Ini pautan bayaran Clear Status — WhatsApp Status HD (RM11.99 / 30 Hari) anda 👇\n\n` +
+                `${chipRes.checkout_url}\n\n` +
+                `✅ Boleh bayar terus guna DuitNow QR atau Online Banking (FPX). Akaun akan aktif secara automatik selama 30 hari sejurus pembayaran berjaya!`,
+                msgId
+            );
+        } catch (err) {
+            await sendTelegramMessage(chatId, `Maaf, terdapat ralat semasa menjana link CHIP In Asia: ${err.message}`, msgId);
+        }
         return;
     }
 
@@ -7411,7 +7444,9 @@ async function handleTelegramMessage(tgMsg) {
             user.refSentToExisting = true;
             saveUsers(users);
 
-            const waStr = isSuperAdmin ? 'Tanpa Had (Super Admin)' : (waActive ? new Date(user.waExpiredAt).toLocaleDateString('ms-MY') : 'Tidak Active (Balas 1 - RM11.99)');
+            const waStr = isSuperAdmin
+                ? 'Tanpa Had (Super Admin)'
+                : new Date(user.waExpiredAt).toLocaleDateString('ms-MY', { day: '2-digit', month: '2-digit', year: 'numeric' });
             const currentMode = isSuperAdmin ? (user.preferredMode || 'WA') : (user.preferredMode === 'WASPLIT' ? 'WASPLIT' : 'WA');
             const currentModeLabel = currentMode === 'TTHDR'
                 ? 'TikTok 10-bit HDR10+ Glow (Superadmin)'
@@ -7420,34 +7455,48 @@ async function handleTelegramMessage(tgMsg) {
                     : (currentMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
 
             await sendTelegramMessage(chatId,
-                `✓ SELAMAT KEMBALI KE ${BOT_NAME} (TELEGRAM)\n\n` +
+                `✅ Akaun Clear Status anda AKTIF (Tamat: ${waStr})\n` +
                 `• Mod Semasa: ${currentModeLabel}\n` +
-                `• WhatsApp Status HD: ${waStr}\n` +
-                (isSuperAdmin ? `• Akses TikTok (TT + TTHDR): Tanpa Had (Super Admin)\n` : '') +
                 `• Kod Referral: ${user.refCode}\n\n` +
-                `Panduan Ringkas:\n` +
-                `• Hantar video atau foto sebagai File (tanpa compression, maks 20 MB mengikut had Telegram Bot API).\n` +
-                `• Taip /mode untuk pilih antara /wa (Video Penuh) atau /wasplit (Auto-Potong 60s HD).\n` +
-                `• Ada langganan WhatsApp sedia ada? Taip /link <KOD_REFERRAL_WA_ANDA>.`,
+                `CARA GUNA RINGKAS:\n` +
+                `1️⃣ Hantar video atau gambar asal sebagai File tanpa compression (maks 20 MB di Telegram).\n` +
+                `2️⃣ Tunggu sebentar sehingga bot selesai memproses kualiti HD sebenar.\n` +
+                `3️⃣ Simpan ke Galeri & muat naik terus ke Status WhatsApp!\n\n` +
+                `• Taip /mode untuk tukar antara /wa (Video Penuh) atau /wasplit (Auto-Potong 60s HD).`,
                 msgId
             );
         } else {
-            const lastExp = Math.max(user?.waExpiredAt || 0, user?.ttExpiredAt || 0, user?.expiredAt || 0);
-            const isExpired = lastExp > 0 && lastExp <= Date.now();
-            const tgHeader = isExpired
-                ? `LANGGANAN ANDA TELAH TAMAT (${new Date(lastExp).toLocaleDateString('ms-MY')})`
-                : `SELAMAT DATANG KE ${BOT_NAME.toUpperCase()}`;
+            user.status = 'WAITING';
+            saveUsers(users);
 
-            const tgWelcomeCaption =
-                `${tgHeader}\n\n` +
-                `Naik taraf kualiti video 60fps & gambar QHD+ anda untuk WhatsApp Status tanpa pecah.\n\n` +
-                `Pelan Langganan (30 Hari):\n` +
-                `1. WhatsApp Status HD — RM11.99 / 30 Hari\n` +
-                `   └ Video 60fps & Foto 2560px QHD+ untuk WhatsApp Status.\n\n` +
-                `Cara Langgan:\n` +
-                `• Balas nombor 1 untuk jana link bayaran CHIP Asia automatik.\n` +
-                `• Sudah melanggan di WhatsApp? Hantar /link <KOD_REFERRAL_ANDA>.\n` +
-                `• Akses diaktifkan serta-merta selepas bayaran selesai.`;
+            let checkoutUrl = '';
+            try {
+                const chipRes = await createChipCheckout({
+                    userKey: tgKey,
+                    phone: tgKey,
+                    formattedName: formatTitleCaseName(fromName, tgKey),
+                    planType: 'WA',
+                    planTitle: 'WhatsApp Status HD (30 Hari)',
+                    amountRM: '11.99',
+                    days: 30,
+                    platform: 'telegram',
+                    appliedRefCode: user?.referredByCode || ''
+                });
+                checkoutUrl = chipRes.checkout_url;
+            } catch {}
+
+            const tgWelcomeCaption = checkoutUrl
+                ? `Selamat datang ke Clear Status ✨\n\n` +
+                  `Muat naik video & gambar ke WhatsApp Status tanpa pecah, kabur, atau patah-patah.\n\n` +
+                  `PAKEJ WHATSAPP STATUS HD — RM11.99 / 30 Hari\n` +
+                  `✅ Video HD 60fps lancar & gambar 2560px tajam\n` +
+                  `✅ Sokong format .mov, .heic & semua jenis fail\n` +
+                  `✅ Auto-potong video panjang ikut had Status\n` +
+                  `✅ Tanpa had penggunaan selama 30 hari\n` +
+                  `✅ Pengaktifan automatik 24/7 selepas bayar\n\n` +
+                  `👇 Klik pautan CHIP In Asia di bawah untuk aktifkan akaun anda sekarang:\n` +
+                  `${checkoutUrl}`
+                : `Selamat datang ke Clear Status ✨\n\n${cleanPkgTemplate}`;
 
             if (fs.existsSync(START_BANNER_PATH)) {
                 try {
