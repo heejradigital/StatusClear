@@ -1111,29 +1111,95 @@ async function probeVideo(filePath, binPath) {
     });
 }
 
-function getWaBaseSpec(sourceFps) {
-    const numFps = Number(sourceFps) || 30;
-    if (numFps >= 45) {
+function getWaBaseSpec(probeOrFps) {
+    const isObj = probeOrFps && typeof probeOrFps === 'object';
+    const numFps = Number(isObj ? probeOrFps.fps : probeOrFps) || 30;
+    const shortSide = isObj
+        ? Number(probeOrFps.shortSide || Math.min(probeOrFps.width || 1080, probeOrFps.height || 1920))
+        : 1080;
+    const is4K = shortSide >= 2000;
+    const targetShortSide = is4K ? 2160 : 1080;
+    const resLabel = is4K ? '4K' : '1080p';
+    const is60Fps = numFps >= 45;
+    const targetFps = is60Fps ? 60 : 30;
+
+    if (is4K && is60Fps) {
         return {
-            targetFps: 60,
+            is4K,
+            resLabel,
+            targetShortSide,
+            is60Fps,
+            targetFps,
+            crfVal: '21',
+            baseMaxKbps: 7500,
+            minFloorKbps: 4500,
+            maxRate: '7500k',
+            bufSize: '15000k',
+            h264Level: '5.2',
+            refs: '2',
+            lookahead: '25',
+            preset: 'faster',
+            splitSegmentSec: 29.5
+        };
+    }
+    if (is4K && !is60Fps) {
+        return {
+            is4K,
+            resLabel,
+            targetShortSide,
+            is60Fps,
+            targetFps,
             crfVal: '20',
-            maxRateKbps: 4500,
+            baseMaxKbps: 6000,
+            minFloorKbps: 3800,
+            maxRate: '6000k',
+            bufSize: '12000k',
+            h264Level: '5.1',
+            refs: '2',
+            lookahead: '30',
+            preset: 'faster',
+            splitSegmentSec: 38.0
+        };
+    }
+    if (!is4K && is60Fps) {
+        return {
+            is4K,
+            resLabel,
+            targetShortSide,
+            is60Fps,
+            targetFps,
+            crfVal: '20',
+            baseMaxKbps: 4500,
+            minFloorKbps: 3200,
             maxRate: '4500k',
             bufSize: '9000k',
-            h264Level: '4.1'
+            h264Level: '4.2',
+            refs: '4',
+            lookahead: '40',
+            preset: 'fast',
+            splitSegmentSec: 59.5
         };
     }
     return {
-        targetFps: 30,
+        is4K,
+        resLabel,
+        targetShortSide,
+        is60Fps,
+        targetFps,
         crfVal: '19',
-        maxRateKbps: 3500,
-        maxRate: '3500k',
-        bufSize: '7000k',
-        h264Level: '4.0'
+        baseMaxKbps: 3800,
+        minFloorKbps: 2600,
+        maxRate: '3800k',
+        bufSize: '7600k',
+        h264Level: '4.1',
+        refs: '4',
+        lookahead: '40',
+        preset: 'fast',
+        splitSegmentSec: 59.5
     };
 }
 
-function buildWaFilterChain(binPath, targetFps, isHDR) {
+function buildWaFilterChain(binPath, targetShortSide, targetFps, isHDR) {
     const hasCas = checkCasSupport(binPath);
     const sharpFilter = hasCas ? 'cas=strength=0.18' : 'unsharp=5:5:0.18:5:5:0.0';
     const filterParts = [];
@@ -1148,7 +1214,7 @@ function buildWaFilterChain(binPath, targetFps, isHDR) {
     }
 
     filterParts.push(
-        "scale='if(gt(iw,ih),-2,720)':'if(gt(iw,ih),720,-2)'",
+        `scale='if(gt(iw,ih),-2,${targetShortSide})':'if(gt(iw,ih),${targetShortSide},-2)'`,
         'setsar=1',
         `fps=${targetFps}`,
         'hqdn3d=0.8:0.8:2.0:2.0',
@@ -1163,20 +1229,32 @@ function buildWaFilterChain(binPath, targetFps, isHDR) {
 async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo) {
     cleanupStaleTempMedia(15 * 60 * 1000);
     return new Promise((resolve, reject) => {
-        const durationSec = Number(probeInfo?.duration || 30);
-        const sourceFps = Number(probeInfo?.fps || 30);
+        const durationSec = Number(probeInfo?.duration || 0);
         const isHDR = !!probeInfo?.isHDR;
         const hasAudio = !!probeInfo?.hasAudio;
         const canCopyWaAudio = !!probeInfo?.canCopyWaAudio;
 
-        const { targetFps, crfVal, maxRateKbps, h264Level } = getWaBaseSpec(sourceFps);
-        const effectiveMaxKbps = durationSec > 65
-            ? Math.min(maxRateKbps, Math.max(2600, Math.floor((28 * 8192) / durationSec) - 140))
-            : maxRateKbps;
+        const {
+            is4K,
+            resLabel,
+            targetShortSide,
+            targetFps,
+            crfVal,
+            baseMaxKbps,
+            minFloorKbps,
+            h264Level,
+            refs,
+            lookahead,
+            preset
+        } = getWaBaseSpec(probeInfo);
 
-        const maxRate = `${effectiveMaxKbps}k`;
-        const bufSize = `${effectiveMaxKbps * 2}k`;
-        const vfChain = buildWaFilterChain(binPath, targetFps, isHDR);
+        const finalMaxKbps = durationSec > 0
+            ? Math.max(minFloorKbps, Math.min(baseMaxKbps, Math.floor((28.5 * 8192) / durationSec) - 140))
+            : baseMaxKbps;
+
+        const maxRate = `${finalMaxKbps}k`;
+        const bufSize = `${finalMaxKbps * 2}k`;
+        const vfChain = buildWaFilterChain(binPath, targetShortSide, targetFps, isHDR);
 
         const args = [
             '-y',
@@ -1192,7 +1270,7 @@ async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo)
             '-avoid_negative_ts', 'make_zero',
             '-vf', vfChain,
             '-c:v', 'libx264',
-            '-preset', 'fast',
+            '-preset', preset,
             '-profile:v', 'high',
             '-level', h264Level,
             '-pix_fmt', 'yuv420p',
@@ -1201,8 +1279,8 @@ async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo)
             '-crf', crfVal,
             '-maxrate', maxRate,
             '-bufsize', bufSize,
-            '-refs', '4',
-            '-rc-lookahead', '40',
+            '-refs', refs,
+            '-rc-lookahead', lookahead,
             '-bf', '3',
             '-g', String(targetFps * 2),
             '-keyint_min', String(targetFps),
@@ -1233,13 +1311,13 @@ async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo)
             outputPath
         );
 
-        const proc = spawn(binPath, args, { timeout: 240000 });
+        const proc = spawn(binPath, args, { timeout: 360000 });
         let stderr = '';
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
         proc.on('close', (code, signal) => {
             if (code === 0 && fs.existsSync(outputPath)) {
                 incrementStat('videosProcessed');
-                resolve({ targetFps, crfVal, maxRate, audioCopied: !!(hasAudio && canCopyWaAudio) });
+                resolve({ is4K, resLabel, targetFps, crfVal, maxRate, audioCopied: !!(hasAudio && canCopyWaAudio) });
             } else {
                 const matchedLines = stderr
                     .split(/\r?\n/)
@@ -1257,12 +1335,25 @@ async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo)
 
 async function transcodeWaSplitPart(inputPath, partPath, binPath, probeInfo, startSec, clipDur) {
     return new Promise((resolve, reject) => {
-        const sourceFps = Number(probeInfo?.fps || 30);
         const isHDR = !!probeInfo?.isHDR;
         const hasAudio = !!probeInfo?.hasAudio;
 
-        const { targetFps, crfVal, maxRate, bufSize, h264Level } = getWaBaseSpec(sourceFps);
-        const vfChain = buildWaFilterChain(binPath, targetFps, isHDR);
+        const {
+            is4K,
+            resLabel,
+            targetShortSide,
+            targetFps,
+            crfVal,
+            baseMaxKbps,
+            h264Level,
+            refs,
+            lookahead,
+            preset
+        } = getWaBaseSpec(probeInfo);
+
+        const maxRate = `${baseMaxKbps}k`;
+        const bufSize = `${baseMaxKbps * 2}k`;
+        const vfChain = buildWaFilterChain(binPath, targetShortSide, targetFps, isHDR);
 
         const args = [
             '-y',
@@ -1280,7 +1371,7 @@ async function transcodeWaSplitPart(inputPath, partPath, binPath, probeInfo, sta
             '-avoid_negative_ts', 'make_zero',
             '-vf', vfChain,
             '-c:v', 'libx264',
-            '-preset', 'fast',
+            '-preset', preset,
             '-profile:v', 'high',
             '-level', h264Level,
             '-pix_fmt', 'yuv420p',
@@ -1289,8 +1380,8 @@ async function transcodeWaSplitPart(inputPath, partPath, binPath, probeInfo, sta
             '-crf', crfVal,
             '-maxrate', maxRate,
             '-bufsize', bufSize,
-            '-refs', '4',
-            '-rc-lookahead', '40',
+            '-refs', refs,
+            '-rc-lookahead', lookahead,
             '-bf', '3',
             '-g', String(targetFps * 2),
             '-keyint_min', String(targetFps),
@@ -1319,12 +1410,12 @@ async function transcodeWaSplitPart(inputPath, partPath, binPath, probeInfo, sta
             partPath
         );
 
-        const proc = spawn(binPath, args, { timeout: 240000 });
+        const proc = spawn(binPath, args, { timeout: 300000 });
         let stderr = '';
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
         proc.on('close', (code, signal) => {
             if (code === 0 && fs.existsSync(partPath)) {
-                resolve({ targetFps, crfVal, maxRate });
+                resolve({ is4K, resLabel, targetFps, crfVal, maxRate });
             } else {
                 const matchedLines = stderr
                     .split(/\r?\n/)
@@ -6055,9 +6146,9 @@ async function startBot() {
                     await sendHumanReply(sock, remoteJid, {
                         text:
                             `✓ *MOD WHATSAPP STATUS HD (VIDEO PENUH) AKTIF*\n\n` +
-                            `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil *WhatsApp Status HD (720p 60fps CRF+VBV + Foto QHD+)*.\n\n` +
+                            `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil *WhatsApp Status HD (1080p / 4K 60fps CRF+VBV + Foto QHD+)*.\n\n` +
                             `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
-                            `• Taip *WASPLIT* untuk mod Auto-Potong 60s HD, atau *MODE* untuk senarai mod.`
+                            `• Taip *WASPLIT* untuk mod Auto-Potong HD, atau *MODE* untuk senarai mod.`
                     }, { quoted: msg });
                 } else if (ttActive) {
                     await sendHumanReply(sock, remoteJid, {
@@ -6725,18 +6816,19 @@ async function startBot() {
                                     ? `⚠️ *Nota Penting:* Video yang anda hantar tadi telah dimampatkan sebelum sampai ke bot. Untuk ketajaman maksimum tanpa pecah, sentiasa tekan ikon klip (📎) > *Document* semasa menghantar video asal ke bot.\n\n`
                                     : '';
 
-                                if (targetMode === 'WASPLIT' && durationSec > 60.5) {
-                                    cleanupStaleTempMedia(15 * 60 * 1000);
-                                    const segmentSec = 59.5;
-                                    const totalParts = Math.ceil(durationSec / segmentSec);
-                                    const { targetFps: waFps, crfVal, maxRate } = getWaBaseSpec(sourceFps);
+                                const waSpec = getWaBaseSpec(probeInfo);
+                                const { is4K, resLabel, targetFps: waFps, splitSegmentSec } = waSpec;
 
-                                    console.log(`[FFmpeg WASPLIT 60s] 720p${waFps} CRF=${crfVal} maxrate=${maxRate} | ${totalParts} bahagian x 59.5s | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
+                                if (targetMode === 'WASPLIT' && durationSec > splitSegmentSec + 1) {
+                                    cleanupStaleTempMedia(15 * 60 * 1000);
+                                    const totalParts = Math.ceil(durationSec / splitSegmentSec);
+
+                                    console.log(`[FFmpeg WASPLIT ${resLabel}] ${resLabel} ${waFps}fps CRF=${waSpec.crfVal} maxrate=${waSpec.maxRate} | ${totalParts} bahagian x ${splitSegmentSec}s | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
 
                                     for (let partIndex = 0; partIndex < totalParts; partIndex++) {
-                                        const startSec = (partIndex * segmentSec).toFixed(3);
-                                        const clipDur = Math.min(segmentSec, Math.max(0.5, durationSec - partIndex * segmentSec)).toFixed(3);
-                                        const partFileName = `WA_Status_Part${partIndex + 1}of${totalParts}_${waFps}fps_${Date.now()}.mp4`;
+                                        const startSec = (partIndex * splitSegmentSec).toFixed(3);
+                                        const clipDur = Math.min(splitSegmentSec, Math.max(0.5, durationSec - partIndex * splitSegmentSec)).toFixed(3);
+                                        const partFileName = `WA_Status_Part${partIndex + 1}of${totalParts}_${resLabel}_${waFps}fps_${Date.now()}.mp4`;
                                         const partPath = path.join(TEMP_DIR, partFileName);
                                         generatedParts.push(partPath);
 
@@ -6761,16 +6853,15 @@ async function startBot() {
                                     await sendCachedMessage(sock, remoteJid, {
                                         text:
                                             `${waPreCompNotice}` +
-                                            `✅ *Siap! Video dipotong kepada ${totalParts} bahagian HD (59.5s setiap satu).* Terus tekan *Forward* pada video di atas mengikut turutan (*Part 1 ➔ Part ${totalParts}*) ke *My Status* (atau simpan ke Galeri) tanpa menambah teks/sticker dalam editor WhatsApp.`
+                                            `✅ *Siap! Video dipotong kepada ${totalParts} bahagian ${resLabel} ${waFps}fps HD (${splitSegmentSec}s setiap satu).* Terus tekan *Forward* pada video di atas mengikut turutan (*Part 1 ➔ Part ${totalParts}*) ke *My Status* (atau simpan ke Galeri) tanpa menambah teks/sticker dalam editor WhatsApp.`
                                     });
                                 } else {
                                     const isShortSplitFallback = (targetMode === 'WASPLIT');
-                                    const { targetFps: waFps } = getWaBaseSpec(sourceFps);
-                                    const waFileName = `WA_Status720p_${waFps}fps_${Date.now()}.mp4`;
+                                    const waFileName = `WA_Status_${resLabel}_${waFps}fps_${Date.now()}.mp4`;
                                     outputPath = path.join(TEMP_DIR, waFileName);
 
                                     const { crfVal, maxRate, audioCopied } = await transcodeWaStatusVideo(inputPath, outputPath, ffmpegPath, probeInfo);
-                                    console.log(`[FFmpeg WA Status] 720p${waFps} CRF=${crfVal} maxrate=${maxRate} | Audio: ${audioCopied ? 'copy' : 'aac 128k aresample'} | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
+                                    console.log(`[FFmpeg WA Status] ${resLabel} ${waFps}fps CRF=${crfVal} maxrate=${maxRate} (<29MB Cap) | Audio: ${audioCopied ? 'copy' : 'aac 128k aresample'} | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
 
                                     const waSent = await safeSendMessage(sock, remoteJid, {
                                         video: { stream: fs.createReadStream(outputPath) },
@@ -6782,18 +6873,18 @@ async function startBot() {
                                     }
 
                                     const shortFallbackNote = isShortSplitFallback
-                                        ? `ℹ️ Video anda sudah muat dalam had 60 saat WhatsApp Status (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video penuh HD tanpa perlu dipotong.\n\n`
+                                        ? `ℹ️ Video anda sudah muat dalam 1 klip penuh (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video ${resLabel} HD tanpa perlu dipotong.\n\n`
                                         : '';
-                                    const longVideoSplitTip = durationSec > 65
-                                        ? `\n• _Tip: Video ini melebihi 60 saat (${Math.round(durationSec)}s). Taip *WASPLIT* jika mahu potong automatik setiap 59.5 saat HD untuk WhatsApp Status._`
-                                        : `\n• _Video panjang >60s? Taip *WASPLIT* untuk potong automatik 59.5s HD._`;
+                                    const longVideoSplitTip = (is4K && durationSec > 32) || durationSec > 65
+                                        ? `\n• _Tip: Untuk kualiti maksimum pada video panjang (${Math.round(durationSec)}s), taip *WASPLIT* supaya dipotong automatik (${splitSegmentSec}s setiap bahagian)._`
+                                        : `\n• _Video panjang? Taip *WASPLIT* untuk potong automatik ${resLabel} HD._`;
 
                                     await sendCachedMessage(sock, remoteJid, {
                                         text:
                                             `${waPreCompNotice}${shortFallbackNote}` +
-                                            `✅ *Video WhatsApp Status HD (720p ${waFps}fps) Siap!*\n\n` +
-                                            `1. Terus tekan *Forward* pada video di atas dan pilih *My Status* (atau simpan ke Galeri).\n` +
-                                            `2. *Jangan* tambah teks, sticker, atau lagu dalam editor WhatsApp supaya kualiti HD kekal tajam tanpa mampatan semula.${longVideoSplitTip}`
+                                            `✅ *Video WhatsApp Status HD (${resLabel} ${waFps}fps) Siap!*\n\n` +
+                                            `1. Terus tekan *Forward* pada video di atas dan pilih *My Status* (atau simpan ke Galeri / hidupkan butang *HD* jika hantar ke chat).\n` +
+                                            `2. *Jangan* tambah teks, sticker, atau lagu dalam editor WhatsApp supaya kualiti ${resLabel} kekal tajam tanpa mampatan semula.${longVideoSplitTip}`
                                     });
                                 }
 
@@ -7121,9 +7212,9 @@ async function handleTelegramMessage(tgMsg) {
             const waExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.waExpiredAt).toLocaleDateString('ms-MY');
             await sendTelegramMessage(chatId,
                 `✓ MOD WHATSAPP STATUS HD (VIDEO PENUH) AKTIF\n\n` +
-                `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil WhatsApp Status HD (720p 60fps CRF+VBV + Foto QHD+).\n\n` +
+                `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil WhatsApp Status HD (1080p / 4K 60fps CRF+VBV + Foto QHD+).\n\n` +
                 `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
-                `• Hantar /wasplit untuk mod Auto-Potong 60s HD, atau /mode untuk senarai mod.`,
+                `• Hantar /wasplit untuk mod Auto-Potong HD, atau /mode untuk senarai mod.`,
                 msgId
             );
         } else if (ttActive) {
@@ -7528,15 +7619,16 @@ async function handleTelegramMessage(tgMsg) {
                             ? `⚠️ Nota Penting: Video asal dikesan telah dimampatkan sebelum sampai ke bot. Hantar sebagai File tanpa compression untuk ketajaman maksimum.\n\n`
                             : '';
 
-                        if (targetMode === 'WASPLIT' && durationSec > 60.5) {
+                        const waSpec = getWaBaseSpec(probeInfo);
+                        const { is4K, resLabel, targetFps: waFps, splitSegmentSec } = waSpec;
+
+                        if (targetMode === 'WASPLIT' && durationSec > splitSegmentSec + 1) {
                             cleanupStaleTempMedia(15 * 60 * 1000);
-                            const segmentSec = 59.5;
-                            const totalParts = Math.ceil(durationSec / segmentSec);
-                            const { targetFps: waFps } = getWaBaseSpec(sourceFps);
+                            const totalParts = Math.ceil(durationSec / splitSegmentSec);
                             for (let partIndex = 0; partIndex < totalParts; partIndex++) {
-                                const startSec = (partIndex * segmentSec).toFixed(3);
-                                const clipDur = Math.min(segmentSec, Math.max(0.5, durationSec - partIndex * segmentSec)).toFixed(3);
-                                const partFileName = `WA_Status_Part${partIndex + 1}of${totalParts}_${waFps}fps_${Date.now()}.mp4`;
+                                const startSec = (partIndex * splitSegmentSec).toFixed(3);
+                                const clipDur = Math.min(splitSegmentSec, Math.max(0.5, durationSec - partIndex * splitSegmentSec)).toFixed(3);
+                                const partFileName = `WA_Status_Part${partIndex + 1}of${totalParts}_${resLabel}_${waFps}fps_${Date.now()}.mp4`;
                                 const partPath = path.join(TEMP_DIR, partFileName);
                                 generatedParts.push(partPath);
                                 try {
@@ -7548,24 +7640,23 @@ async function handleTelegramMessage(tgMsg) {
                             }
                             incrementStat('videosProcessed');
                             await sendTelegramMessage(chatId,
-                                `${waPreCompNotice}✅ Siap! Video dipotong kepada ${totalParts} bahagian HD (59.5s setiap satu). Simpan video di atas ke Galeri dan muat naik ke WhatsApp Status mengikut turutan Part 1 ➔ Part ${totalParts} tanpa menambah teks/sticker dalam editor WhatsApp.`,
+                                `${waPreCompNotice}✅ Siap! Video dipotong kepada ${totalParts} bahagian ${resLabel} ${waFps}fps HD (${splitSegmentSec}s setiap satu). Simpan video di atas ke Galeri dan muat naik ke WhatsApp Status mengikut turutan Part 1 ➔ Part ${totalParts} tanpa menambah teks/sticker dalam editor WhatsApp.`,
                                 msgId
                             );
                         } else {
                             const isShortSplitFallback = (targetMode === 'WASPLIT');
-                            const { targetFps: waFps } = getWaBaseSpec(sourceFps);
-                            const waFileName = `WA_Status720p_${waFps}fps_${Date.now()}.mp4`;
+                            const waFileName = `WA_Status_${resLabel}_${waFps}fps_${Date.now()}.mp4`;
                             outputPath = path.join(TEMP_DIR, waFileName);
                             await transcodeWaStatusVideo(inputPath, outputPath, ffmpegPath, probeInfo);
                             await sendTelegramMedia(chatId, 'video', outputPath, null, msgId);
                             const shortFallbackNote = isShortSplitFallback
-                                ? `ℹ️ Video anda sudah muat dalam had 60 saat WhatsApp Status (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video penuh HD tanpa perlu dipotong.\n\n`
+                                ? `ℹ️ Video anda sudah muat dalam 1 klip penuh (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video ${resLabel} HD tanpa perlu dipotong.\n\n`
                                 : '';
-                            const longVideoSplitTip = durationSec > 65
-                                ? `\n• Tip: Video ini melebihi 60 saat (${Math.round(durationSec)}s). Hantar /wasplit jika mahu potong automatik setiap 59.5 saat HD.`
-                                : `\n• Video panjang >60s? Hantar /wasplit untuk potong automatik 59.5s HD.`;
+                            const longVideoSplitTip = (is4K && durationSec > 32) || durationSec > 65
+                                ? `\n• Tip: Untuk kualiti maksimum pada video panjang (${Math.round(durationSec)}s), hantar /wasplit supaya dipotong automatik (${splitSegmentSec}s setiap bahagian).`
+                                : `\n• Video panjang? Hantar /wasplit untuk potong automatik ${resLabel} HD.`;
                             await sendTelegramMessage(chatId,
-                                `${waPreCompNotice}${shortFallbackNote}✅ Video WhatsApp Status HD (720p ${waFps}fps) Siap!\n\n1. Simpan video di atas ke Galeri.\n2. Muat naik terus ke WhatsApp Status tanpa menambah teks, sticker, atau lagu dalam editor WhatsApp (supaya WhatsApp tidak memampatkan semula video anda).${longVideoSplitTip}`,
+                                `${waPreCompNotice}${shortFallbackNote}✅ Video WhatsApp Status HD (${resLabel} ${waFps}fps) Siap!\n\n1. Simpan video di atas ke Galeri.\n2. Muat naik terus ke WhatsApp Status tanpa menambah teks, sticker, atau lagu dalam editor WhatsApp (atau hidupkan butang HD jika hantar ke chat).${longVideoSplitTip}`,
                                 msgId
                             );
                         }
