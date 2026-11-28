@@ -1728,6 +1728,26 @@ function generateClearStatusInvoiceRef() {
     return `CS-${dateStr}-${String(seq).padStart(4, '0')}`;
 }
 
+function getBotWhatsAppNumber() {
+    const rawSockId = (typeof currentSock !== 'undefined' && currentSock?.user?.id)
+        ? String(currentSock.user.id)
+        : '';
+    const sockDigits = rawSockId.split('@')[0].split(':')[0].replace(/\D/g, '');
+    if (sockDigits) {
+        return sockDigits.startsWith('0') ? `60${sockDigits.slice(1)}` : sockDigits;
+    }
+    const fallbackDigits = String(process.env.BOT_WA_NUMBER || '60194066718').replace(/\D/g, '') || '60194066718';
+    return fallbackDigits.startsWith('0') ? `60${fallbackDigits.slice(1)}` : fallbackDigits;
+}
+
+function getWhatsAppReturnUrl(status = 'success') {
+    const botWaNumber = getBotWhatsAppNumber();
+    if (status === 'success') {
+        return `https://wa.me/${botWaNumber}?text=${encodeURIComponent('Saya sudah buat pembayaran ✅')}`;
+    }
+    return `https://wa.me/${botWaNumber}?text=${encodeURIComponent('Pembayaran dibatalkan')}`;
+}
+
 async function createChipCheckout({ userKey, phone, formattedName, userEmail = '', planType = 'WA', planTitle = 'WhatsApp Status HD', amountRM = '11.99', days = 30, platform = 'whatsapp', appliedRefCode = '' }) {
     if (!CHIP_BRAND_ID || !CHIP_API_KEY) {
         throw new Error('CHIP_BRAND_ID atau CHIP_API_KEY belum dikonfigurasikan di Environment Variables.');
@@ -1771,8 +1791,9 @@ async function createChipCheckout({ userKey, phone, formattedName, userEmail = '
             }
         },
         success_callback: `${PUBLIC_BASE_URL}/webhook/chip`,
-        success_redirect: `${PUBLIC_BASE_URL}/?paid=1`,
-        failure_redirect: `${PUBLIC_BASE_URL}/?paid=0`
+        success_redirect: getWhatsAppReturnUrl('success'),
+        failure_redirect: getWhatsAppReturnUrl('cancel'),
+        cancel_redirect: getWhatsAppReturnUrl('cancel')
     };
 
     console.log(`[CHIP ASIA] Creating checkout ${invoiceRef} for ${userKey || phone} (${planType}, RM${(priceCents / 100).toFixed(2)})...`);
@@ -1824,7 +1845,7 @@ async function createHitPayPaymentRequest({ userKey, phone, pushName, planCode =
         name: (pushName || refKey || 'Ahli StatusClear').slice(0, 50),
         purpose: purpose || `StatusClear ${planCode} (${days} Hari)`,
         reference_number: `${refKey}|${planCode}|${days}`,
-        redirect_url: redirectUrl || ('https://wa.me/' + (process.env.PAIRING_NUMBER || PRIMARY_ADMIN)),
+        redirect_url: getWhatsAppReturnUrl('success'),
         send_email: false,
         send_sms: false
     };
@@ -4477,8 +4498,43 @@ function ensureHttpServer() {
     if (httpServer) return httpServer;
 
     const server = http.createServer(async (req, res) => {
+        res.redirect = (statusCode, targetUrl) => {
+            res.writeHead(statusCode, {
+                'Location': targetUrl,
+                'Cache-Control': 'no-store'
+            });
+            res.end();
+        };
+
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
         const pathname = parsedUrl.pathname;
+
+        const isPaymentReturnGet = req.method === 'GET' && (
+            [
+                '/payment-success',
+                '/payment/success',
+                '/success',
+                '/payment-cancel',
+                '/payment/cancel',
+                '/cancel',
+                '/payment-failure',
+                '/payment/failure',
+                '/failure',
+                '/redirect',
+                '/webhook/chip',
+                '/webhook/hitpay'
+            ].includes(pathname) ||
+            (pathname === '/' && parsedUrl.searchParams.has('paid'))
+        );
+
+        if (isPaymentReturnGet) {
+            const paidParam = parsedUrl.searchParams.get('paid');
+            const statusParam = (parsedUrl.searchParams.get('status') || '').toLowerCase();
+            const isCancelOrFail = /(cancel|fail)/i.test(pathname) ||
+                paidParam === '0' ||
+                /(cancel|fail|error)/i.test(statusParam);
+            return res.redirect(302, getWhatsAppReturnUrl(isCancelOrFail ? 'cancel' : 'success'));
+        }
 
         // PWA MONITOR ROOT & /admin ROUTE
         if (req.method === 'GET' && (pathname === '/' || pathname === '/admin')) {
