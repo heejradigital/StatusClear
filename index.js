@@ -968,10 +968,10 @@ class RobustVideoQueue {
                 insertIdx++;
             }
             this.queue.splice(insertIdx, 0, jobData);
-            position = insertIdx + 1;
+            position = insertIdx + 1 + (this.activeJob ? 1 : 0);
         } else {
             this.queue.push(jobData);
-            position = this.queue.length;
+            position = this.queue.length + (this.activeJob ? 1 : 0);
         }
         this.processNext();
         return { success: true, position };
@@ -981,17 +981,47 @@ class RobustVideoQueue {
         if (this.activeJob || this.queue.length === 0) return;
 
         this.activeJob = this.queue.shift();
+        let jobTimer = null;
         try {
-            await this.activeJob.run();
+            const JOB_TIMEOUT_MS = 420000; // 7 minit had maksimum setiap tugasan
+            await Promise.race([
+                this.activeJob.run(),
+                new Promise((_, reject) => {
+                    jobTimer = setTimeout(() => {
+                        reject(new Error('Tugasan pemprosesan melebihi had masa 7 minit dan dilepaskan secara automatik.'));
+                    }, JOB_TIMEOUT_MS);
+                    if (jobTimer.unref) jobTimer.unref();
+                })
+            ]);
         } catch (err) {
             console.error('[Ralat Antrian]:', err);
         } finally {
+            if (jobTimer) clearTimeout(jobTimer);
             if (this.activeJob) {
                 this.activeUsers.delete(this.activeJob.userId);
             }
             this.activeJob = null;
             this.processNext();
         }
+    }
+}
+
+async function downloadWhatsAppMediaWithTimeout(msg, destPath, sockRef, timeoutMs = 90000) {
+    let timer = null;
+    const downloadPromise = (async () => {
+        const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sockRef.updateMediaMessage });
+        await pipeline(mediaStream, fs.createWriteStream(destPath));
+    })();
+    try {
+        await Promise.race([
+            downloadPromise,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('Muat turun media WhatsApp melebihi had masa 90 saat.')), timeoutMs);
+                if (timer.unref) timer.unref();
+            })
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
     }
 }
 
@@ -1732,9 +1762,14 @@ async function enhanceQhdPhoto(inputPath, outputPath, binPath) {
 function unwrapMessage(msg) {
     if (!msg) return null;
     let m = msg;
-    if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
-    if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
-    if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+    for (let i = 0; i < 4; i++) {
+        if (m.ephemeralMessage?.message) { m = m.ephemeralMessage.message; continue; }
+        if (m.viewOnceMessage?.message) { m = m.viewOnceMessage.message; continue; }
+        if (m.viewOnceMessageV2?.message) { m = m.viewOnceMessageV2.message; continue; }
+        if (m.viewOnceMessageV2Extension?.message) { m = m.viewOnceMessageV2Extension.message; continue; }
+        if (m.editedMessage?.message) { m = m.editedMessage.message; continue; }
+        break;
+    }
     return m;
 }
 
@@ -5409,6 +5444,7 @@ async function startBot() {
         if (!m.messages || m.messages.length === 0) return;
 
         for (const msg of m.messages) {
+            try {
             if (msg.key && msg.key.id) {
                 storeCachedMessage(msg.key.id, unwrapMessage(msg.message) || msg.message);
             }
@@ -5468,9 +5504,11 @@ async function startBot() {
             let user = users[phone] || findUserRecord(users, remoteJid, altJid);
 
             // Jika mesej datang dari LID yang belum dikenali
-            if ((!user || user.status !== 'ACTIVE') && remoteJid.endsWith('@lid')) {
+            if (!user && remoteJid.endsWith('@lid')) {
+                const seenPhones = new Set();
                 for (const u of Object.values(users)) {
-                    if (u.status === 'ACTIVE' && u.phone) {
+                    if (u.status === 'ACTIVE' && u.phone && !seenPhones.has(u.phone)) {
+                        seenPhones.add(u.phone);
                         try {
                             const checkJid = u.phone.includes('@') ? u.phone : `${u.phone}@s.whatsapp.net`;
                             const [waUser] = await sock.onWhatsApp(checkJid);
@@ -6714,15 +6752,15 @@ async function startBot() {
                         const outputPath = path.join(TEMP_DIR, `status_clear_photo_${fileId}.jpg`);
 
                         try {
+                            const liveSock = currentSock || sock;
                             try {
-                                await sock.sendMessage(remoteJid, {
+                                await liveSock.sendMessage(remoteJid, {
                                     react: { text: '⏳', key: msg.key }
                                 });
                             } catch {}
 
                             console.log(`\n[Pemprosesan Imej Bermula] Memuat turun foto${isHeicJob ? ` (${heicExt.toUpperCase()})` : ''} dari ${remoteJid}...`);
-                            const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-                            await pipeline(mediaStream, fs.createWriteStream(isHeicJob ? rawHeicPath : inputPath));
+                            await downloadWhatsAppMediaWithTimeout(msg, isHeicJob ? rawHeicPath : inputPath, liveSock, 90000);
 
                             if (isHeicJob) {
                                 console.log(`[HEIC/HEIF Convert] Menyahkod ${path.basename(rawHeicPath)} ke JPEG (Q=0.98)...`);
@@ -6744,14 +6782,14 @@ async function startBot() {
                             const sizeKB = (sizeBytes / 1024).toFixed(1);
                             const sharpNote = hasCas ? 'CAS 0.35 (Kontras Adaptif)' : 'Lanczos Sharp Resample';
 
-                            const imgSent = await safeSendMessage(sock, remoteJid, {
+                            const imgSent = await safeSendMessage(currentSock || sock, remoteJid, {
                                 image: { stream: fs.createReadStream(outputPath) }
                             }, { quoted: msg });
                             if (imgSent && imgSent.key && imgSent.key.id && imgSent.message) {
                                 storeCachedMessage(imgSent.key.id, imgSent.message);
                             }
 
-                            await sendCachedMessage(sock, remoteJid, {
+                            await sendCachedMessage(currentSock || sock, remoteJid, {
                                 text:
                                     `✓ *PENGOPTIMUMAN FOTO SELESAI*\n\n` +
                                     `Foto anda telah ditingkatkan ke resolusi 2560px (QHD+) dengan penalaan ${sharpNote} & kawalan anti-mampatan WhatsApp Status.\n\n` +
@@ -6761,7 +6799,7 @@ async function startBot() {
                             });
 
                             try {
-                                await sock.sendMessage(remoteJid, {
+                                await (currentSock || sock).sendMessage(remoteJid, {
                                     react: { text: '✅', key: msg.key }
                                 });
                             } catch {}
@@ -6841,16 +6879,16 @@ async function startBot() {
                         const generatedParts = [];
 
                         try {
+                            const liveSock = currentSock || sock;
                             try {
-                                await sock.sendMessage(remoteJid, {
+                                await liveSock.sendMessage(remoteJid, {
                                     react: { text: '⏳', key: msg.key }
                                 });
                             } catch {}
 
                             console.log(`\n[Pemprosesan Video ${targetMode} Bermula] Memuat turun video (${sizeMB} MB, format ${videoInputExt}) dari ${remoteJid}...`);
 
-                            const mediaStream = await downloadMediaMessage(msg, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-                            await pipeline(mediaStream, fs.createWriteStream(inputPath));
+                            await downloadWhatsAppMediaWithTimeout(msg, inputPath, liveSock, 90000);
 
                             const probeInfo = await probeVideo(inputPath, ffprobePath);
                             const { duration: durationSec, fps: sourceFps, isHDR, colorTransfer, isPreCompressed, isWaPreCompressed } = probeInfo;
@@ -6955,7 +6993,7 @@ async function startBot() {
                                         try {
                                             await transcodeWaSplitPart(inputPath, partPath, ffmpegPath, probeInfo, startSec, clipDur);
 
-                                            const partSent = await safeSendMessage(sock, remoteJid, {
+                                            const partSent = await safeSendMessage(currentSock || sock, remoteJid, {
                                                 video: { stream: fs.createReadStream(partPath) },
                                                 mimetype: 'video/mp4',
                                                 hd: true
@@ -6970,7 +7008,7 @@ async function startBot() {
 
                                     incrementStat('videosProcessed');
 
-                                    await sendCachedMessage(sock, remoteJid, {
+                                    await sendCachedMessage(currentSock || sock, remoteJid, {
                                         text:
                                             `${waPreCompNotice}` +
                                             `✅ *Siap! Video dipotong kepada ${totalParts} bahagian ${resLabel} ${waFps}fps HD (${splitSegmentSec}s setiap satu).* Terus tekan *Forward* pada video di atas mengikut turutan (*Part 1 ➔ Part ${totalParts}*) ke *My Status* (atau simpan ke Galeri) tanpa menambah teks/sticker dalam editor WhatsApp.`
@@ -6983,7 +7021,7 @@ async function startBot() {
                                     const { crfVal, maxRate, audioCopied } = await transcodeWaStatusVideo(inputPath, outputPath, ffmpegPath, probeInfo);
                                     console.log(`[FFmpeg WA Status] ${resLabel} ${waFps}fps CRF=${crfVal} maxrate=${maxRate} (<29MB Cap) | Audio: ${audioCopied ? 'copy' : 'aac 128k aresample'} | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
 
-                                    const waSent = await safeSendMessage(sock, remoteJid, {
+                                    const waSent = await safeSendMessage(currentSock || sock, remoteJid, {
                                         video: { stream: fs.createReadStream(outputPath) },
                                         mimetype: 'video/mp4',
                                         hd: true
@@ -6999,7 +7037,7 @@ async function startBot() {
                                         ? `\n• _Tip: Untuk kualiti maksimum pada video panjang (${Math.round(durationSec)}s), taip *WASPLIT* supaya dipotong automatik (${splitSegmentSec}s setiap bahagian)._`
                                         : `\n• _Video panjang? Taip *WASPLIT* untuk potong automatik ${resLabel} HD._`;
 
-                                    await sendCachedMessage(sock, remoteJid, {
+                                    await sendCachedMessage(currentSock || sock, remoteJid, {
                                         text:
                                             `${waPreCompNotice}${shortFallbackNote}` +
                                             `✅ *Video WhatsApp Status HD (${resLabel} ${waFps}fps) Siap!*\n\n` +
@@ -7009,7 +7047,7 @@ async function startBot() {
                                 }
 
                                 try {
-                                    await sock.sendMessage(remoteJid, {
+                                    await (currentSock || sock).sendMessage(remoteJid, {
                                         react: { text: '✅', key: msg.key }
                                     });
                                 } catch {}
@@ -7070,6 +7108,9 @@ async function startBot() {
                         }, { quoted: msg });
                     }
                 }
+            }
+            } catch (msgErr) {
+                console.error('[messages.upsert Error]:', msgErr);
             }
         }
     });
