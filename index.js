@@ -1114,14 +1114,28 @@ async function probeVideo(filePath, binPath) {
 function getWaBaseSpec(sourceFps) {
     const numFps = Number(sourceFps) || 30;
     if (numFps >= 45) {
-        return { targetFps: 60, baseKbps: 3400, h264Level: '4.1' };
+        return {
+            targetFps: 60,
+            crfVal: '20',
+            maxRateKbps: 4500,
+            maxRate: '4500k',
+            bufSize: '9000k',
+            h264Level: '4.1'
+        };
     }
-    return { targetFps: 30, baseKbps: 3000, h264Level: '4.0' };
+    return {
+        targetFps: 30,
+        crfVal: '19',
+        maxRateKbps: 3500,
+        maxRate: '3500k',
+        bufSize: '7000k',
+        h264Level: '4.0'
+    };
 }
 
 function buildWaFilterChain(binPath, targetFps, isHDR) {
     const hasCas = checkCasSupport(binPath);
-    const sharpFilter = hasCas ? 'cas=strength=0.16' : 'unsharp=5:5:0.16:5:5:0.0';
+    const sharpFilter = hasCas ? 'cas=strength=0.18' : 'unsharp=5:5:0.18:5:5:0.0';
     const filterParts = [];
 
     if (isHDR) {
@@ -1137,6 +1151,9 @@ function buildWaFilterChain(binPath, targetFps, isHDR) {
         "scale='if(gt(iw,ih),-2,720)':'if(gt(iw,ih),720,-2)'",
         'setsar=1',
         `fps=${targetFps}`,
+        'hqdn3d=0.8:0.8:2.0:2.0',
+        'deband=1thr=0.012:2thr=0.012:3thr=0.012',
+        'eq=contrast=1.02:saturation=1.03',
         sharpFilter
     );
 
@@ -1152,15 +1169,13 @@ async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo)
         const hasAudio = !!probeInfo?.hasAudio;
         const canCopyWaAudio = !!probeInfo?.canCopyWaAudio;
 
-        const { targetFps, baseKbps, h264Level } = getWaBaseSpec(sourceFps);
-        const finalKbps = durationSec > 32
-            ? Math.min(baseKbps, Math.max(1800, Math.floor((14.5 * 8192) / durationSec) - 140))
-            : baseKbps;
+        const { targetFps, crfVal, maxRateKbps, h264Level } = getWaBaseSpec(sourceFps);
+        const effectiveMaxKbps = durationSec > 65
+            ? Math.min(maxRateKbps, Math.max(2600, Math.floor((28 * 8192) / durationSec) - 140))
+            : maxRateKbps;
 
-        const targetBitrate = `${finalKbps}k`;
-        const minRate = `${Math.max(1500, finalKbps - 250)}k`;
-        const maxRate = `${finalKbps + 250}k`;
-        const bufSize = `${(finalKbps + 250) * 2}k`;
+        const maxRate = `${effectiveMaxKbps}k`;
+        const bufSize = `${effectiveMaxKbps * 2}k`;
         const vfChain = buildWaFilterChain(binPath, targetFps, isHDR);
 
         const args = [
@@ -1174,7 +1189,6 @@ async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo)
             '-sn',
             '-dn',
             '-max_muxing_queue_size', '4096',
-            '-max_interleave_delta', '0',
             '-avoid_negative_ts', 'make_zero',
             '-vf', vfChain,
             '-c:v', 'libx264',
@@ -1184,17 +1198,15 @@ async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo)
             '-pix_fmt', 'yuv420p',
             '-fps_mode', 'cfr',
             '-r', String(targetFps),
-            '-b:v', targetBitrate,
-            '-minrate', minRate,
+            '-crf', crfVal,
             '-maxrate', maxRate,
             '-bufsize', bufSize,
-            '-refs', '2',
-            '-rc-lookahead', '20',
-            '-bf', '2',
-            '-g', String(targetFps),
+            '-refs', '4',
+            '-rc-lookahead', '40',
+            '-bf', '3',
+            '-g', String(targetFps * 2),
             '-keyint_min', String(targetFps),
-            '-sc_threshold', '0',
-            '-x264-params', 'b-pyramid=none:chroma_qp_offset=-2:deblock=-1,-1:aq-mode=3:aq-strength=0.95:psy-rd=0.95,0.08',
+            '-x264-params', 'b-pyramid=normal:chroma_qp_offset=-2:deblock=-1,-1:aq-mode=3:aq-strength=0.95:psy-rd=1.00,0.08',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
@@ -1221,13 +1233,13 @@ async function transcodeWaStatusVideo(inputPath, outputPath, binPath, probeInfo)
             outputPath
         );
 
-        const proc = spawn(binPath, args, { timeout: 180000 });
+        const proc = spawn(binPath, args, { timeout: 240000 });
         let stderr = '';
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
         proc.on('close', (code, signal) => {
             if (code === 0 && fs.existsSync(outputPath)) {
                 incrementStat('videosProcessed');
-                resolve({ targetFps, finalKbps, audioCopied: !!(hasAudio && canCopyWaAudio) });
+                resolve({ targetFps, crfVal, maxRate, audioCopied: !!(hasAudio && canCopyWaAudio) });
             } else {
                 const matchedLines = stderr
                     .split(/\r?\n/)
@@ -1249,12 +1261,7 @@ async function transcodeWaSplitPart(inputPath, partPath, binPath, probeInfo, sta
         const isHDR = !!probeInfo?.isHDR;
         const hasAudio = !!probeInfo?.hasAudio;
 
-        const { targetFps, baseKbps, h264Level } = getWaBaseSpec(sourceFps);
-        const finalKbps = baseKbps;
-        const targetBitrate = `${finalKbps}k`;
-        const minRate = `${finalKbps - 250}k`;
-        const maxRate = `${finalKbps + 250}k`;
-        const bufSize = `${(finalKbps + 250) * 2}k`;
+        const { targetFps, crfVal, maxRate, bufSize, h264Level } = getWaBaseSpec(sourceFps);
         const vfChain = buildWaFilterChain(binPath, targetFps, isHDR);
 
         const args = [
@@ -1270,7 +1277,6 @@ async function transcodeWaSplitPart(inputPath, partPath, binPath, probeInfo, sta
             '-sn',
             '-dn',
             '-max_muxing_queue_size', '4096',
-            '-max_interleave_delta', '0',
             '-avoid_negative_ts', 'make_zero',
             '-vf', vfChain,
             '-c:v', 'libx264',
@@ -1280,17 +1286,15 @@ async function transcodeWaSplitPart(inputPath, partPath, binPath, probeInfo, sta
             '-pix_fmt', 'yuv420p',
             '-fps_mode', 'cfr',
             '-r', String(targetFps),
-            '-b:v', targetBitrate,
-            '-minrate', minRate,
+            '-crf', crfVal,
             '-maxrate', maxRate,
             '-bufsize', bufSize,
-            '-refs', '2',
-            '-rc-lookahead', '20',
-            '-bf', '2',
-            '-g', String(targetFps),
+            '-refs', '4',
+            '-rc-lookahead', '40',
+            '-bf', '3',
+            '-g', String(targetFps * 2),
             '-keyint_min', String(targetFps),
-            '-sc_threshold', '0',
-            '-x264-params', 'b-pyramid=none:chroma_qp_offset=-2:deblock=-1,-1:aq-mode=3:aq-strength=0.95:psy-rd=0.95,0.08',
+            '-x264-params', 'b-pyramid=normal:chroma_qp_offset=-2:deblock=-1,-1:aq-mode=3:aq-strength=0.95:psy-rd=1.00,0.08',
             '-colorspace', 'bt709',
             '-color_primaries', 'bt709',
             '-color_trc', 'bt709',
@@ -1315,12 +1319,12 @@ async function transcodeWaSplitPart(inputPath, partPath, binPath, probeInfo, sta
             partPath
         );
 
-        const proc = spawn(binPath, args, { timeout: 180000 });
+        const proc = spawn(binPath, args, { timeout: 240000 });
         let stderr = '';
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
         proc.on('close', (code, signal) => {
             if (code === 0 && fs.existsSync(partPath)) {
-                resolve({ targetFps, finalKbps });
+                resolve({ targetFps, crfVal, maxRate });
             } else {
                 const matchedLines = stderr
                     .split(/\r?\n/)
@@ -5925,7 +5929,7 @@ async function startBot() {
                         ? 'TikTok 10-bit HDR10+ Glow (Superadmin)'
                         : (curMode === 'TT'
                             ? 'TikTok Crystal 1080p SDR (Superadmin)'
-                            : (curMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 30s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
+                            : (curMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
 
                     await sendHumanReply(sock, remoteJid, {
                         text:
@@ -5933,14 +5937,14 @@ async function startBot() {
                             `Mod semasa: *${curLabel}*\n\n` +
                             `Balas nombor atau kod mod di bawah:\n` +
                             `• *1* atau *WA* — WhatsApp Status HD (Video Penuh)\n` +
-                            `• *2* atau *WASPLIT* — WhatsApp Status Auto-Potong 30s HD (Part 1, 2, 3...)\n` +
+                            `• *2* atau *WASPLIT* — WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)\n` +
                             `• *3* atau *TT* — TikTok Crystal 1080p SDR (Superadmin)\n` +
                             `• *4* atau *TTHDR* — TikTok 10-bit HDR10+ Glow (Superadmin)`
                     }, { quoted: msg });
                 } else {
                     const curMode = user.preferredMode === 'WASPLIT' ? 'WASPLIT' : 'WA';
                     const curLabel = curMode === 'WASPLIT'
-                        ? 'WhatsApp Status Auto-Potong 30s HD (Part 1, 2, 3...)'
+                        ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)'
                         : 'WhatsApp Status HD (Video Penuh)';
 
                     await sendHumanReply(sock, remoteJid, {
@@ -5949,7 +5953,7 @@ async function startBot() {
                             `Mod semasa: *${curLabel}*\n\n` +
                             `Balas nombor atau kod mod di bawah:\n` +
                             `• *1* atau *WA* — WhatsApp Status HD (Video Penuh)\n` +
-                            `• *2* atau *WASPLIT* — WhatsApp Status Auto-Potong 30s HD (Part 1, 2, 3...)`
+                            `• *2* atau *WASPLIT* — WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)`
                     }, { quoted: msg });
                 }
                 continue;
@@ -6024,15 +6028,15 @@ async function startBot() {
                     const waExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.waExpiredAt).toLocaleDateString('ms-MY');
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `✓ *MOD WHATSAPP STATUS AUTO-POTONG 30S HD (WASPLIT) AKTIF*\n\n` +
-                            `Semua video melebihi 30 saat yang anda hantar selepas ini akan dipotong secara automatik kepada bahagian *29.5 saat HD (Part 1, 2, 3...)* supaya boleh dimuat naik terus ke WhatsApp Status tanpa pecah.\n\n` +
+                            `✓ *MOD WHATSAPP STATUS AUTO-POTONG 60S HD (WASPLIT) AKTIF*\n\n` +
+                            `Semua video melebihi 60 saat yang anda hantar selepas ini akan dipotong secara automatik kepada bahagian *59.5 saat 60fps HD (Part 1, 2, 3...)* mengikut had 1 minit WhatsApp Status.\n\n` +
                             `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
                             `• Taip *WA* untuk mod Video Penuh, atau *MODE* untuk senarai mod.`
                     }, { quoted: msg });
                 } else {
                     await sendHumanReply(sock, remoteJid, {
                         text:
-                            `Mod pilihan anda ditetapkan ke *WhatsApp Status Auto-Potong 30s HD (WASPLIT)*, namun anda belum mempunyai langganan active.\n\n` +
+                            `Mod pilihan anda ditetapkan ke *WhatsApp Status Auto-Potong 60s HD (WASPLIT)*, namun anda belum mempunyai langganan active.\n\n` +
                             `Balas *1* untuk langgan *WhatsApp Status HD (RM11.99 / 30 Hari)*.`
                     }, { quoted: msg });
                 }
@@ -6051,9 +6055,9 @@ async function startBot() {
                     await sendHumanReply(sock, remoteJid, {
                         text:
                             `✓ *MOD WHATSAPP STATUS HD (VIDEO PENUH) AKTIF*\n\n` +
-                            `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil *WhatsApp Status HD (Video Penuh <14.5MB + Foto QHD+)*.\n\n` +
+                            `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil *WhatsApp Status HD (720p 60fps CRF+VBV + Foto QHD+)*.\n\n` +
                             `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
-                            `• Taip *WASPLIT* untuk mod Auto-Potong 30s HD, atau *MODE* untuk senarai mod.`
+                            `• Taip *WASPLIT* untuk mod Auto-Potong 60s HD, atau *MODE* untuk senarai mod.`
                     }, { quoted: msg });
                 } else if (ttActive) {
                     await sendHumanReply(sock, remoteJid, {
@@ -6307,7 +6311,7 @@ async function startBot() {
                         ? 'TikTok 10-bit HDR10+ Glow (Superadmin)'
                         : (currentMode === 'TT'
                             ? 'TikTok Crystal 1080p SDR (Superadmin)'
-                            : (currentMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 30s HD' : 'WhatsApp Status HD (Video Penuh)'));
+                            : (currentMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
 
                     await sendHumanReply(sock, remoteJid, {
                         text:
@@ -6318,7 +6322,7 @@ async function startBot() {
                             `• Kod Referral Peribadi: *${user.refCode}*\n\n` +
                             `Panduan Ringkas:\n` +
                             `• Hantar video atau foto anda sebagai *file / document* (Lampiran > Document > Galeri) supaya kualiti asal kekal terpelihara.\n` +
-                            `• Taip *MODE* untuk pilih antara *WA* (Video Penuh) atau *WASPLIT* (Auto-Potong 30s HD).\n` +
+                            `• Taip *MODE* untuk pilih antara *WA* (Video Penuh) atau *WASPLIT* (Auto-Potong 60s HD).\n` +
                             `• Guna arahan */link ${user.refCode}* di Telegram jika mahu pautkan langganan anda.\n\n` +
                             `Ganjaran Referral: Ajak 3 rakan melanggan menggunakan kod *${user.refCode}* untuk tebus 1 bulan percuma secara automatik.`
                     }, { quoted: msg });
@@ -6362,7 +6366,7 @@ async function startBot() {
                         ? 'TikTok 10-bit HDR10+ Glow (Superadmin)'
                         : (currentMode === 'TT'
                             ? 'TikTok Crystal 1080p SDR (Superadmin)'
-                            : (currentMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 30s HD' : 'WhatsApp Status HD (Video Penuh)'));
+                            : (currentMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
 
                     await sendHumanReply(sock, remoteJid, {
                         text:
@@ -6710,9 +6714,9 @@ async function startBot() {
                                     });
                                 } catch {}
                             } else {
-                                if (targetMode === 'WASPLIT' && durationSec > 300) {
+                                if (targetMode === 'WASPLIT' && durationSec > 360) {
                                     await sendHumanReply(sock, remoteJid, {
-                                        text: `⚠️ Video melebihi 5 minit. Sila hantar video bawah 5 minit untuk mod WASPLIT.`
+                                        text: `⚠️ Video melebihi 6 minit. Sila hantar video bawah 6 minit untuk mod WASPLIT.`
                                     }, { quoted: msg });
                                     return;
                                 }
@@ -6721,18 +6725,18 @@ async function startBot() {
                                     ? `⚠️ *Nota Penting:* Video yang anda hantar tadi telah dimampatkan sebelum sampai ke bot. Untuk ketajaman maksimum tanpa pecah, sentiasa tekan ikon klip (📎) > *Document* semasa menghantar video asal ke bot.\n\n`
                                     : '';
 
-                                if (targetMode === 'WASPLIT' && durationSec > 30.5) {
+                                if (targetMode === 'WASPLIT' && durationSec > 60.5) {
                                     cleanupStaleTempMedia(15 * 60 * 1000);
-                                    const segmentSec = 29.5;
+                                    const segmentSec = 59.5;
                                     const totalParts = Math.ceil(durationSec / segmentSec);
-                                    const { targetFps: waFps, baseKbps } = getWaBaseSpec(sourceFps);
+                                    const { targetFps: waFps, crfVal, maxRate } = getWaBaseSpec(sourceFps);
 
-                                    console.log(`[FFmpeg WASPLIT] 720p${waFps} @ ${baseKbps}k | ${totalParts} bahagian x 29.5s | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
+                                    console.log(`[FFmpeg WASPLIT 60s] 720p${waFps} CRF=${crfVal} maxrate=${maxRate} | ${totalParts} bahagian x 59.5s | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
 
                                     for (let partIndex = 0; partIndex < totalParts; partIndex++) {
                                         const startSec = (partIndex * segmentSec).toFixed(3);
                                         const clipDur = Math.min(segmentSec, Math.max(0.5, durationSec - partIndex * segmentSec)).toFixed(3);
-                                        const partFileName = `WA_Status_Part${partIndex + 1}of${totalParts}_${Date.now()}.mp4`;
+                                        const partFileName = `WA_Status_Part${partIndex + 1}of${totalParts}_${waFps}fps_${Date.now()}.mp4`;
                                         const partPath = path.join(TEMP_DIR, partFileName);
                                         generatedParts.push(partPath);
 
@@ -6757,7 +6761,7 @@ async function startBot() {
                                     await sendCachedMessage(sock, remoteJid, {
                                         text:
                                             `${waPreCompNotice}` +
-                                            `✅ *Siap! Video dipotong kepada ${totalParts} bahagian HD (29.5s setiap satu).* Terus tekan *Forward* pada video di atas mengikut turutan (*Part 1 ➔ Part ${totalParts}*) ke *My Status* (atau simpan ke Galeri) tanpa menambah teks/sticker dalam editor WhatsApp.`
+                                            `✅ *Siap! Video dipotong kepada ${totalParts} bahagian HD (59.5s setiap satu).* Terus tekan *Forward* pada video di atas mengikut turutan (*Part 1 ➔ Part ${totalParts}*) ke *My Status* (atau simpan ke Galeri) tanpa menambah teks/sticker dalam editor WhatsApp.`
                                     });
                                 } else {
                                     const isShortSplitFallback = (targetMode === 'WASPLIT');
@@ -6765,8 +6769,8 @@ async function startBot() {
                                     const waFileName = `WA_Status720p_${waFps}fps_${Date.now()}.mp4`;
                                     outputPath = path.join(TEMP_DIR, waFileName);
 
-                                    const { finalKbps, audioCopied } = await transcodeWaStatusVideo(inputPath, outputPath, ffmpegPath, probeInfo);
-                                    console.log(`[FFmpeg WA Status] 720p${waFps} @ ${finalKbps}k (<14.5MB Cap) | Audio: ${audioCopied ? 'copy' : 'aac 128k aresample'} | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
+                                    const { crfVal, maxRate, audioCopied } = await transcodeWaStatusVideo(inputPath, outputPath, ffmpegPath, probeInfo);
+                                    console.log(`[FFmpeg WA Status] 720p${waFps} CRF=${crfVal} maxrate=${maxRate} | Audio: ${audioCopied ? 'copy' : 'aac 128k aresample'} | Durasi: ${durationSec.toFixed(1)}s | HDR: ${isHDR}`);
 
                                     const waSent = await safeSendMessage(sock, remoteJid, {
                                         video: { stream: fs.createReadStream(outputPath) },
@@ -6778,16 +6782,18 @@ async function startBot() {
                                     }
 
                                     const shortFallbackNote = isShortSplitFallback
-                                        ? `ℹ️ Video anda sudah bawah 30 saat (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video penuh HD tanpa perlu dipotong.\n\n`
+                                        ? `ℹ️ Video anda sudah muat dalam had 60 saat WhatsApp Status (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video penuh HD tanpa perlu dipotong.\n\n`
                                         : '';
+                                    const longVideoSplitTip = durationSec > 65
+                                        ? `\n• _Tip: Video ini melebihi 60 saat (${Math.round(durationSec)}s). Taip *WASPLIT* jika mahu potong automatik setiap 59.5 saat HD untuk WhatsApp Status._`
+                                        : `\n• _Video panjang >60s? Taip *WASPLIT* untuk potong automatik 59.5s HD._`;
 
                                     await sendCachedMessage(sock, remoteJid, {
                                         text:
                                             `${waPreCompNotice}${shortFallbackNote}` +
                                             `✅ *Video WhatsApp Status HD (720p ${waFps}fps) Siap!*\n\n` +
                                             `1. Terus tekan *Forward* pada video di atas dan pilih *My Status* (atau simpan ke Galeri).\n` +
-                                            `2. *Jangan* tambah teks, sticker, atau lagu dalam editor WhatsApp supaya kualiti HD kekal tajam tanpa mampatan semula.\n` +
-                                            `• _Video panjang >30s? Taip *WASPLIT* untuk potong automatik 29.5s HD._`
+                                            `2. *Jangan* tambah teks, sticker, atau lagu dalam editor WhatsApp supaya kualiti HD kekal tajam tanpa mampatan semula.${longVideoSplitTip}`
                                     });
                                 }
 
@@ -7015,13 +7021,13 @@ async function handleTelegramMessage(tgMsg) {
                 ? 'TikTok 10-bit HDR10+ Glow (Superadmin)'
                 : (curMode === 'TT'
                     ? 'TikTok Crystal 1080p SDR (Superadmin)'
-                    : (curMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 30s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
+                    : (curMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
             await sendTelegramMessage(chatId,
                 `PILIH MOD PEMPROSESAN VIDEO (SUPERADMIN)\n` +
                 `Mod semasa: ${curLabel}\n\n` +
                 `Balas nombor atau arahan di bawah:\n` +
                 `• 1 atau /wa — WhatsApp Status HD (Video Penuh)\n` +
-                `• 2 atau /wasplit — WhatsApp Status Auto-Potong 30s HD (Part 1, 2, 3...)\n` +
+                `• 2 atau /wasplit — WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)\n` +
                 `• 3 atau /tt — TikTok Crystal 1080p SDR (Superadmin)\n` +
                 `• 4 atau /tthdr — TikTok 10-bit HDR10+ Glow (Superadmin)`,
                 msgId
@@ -7029,14 +7035,14 @@ async function handleTelegramMessage(tgMsg) {
         } else {
             const curMode = user.preferredMode === 'WASPLIT' ? 'WASPLIT' : 'WA';
             const curLabel = curMode === 'WASPLIT'
-                ? 'WhatsApp Status Auto-Potong 30s HD (Part 1, 2, 3...)'
+                ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)'
                 : 'WhatsApp Status HD (Video Penuh)';
             await sendTelegramMessage(chatId,
                 `PILIH MOD PEMPROSESAN VIDEO\n` +
                 `Mod semasa: ${curLabel}\n\n` +
                 `Balas nombor atau arahan di bawah:\n` +
                 `• 1 atau /wa — WhatsApp Status HD (Video Penuh)\n` +
-                `• 2 atau /wasplit — WhatsApp Status Auto-Potong 30s HD (Part 1, 2, 3...)`,
+                `• 2 atau /wasplit — WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)`,
                 msgId
             );
         }
@@ -7092,15 +7098,15 @@ async function handleTelegramMessage(tgMsg) {
         if (waActive) {
             const waExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.waExpiredAt).toLocaleDateString('ms-MY');
             await sendTelegramMessage(chatId,
-                `✓ MOD WHATSAPP STATUS AUTO-POTONG 30S HD (WASPLIT) AKTIF\n\n` +
-                `Semua video melebihi 30 saat yang anda hantar selepas ini akan dipotong secara automatik kepada bahagian 29.5 saat HD (Part 1, 2, 3...) supaya boleh dimuat naik terus ke WhatsApp Status tanpa pecah.\n\n` +
+                `✓ MOD WHATSAPP STATUS AUTO-POTONG 60S HD (WASPLIT) AKTIF\n\n` +
+                `Semua video melebihi 60 saat yang anda hantar selepas ini akan dipotong secara automatik kepada bahagian 59.5 saat 60fps HD (Part 1, 2, 3...) mengikut had 1 minit WhatsApp Status.\n\n` +
                 `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
                 `• Hantar /wa untuk mod Video Penuh, atau /mode untuk senarai mod.`,
                 msgId
             );
         } else {
             await sendTelegramMessage(chatId,
-                `Mod pilihan ditetapkan ke WhatsApp Status Auto-Potong 30s HD (WASPLIT), namun anda belum mempunyai langganan active.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99 / 30 Hari).`,
+                `Mod pilihan ditetapkan ke WhatsApp Status Auto-Potong 60s HD (WASPLIT), namun anda belum mempunyai langganan active.\n\nBalas 1 untuk WhatsApp Status HD (RM11.99 / 30 Hari).`,
                 msgId
             );
         }
@@ -7115,9 +7121,9 @@ async function handleTelegramMessage(tgMsg) {
             const waExp = isSuperAdmin ? 'Tanpa Had (Super Admin)' : new Date(user.waExpiredAt).toLocaleDateString('ms-MY');
             await sendTelegramMessage(chatId,
                 `✓ MOD WHATSAPP STATUS HD (VIDEO PENUH) AKTIF\n\n` +
-                `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil WhatsApp Status HD (Video Penuh <14.5MB + Foto QHD+).\n\n` +
+                `Semua video dan foto yang anda hantar selepas ini akan diproses menggunakan profil WhatsApp Status HD (720p 60fps CRF+VBV + Foto QHD+).\n\n` +
                 `• Status WhatsApp HD: Aktif sehingga ${waExp}\n` +
-                `• Hantar /wasplit untuk mod Auto-Potong 30s HD, atau /mode untuk senarai mod.`,
+                `• Hantar /wasplit untuk mod Auto-Potong 60s HD, atau /mode untuk senarai mod.`,
                 msgId
             );
         } else if (ttActive) {
@@ -7264,7 +7270,7 @@ async function handleTelegramMessage(tgMsg) {
                 ? 'TikTok 10-bit HDR10+ Glow (Superadmin)'
                 : (currentMode === 'TT'
                     ? 'TikTok Crystal 1080p SDR (Superadmin)'
-                    : (currentMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 30s HD' : 'WhatsApp Status HD (Video Penuh)'));
+                    : (currentMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
 
             await sendTelegramMessage(chatId,
                 `✓ SELAMAT KEMBALI KE ${BOT_NAME} (TELEGRAM)\n\n` +
@@ -7274,7 +7280,7 @@ async function handleTelegramMessage(tgMsg) {
                 `• Kod Referral: ${user.refCode}\n\n` +
                 `Panduan Ringkas:\n` +
                 `• Hantar video atau foto sebagai File (tanpa compression, maks 20 MB mengikut had Telegram Bot API).\n` +
-                `• Taip /mode untuk pilih antara /wa (Video Penuh) atau /wasplit (Auto-Potong 30s HD).\n` +
+                `• Taip /mode untuk pilih antara /wa (Video Penuh) atau /wasplit (Auto-Potong 60s HD).\n` +
                 `• Ada langganan WhatsApp sedia ada? Taip /link <KOD_REFERRAL_WA_ANDA>.`,
                 msgId
             );
@@ -7317,7 +7323,7 @@ async function handleTelegramMessage(tgMsg) {
                 ? 'TikTok 10-bit HDR10+ Glow (Superadmin)'
                 : (curMode === 'TT'
                     ? 'TikTok Crystal 1080p SDR (Superadmin)'
-                    : (curMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 30s HD' : 'WhatsApp Status HD (Video Penuh)'));
+                    : (curMode === 'WASPLIT' ? 'WhatsApp Status Auto-Potong 60s HD (Part 1, 2, 3...)' : 'WhatsApp Status HD (Video Penuh)'));
             await sendTelegramMessage(chatId,
                 `✓ STATUS KEAHLIAN ANDA\n\n` +
                 `• Nama: ${user.name}\n` +
@@ -7510,9 +7516,9 @@ async function handleTelegramMessage(tgMsg) {
                             msgId
                         );
                     } else {
-                        if (targetMode === 'WASPLIT' && durationSec > 300) {
+                        if (targetMode === 'WASPLIT' && durationSec > 360) {
                             await sendTelegramMessage(chatId,
-                                `⚠️ Video melebihi 5 minit. Sila hantar video bawah 5 minit untuk mod WASPLIT.`,
+                                `⚠️ Video melebihi 6 minit. Sila hantar video bawah 6 minit untuk mod WASPLIT.`,
                                 msgId
                             );
                             return;
@@ -7522,14 +7528,15 @@ async function handleTelegramMessage(tgMsg) {
                             ? `⚠️ Nota Penting: Video asal dikesan telah dimampatkan sebelum sampai ke bot. Hantar sebagai File tanpa compression untuk ketajaman maksimum.\n\n`
                             : '';
 
-                        if (targetMode === 'WASPLIT' && durationSec > 30.5) {
+                        if (targetMode === 'WASPLIT' && durationSec > 60.5) {
                             cleanupStaleTempMedia(15 * 60 * 1000);
-                            const segmentSec = 29.5;
+                            const segmentSec = 59.5;
                             const totalParts = Math.ceil(durationSec / segmentSec);
+                            const { targetFps: waFps } = getWaBaseSpec(sourceFps);
                             for (let partIndex = 0; partIndex < totalParts; partIndex++) {
                                 const startSec = (partIndex * segmentSec).toFixed(3);
                                 const clipDur = Math.min(segmentSec, Math.max(0.5, durationSec - partIndex * segmentSec)).toFixed(3);
-                                const partFileName = `WA_Status_Part${partIndex + 1}of${totalParts}_${Date.now()}.mp4`;
+                                const partFileName = `WA_Status_Part${partIndex + 1}of${totalParts}_${waFps}fps_${Date.now()}.mp4`;
                                 const partPath = path.join(TEMP_DIR, partFileName);
                                 generatedParts.push(partPath);
                                 try {
@@ -7541,7 +7548,7 @@ async function handleTelegramMessage(tgMsg) {
                             }
                             incrementStat('videosProcessed');
                             await sendTelegramMessage(chatId,
-                                `${waPreCompNotice}✅ Siap! Video dipotong kepada ${totalParts} bahagian HD (29.5s setiap satu). Simpan video di atas ke Galeri dan muat naik ke WhatsApp Status mengikut turutan Part 1 ➔ Part ${totalParts} tanpa menambah teks/sticker dalam editor WhatsApp.`,
+                                `${waPreCompNotice}✅ Siap! Video dipotong kepada ${totalParts} bahagian HD (59.5s setiap satu). Simpan video di atas ke Galeri dan muat naik ke WhatsApp Status mengikut turutan Part 1 ➔ Part ${totalParts} tanpa menambah teks/sticker dalam editor WhatsApp.`,
                                 msgId
                             );
                         } else {
@@ -7552,10 +7559,13 @@ async function handleTelegramMessage(tgMsg) {
                             await transcodeWaStatusVideo(inputPath, outputPath, ffmpegPath, probeInfo);
                             await sendTelegramMedia(chatId, 'video', outputPath, null, msgId);
                             const shortFallbackNote = isShortSplitFallback
-                                ? `ℹ️ Video anda sudah bawah 30 saat (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video penuh HD tanpa perlu dipotong.\n\n`
+                                ? `ℹ️ Video anda sudah muat dalam had 60 saat WhatsApp Status (${durationSec.toFixed(1)}s), jadi ia diproses terus sebagai 1 video penuh HD tanpa perlu dipotong.\n\n`
                                 : '';
+                            const longVideoSplitTip = durationSec > 65
+                                ? `\n• Tip: Video ini melebihi 60 saat (${Math.round(durationSec)}s). Hantar /wasplit jika mahu potong automatik setiap 59.5 saat HD.`
+                                : `\n• Video panjang >60s? Hantar /wasplit untuk potong automatik 59.5s HD.`;
                             await sendTelegramMessage(chatId,
-                                `${waPreCompNotice}${shortFallbackNote}✅ Video WhatsApp Status HD (720p ${waFps}fps) Siap!\n\n1. Simpan video di atas ke Galeri.\n2. Muat naik terus ke WhatsApp Status tanpa menambah teks, sticker, atau lagu dalam editor WhatsApp (supaya WhatsApp tidak memampatkan semula video anda).\n• Video panjang >30s? Hantar /wasplit untuk potong automatik 29.5s HD.`,
+                                `${waPreCompNotice}${shortFallbackNote}✅ Video WhatsApp Status HD (720p ${waFps}fps) Siap!\n\n1. Simpan video di atas ke Galeri.\n2. Muat naik terus ke WhatsApp Status tanpa menambah teks, sticker, atau lagu dalam editor WhatsApp (supaya WhatsApp tidak memampatkan semula video anda).${longVideoSplitTip}`,
                                 msgId
                             );
                         }
