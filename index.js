@@ -680,10 +680,31 @@ const msgRetryCounterCache = {
 };
 
 const MSG_CACHE_FILE = path.join(DATA_DIR, 'msg_cache.json');
-const MAX_CACHED_MESSAGES = 300;
+const MAX_CACHED_MESSAGES = 1000;
 const cachedMessages = new Map();
+const sentMessageStore = new Map();
 let msgCacheSaveTimer = null;
 let isShuttingDown = false;
+
+function rememberSentMessage(sentMsg) {
+    const id = sentMsg?.key?.id;
+    const message = sentMsg?.message;
+    if (!id || !message) return;
+    if (sentMessageStore.has(id)) sentMessageStore.delete(id);
+    sentMessageStore.set(id, message);
+    while (sentMessageStore.size > 1000) {
+        const oldestKey = sentMessageStore.keys().next().value;
+        sentMessageStore.delete(oldestKey);
+    }
+    storeCachedMessage(id, message);
+}
+
+function getStoredMessage(key) {
+    const id = key?.id;
+    if (!id) return undefined;
+    if (sentMessageStore.has(id)) return sentMessageStore.get(id);
+    return getCachedProtoMessage(id);
+}
 
 function loadMsgCache() {
     try {
@@ -822,6 +843,9 @@ function gracefulShutdown(signal) {
     isShuttingDown = true;
     console.log(`[Shutdown] Received ${signal}. Flushing msg_cache.json and closing WhatsApp socket...`);
     flushMsgCache();
+    try {
+        currentSock?.ws?.close();
+    } catch {}
     try {
         if (currentSock) currentSock.end(undefined);
     } catch {}
@@ -5311,10 +5335,15 @@ async function startBot() {
         markOnlineOnConnect: false,
         msgRetryCounterCache,
         retryRequestDelayMs: 500,
-        getMessage: async (key) => {
-            return (key && key.id) ? getCachedProtoMessage(key.id) : undefined;
-        }
+        getMessage: async (key) => getStoredMessage(key)
     });
+
+    const origSendMessage = sock.sendMessage.bind(sock);
+    sock.sendMessage = async (...args) => {
+        const res = await origSendMessage(...args);
+        rememberSentMessage(res);
+        return res;
+    };
 
     currentSock = sock;
     ensureHttpServer();
